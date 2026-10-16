@@ -1,0 +1,157 @@
+{
+  "schema": "althea-mount-expedition-texts-v1",
+  "source_sha256": "844423f8594c57dcd3bdf6c5b68367bce6b38ef90a7c1d69fe37225c1dd4afb0",
+  "core_equipment_text": "Nasazen\u00ed vy\u017eaduje maxim\u00e1ln\u00ed \u00farove\u0148 Du\u0161e a dokon\u010den\u00ed v\u0161ech v\u00fdprav.",
+  "tasks": [
+    {
+      "element_id": 0,
+      "task_id": 101,
+      "text": "Zabij {target} ohniv\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 0,
+      "task_id": 102,
+      "text": "Vyl\u00edhni {target} vajec \u010derven\u00e9ho draka."
+    },
+    {
+      "element_id": 0,
+      "task_id": 103,
+      "text": "\u00dasp\u011b\u0161n\u011b spoj {target}x \u0161erpu."
+    },
+    {
+      "element_id": 0,
+      "task_id": 104,
+      "text": "Vyrob {target} Magick\u00fdch kamen\u016f +5 %."
+    },
+    {
+      "element_id": 0,
+      "task_id": 105,
+      "text": "\u00dasp\u011b\u0161n\u011b vylep\u0161i {target} kamen\u016f na +5."
+    },
+    {
+      "element_id": 1,
+      "task_id": 101,
+      "text": "Zabij {target} ledov\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 1,
+      "task_id": 102,
+      "text": "\u00dasp\u011b\u0161n\u011b dokon\u010di {target} dungeon\u016f."
+    },
+    {
+      "element_id": 1,
+      "task_id": 103,
+      "text": "\u00da\u010dastni se {target} \u00fasp\u011b\u0161n\u00fdch por\u00e1\u017eek Maelstroma."
+    },
+    {
+      "element_id": 1,
+      "task_id": 104,
+      "text": "\u00dasp\u011b\u0161n\u011b vylep\u0161i {target}x p\u0159edm\u011bt \u00farovn\u011b 75+."
+    },
+    {
+      "element_id": 1,
+      "task_id": 105,
+      "text": "\u00dasp\u011b\u0161n\u011b ulov {target} ryb."
+    },
+    {
+      "element_id": 2,
+      "task_id": 101,
+      "text": "Zabij {target} bleskov\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 2,
+      "task_id": 102,
+      "text": "Vyl\u00edhni {target} vajec modr\u00e9ho draka."
+    },
+    {
+      "element_id": 2,
+      "task_id": 103,
+      "text": "Dokon\u010di {target} knih mis\u00ed."
+    },
+    {
+      "element_id": 2,
+      "task_id": 104,
+      "text": "{target}x vylep\u0161i schopnost ve strom\u011b."
+    },
+    {
+      "element_id": 2,
+      "task_id": 105,
+      "text": "\u00dasp\u011b\u0161n\u011b vyrob {target} taveb."
+    },
+    {
+      "element_id": 3,
+      "task_id": 101,
+      "text": "Zabij {target} v\u011btrn\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 3,
+      "task_id": 102,
+      "text": "Zni\u010d {target} meteor\u016f."
+    },
+    {
+      "element_id": 3,
+      "task_id": 103,
+      "text": "\u00dasp\u011b\u0161n\u011b vyrob {target} d\u00e1vek ros."
+    },
+    {
+      "element_id": 3,
+      "task_id": 104,
+      "text": "\u00dasp\u011b\u0161n\u011b dokon\u010di {target} biologick\u00fdch v\u00fdzkum\u016f."
+    },
+    {
+      "element_id": 3,
+      "task_id": 105,
+      "text": "Naexpi {target} r\u016fzn\u00fdch druh\u016f pet\u016f z alba na maxim\u00e1ln\u00ed \u00farove\u0148."
+    },
+    {
+      "element_id": 4,
+      "task_id": 101,
+      "text": "Zabij {target} zemsk\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 4,
+      "task_id": 102,
+      "text": "\u00da\u010dastni se {target} \u00fasp\u011b\u0161n\u00fdch por\u00e1\u017eek P\u00e1na chamtivosti."
+    },
+    {
+      "element_id": 4,
+      "task_id": 103,
+      "text": "Vyt\u011b\u017e {target} kus\u016f rudy."
+    },
+    {
+      "element_id": 4,
+      "task_id": 104,
+      "text": "\u00dasp\u011b\u0161n\u011b vylep\u0161i {target}x libovoln\u00fd talisman."
+    },
+    {
+      "element_id": 4,
+      "task_id": 105,
+      "text": "Vyrob {target} Opasek rub\u00ednov\u00e9 pavu\u010diny +0."
+    },
+    {
+      "element_id": 5,
+      "task_id": 101,
+      "text": "Zabij {target} temn\u00fdch mob\u016f."
+    },
+    {
+      "element_id": 5,
+      "task_id": 102,
+      "text": "Pou\u017eij {target}x du\u0161i bosse."
+    },
+    {
+      "element_id": 5,
+      "task_id": 103,
+      "text": "Dokon\u010di {target} denn\u00edch \u00fakol\u016f."
+    },
+    {
+      "element_id": 5,
+      "task_id": 104,
+      "text": "Vyrob {target} legend\u00e1rn\u00edch Cor Draconis."
+    },
+    {
+      "element_id": 5,
+      "task_id": 105,
+      "text": "\u00dasp\u011b\u0161n\u011b vylep\u0161i {target}x raritu."
+    }
+  ]
+}

@@ -1,0 +1,279 @@
+{
+  "groups": [
+    {
+      "name": "Divok\u00e1 sme\u010dka",
+      "bonus": "S\u00edla proti p\u0159\u00ed\u0161er\u00e1m"
+    },
+    {
+      "name": "D\u011bti metin\u016f",
+      "bonus": "S\u00edla proti metin\u016fm"
+    },
+    {
+      "name": "Potomci vl\u00e1dc\u016f",
+      "bonus": "S\u00edla proti boss\u016fm"
+    },
+    {
+      "name": "Dru\u017eina ar\u00e9ny",
+      "bonus": "S\u00edla proti pololidem"
+    },
+    {
+      "name": "\u017delezn\u00ed ochr\u00e1nci",
+      "bonus": "Odolnost proti pololidem"
+    },
+    {
+      "name": "Mist\u0159i zbran\u00ed",
+      "bonus": "Pr\u016fm\u011brn\u00e9 po\u0161kozen\u00ed"
+    },
+    {
+      "name": "Duchov\u00e9 schopnost\u00ed",
+      "bonus": "Po\u0161kozen\u00ed schopnost\u00ed"
+    }
+  ],
+  "pets": [
+    {
+      "id": "pet-01-01",
+      "name": "Vl\u010d\u00ed ml\u00e1d\u011b",
+      "group": 0,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-01-02",
+      "name": "Obrn\u011bn\u00fd kanec",
+      "group": 0,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-01-03",
+      "name": "Or\u010d\u00ed zv\u011bd",
+      "group": 0,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-01-04",
+      "name": "Tygr z Pomez\u00ed",
+      "group": 0,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-01-05",
+      "name": "Dra\u010d\u00ed str\u00e1\u017ece",
+      "group": 0,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-02-01",
+      "name": "Kamenn\u00e9 ml\u00e1d\u011b",
+      "group": 1,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-02-02",
+      "name": "Jadeitov\u00fd brouk",
+      "group": 1,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-02-03",
+      "name": "P\u00edse\u010dn\u00fd \u0161korpion",
+      "group": 1,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-02-04",
+      "name": "Ledov\u00fd golem",
+      "group": 1,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-02-05",
+      "name": "J\u00e1dro zk\u00e1zy",
+      "group": 1,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-03-01",
+      "name": "Mini opice",
+      "group": 2,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-03-02",
+      "name": "Mini pavouk",
+      "group": 2,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-03-03",
+      "name": "Ledov\u00fd pobo\u010dn\u00edk",
+      "group": 2,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-03-04",
+      "name": "\u017dhav\u00fd pobo\u010dn\u00edk",
+      "group": 2,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-03-05",
+      "name": "Dra\u010d\u00ed pobo\u010dn\u00edk",
+      "group": 2,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-04-01",
+      "name": "Mal\u00fd v\u00e1le\u010dn\u00edk",
+      "group": 3,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-04-02",
+      "name": "Pavou\u010d\u00ed bojovn\u00edk",
+      "group": 3,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-04-03",
+      "name": "Or\u010d\u00ed \u0161ampion",
+      "group": 3,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-04-04",
+      "name": "Rud\u00fd duelant",
+      "group": 3,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-04-05",
+      "name": "D\u00e9mon ar\u00e9ny",
+      "group": 3,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-05-01",
+      "name": "\u017delv\u00ed str\u00e1\u017ece",
+      "group": 4,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-05-02",
+      "name": "Kamenn\u00fd \u0161t\u00edtono\u0161",
+      "group": 4,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-05-03",
+      "name": "Jadeitov\u00e1 \u017eelva",
+      "group": 4,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-05-04",
+      "name": "Ledov\u00fd obr\u00e1nce",
+      "group": 4,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-05-05",
+      "name": "Str\u00e1\u017ece Sungmahi",
+      "group": 4,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-07-01",
+      "name": "Opi\u010d\u00ed \u0161erm\u00ed\u0159",
+      "group": 5,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-07-02",
+      "name": "Ocelov\u00fd kanec",
+      "group": 5,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-07-03",
+      "name": "Or\u010d\u00ed seker\u00e1\u0159",
+      "group": 5,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-07-04",
+      "name": "\u0160arlatov\u00fd lovec",
+      "group": 5,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-07-05",
+      "name": "\u017delezn\u00fd drak",
+      "group": 5,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    },
+    {
+      "id": "pet-08-01",
+      "name": "Plamenn\u00fd duch",
+      "group": 6,
+      "rarity": 0,
+      "rarity_name": "B\u011b\u017en\u00fd"
+    },
+    {
+      "id": "pet-08-02",
+      "name": "Jadeitov\u00fd had",
+      "group": 6,
+      "rarity": 1,
+      "rarity_name": "Neobvykl\u00fd"
+    },
+    {
+      "id": "pet-08-03",
+      "name": "Ledov\u00fd p\u0159\u00edzrak",
+      "group": 6,
+      "rarity": 2,
+      "rarity_name": "Vz\u00e1cn\u00fd"
+    },
+    {
+      "id": "pet-08-04",
+      "name": "D\u00e9monick\u00fd u\u010de\u0148",
+      "group": 6,
+      "rarity": 3,
+      "rarity_name": "Epick\u00fd"
+    },
+    {
+      "id": "pet-08-05",
+      "name": "Drak du\u0161\u00ed",
+      "group": 6,
+      "rarity": 4,
+      "rarity_name": "Legend\u00e1rn\u00ed"
+    }
+  ]
+}
