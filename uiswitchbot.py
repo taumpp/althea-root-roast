@@ -18,9 +18,13 @@ import chat
 import mountcorebonus
 from marketfilters import folded
 import switchbotelements
+import switchbottransfer
 import bonuscatalog
-from switchbotoptions import options as selectedOptions, instantOptions, RecommendedScroll
+import switchbotrefusals
+from switchbotoptions import options as selectedOptions, instantOptions, RecommendedScroll, SameKind, HeldScroll, memory as attributeMemory
 import uiswitchbotcontrols as controls
+import uir1
+import uiwheel
 from uicrimsonember import SettingsScrollBar
 
 COLOR_INACTIVE = grp.GenerateColor(1.0, 0.0, 0.0, 0.2)
@@ -48,6 +52,7 @@ BOT_PANEL_HEIGHT = 40
 BOT_PANEL_WIDTH = BOARD_WIDTH - BORDER_SPACE * 2
 
 ATTR_SLOT_COUNT = 5
+INSTANT_SIDE_GAP = 10	# the Instaswitchbot opens beside the switchbot (R1 preview 9. 10. 2026)
 
 BOARD_HEIGHT = BORDER_SPACE_TOP + TOP_PANEL_HEIGHT + MAIN_PANEL_HEIGHT + BOT_PANEL_HEIGHT + BORDER_SPACE + 58
 
@@ -55,6 +60,16 @@ def ShowSlotLockedMessage():
 	# Unknown catalog data is loading, not confirmation of a VIP lock.
 	if bonuscatalog.IsReady():
 		chat.AppendChat(chat.CHAT_TYPE_INFO, uiScriptLocale.SWITCHBOT_VIP_SLOT_LOCKED)
+	else:
+		code = {'waiting': 'CATALOG_WAITING', 'error': 'CATALOG_ERROR'}.get(
+			bonuscatalog.receiver.state, 'CATALOG_LOADING')
+		chat.AppendChat(chat.CHAT_TYPE_INFO, switchbotrefusals.LocalMessage(code))
+		bonuscatalog.receiver.Retry()
+
+def ShowEmptyOptionsMessage(catalog):
+	if catalog and catalog['item_id'] and not catalog['values'] and not catalog.get('emptyExplained'):
+		chat.AppendChat(chat.CHAT_TYPE_INFO, switchbotrefusals.LocalMessage('OPTIONS_EMPTY'))
+		catalog['emptyExplained'] = True
 
 def FormatFee(fee):
 	"""Instant fee from the server catalog, grouped by thousands ("-" if unknown)."""
@@ -76,11 +91,13 @@ def ElementLimitNote(allowance):
 	except (TypeError, ValueError):
 		return text
 
-def AppendAttributeChoices(wnd, catalog, selectedTypes, otherSelectedTypes):
+def AttributeChoices(catalog, selectedTypes, otherSelectedTypes):
+	# The entries of the bonus picker in its order: (kind, name, keywords, enabled, note).
 	# One item may carry every element its slot offers (ALTHEA-591). An element
 	# beyond that allowance stays visible but greyed out with the reason.
 	catalogTypes = [kind for kind, value in catalog]
 	allowance = switchbotelements.Allowance(catalogTypes)
+	choices = []
 	for (kind, value) in switchbotelements.Ordered(list(catalog)):
 		if kind in selectedTypes:
 			continue
@@ -88,8 +105,62 @@ def AppendAttributeChoices(wnd, catalog, selectedTypes, otherSelectedTypes):
 		if not affectString:
 			continue
 		enabled = not switchbotelements.Blocked(kind, otherSelectedTypes, catalogTypes)
-		wnd.AppendItem(kind, affectString, switchbotelements.SearchKeywords(kind),
-			enabled, "" if enabled else ElementLimitNote(allowance))
+		choices.append((kind, affectString, switchbotelements.SearchKeywords(kind),
+			enabled, "" if enabled else ElementLimitNote(allowance)))
+	return choices
+
+def AppendAttributeChoices(wnd, catalog, selectedTypes, otherSelectedTypes):
+	for choice in AttributeChoices(catalog, selectedTypes, otherSelectedTypes):
+		wnd.AppendItem(*choice)
+
+def WheelChoices(catalog, selectedTypes, index):
+	# The bonus types the wheel steps through in row ``index``: the picker's list of that
+	# row in its order (the bonuses of the variant's other rows left out, an element over
+	# the limit skipped: it cannot be picked), the row's own bonus at its place in it.
+	current = selectedTypes[index]
+	other = [kind for position, kind in enumerate(selectedTypes) if position != index]
+	return [(kind, name) for (kind, name, keywords, enabled, note) in AttributeChoices(catalog, other, other)
+		if enabled or (current and kind == current)]
+
+def StepChoice(entries, current, delta):
+	# One wheel notch through a list in its order: up (delta > 0) = the entry above, down =
+	# the one below; None at the end of the list (clamped) or for no notch. Nothing chosen
+	# yet stands above the first entry.
+	if not delta or not entries:
+		return None
+	if current in entries:
+		position = entries.index(current) + (-1 if delta > 0 else 1)
+		return entries[position] if 0 <= position < len(entries) else None
+	return None if delta > 0 else entries[0]
+
+def StepValue(values, current, delta):
+	# One wheel notch through the allowed values (the value picker's): up = the next higher
+	# value, down = the next lower one (numeric order);
+	# a typed value between two allowed ones steps to its neighbour; None at max / min (clamped).
+	values = sorted(set(values))
+	if not delta or not values:
+		return None
+	if delta > 0:
+		higher = [value for value in values if value > current]
+		return higher[0] if higher else None
+	lower = [value for value in values if value < current]
+	return lower[-1] if lower else None
+
+
+def PresetAttributes(config, alternative):
+	# A saved preset ("Uložené předvolby") is one variant's bonuses. Since 9. 10. 2026
+	# Uložit stores the shown variant in the preset's first row (the other rows empty); an older
+	# preset keeps every variant: its row of the same variant when that one is set, otherwise its
+	# first set row (a preset saved from Varianta 1 loads into Varianta 2 as well).
+	rows = config.get("alternatives") or []
+	def configured(row):
+		return any(pair[0] for pair in row)
+	if 0 <= alternative < len(rows) and configured(rows[alternative]):
+		return rows[alternative]
+	for row in rows:
+		if configured(row):
+			return row
+	return rows[0] if rows else []
 
 
 class SwitchbotItemTab(ui.ThinBoardCircle):
@@ -109,6 +180,7 @@ class SwitchbotItemTab(ui.ThinBoardCircle):
 		self.tooltipItem = None
 		self.onSelectEvent = None
 		self.locked = False
+		self.hadItem = False
 		
 		self.statusBar = None
 		self.itemSlot = None
@@ -269,9 +341,15 @@ class SwitchbotItemTab(ui.ThinBoardCircle):
 	def RefreshItemSlot(self):	
 		if self.IsEmpty():
 			switchbot.ClearSlot(self.slot_num)
+			if self.hadItem:
+				# The item left the slot: its bonuses go with it. An empty slot of a window just built, while the
+				# items of a warp are still on their way, keeps what the player set.
+				self.hadItem = False
+				attributeMemory.Forget(self.slot_num)
 			self.itemSlot.ClearSlot(0)
 			self.statusBar.Hide()
 		else:			
+			self.hadItem = True
 			itemCount = player.GetItemCount(player.SWITCHBOT, self.slot_num)
 			itemVnum = player.GetItemIndex(player.SWITCHBOT, self.slot_num)
 			if itemCount == 1:
@@ -346,7 +424,7 @@ class SwitchbotItemTab(ui.ThinBoardCircle):
 			
 class ClassicAttributeProvider:
 	GetAttribute = staticmethod(switchbot.GetAttribute)
-	SetAttribute = staticmethod(switchbot.SetAttribute)
+	SetAttribute = staticmethod(attributeMemory.SetAttribute)
 	IsActive = staticmethod(switchbot.IsActive)
 	Values = staticmethod(selectedOptions.Values)
 	Maximum = staticmethod(selectedOptions.Maximum)
@@ -380,7 +458,10 @@ class SwitchbotAttribute(ui.Window):
 		self.attributeValue = 0
 		
 		self.searchEvent = None
+		self.wheelChoicesEvent = None
+		self.wheelChooseEvent = None
 		self.attributeMaxValue = 0	
+		self.valueMenuValues = ()
 	
 		self.typeInput = None
 		self.typeTextLine = None
@@ -455,6 +536,9 @@ class SwitchbotAttribute(ui.Window):
 		self.valueEditLine.SetEscapeEvent(ui.__mem_func__(self.__OnEscapeEvent))
 		self.valuePicker = controls.ValuePicker()
 		self.valueArrow = controls.Arrow(self.valueInput, self.VALUE_WIDTH - 20, 4, self.OpenValues)
+		# The wheel over a field changes it without its picker (both looks: the R1 skin keeps these boards).
+		self.typeInput.OnMouseWheel = ui.__mem_func__(self.WheelType)
+		self.valueInput.OnMouseWheel = ui.__mem_func__(self.WheelValue)
 
 		
 	def Destroy(self):
@@ -468,8 +552,11 @@ class SwitchbotAttribute(ui.Window):
 		if getattr(self, "valuePicker", None):
 			self.valuePicker.Close()
 			
-	def RefreshAttributeRow(self, slot_num, alternative, index):
-		self.valuePicker.Close()
+	def RefreshAttributeRow(self, slot_num, alternative, index, keepValueMenu=False):
+		# keepValueMenu: a refresh that is not about this row (the Instaswitchbot redraws on every roll of the
+		# switchbot) leaves its open value menu open while the menu still lists the same choices.
+		if not (keepValueMenu and self.__ValueMenuStillValid(slot_num, alternative, index)):
+			self.valuePicker.Close()
 		self.selectedSlot = slot_num
 		self.alternative = alternative
 		self.index = index	
@@ -494,12 +581,24 @@ class SwitchbotAttribute(ui.Window):
 			
 		self.SetAttribute(affectString, value)
 
+	def __ValueMenuStillValid(self, slot_num, alternative, index):
+		# The open menu was built for this row's place, bonus and value list; it stays only if all of them are the same.
+		if not self.valuePicker.IsShow():
+			return False
+		if (slot_num, alternative, index) != (self.selectedSlot, self.alternative, self.index):
+			return False
+		if self.provider.IsActive(slot_num):
+			return False
+		kind = self.provider.GetAttribute(slot_num, alternative, index)[0]
+		return bool(kind) and tuple(sorted(set(self.provider.Values(slot_num, kind)))) == self.valueMenuValues
+
 	def OpenValues(self):
 		if self.provider.IsActive(self.selectedSlot):
 			return
 		kind = self.provider.GetAttribute(self.selectedSlot, self.alternative, self.index)[0]
 		values = self.provider.Values(self.selectedSlot, kind)
 		if values:
+			self.valueMenuValues = tuple(sorted(set(values)))
 			self.valuePicker.Toggle(self.valueInput, values, self.ChooseValue)
 
 	def ChooseValue(self, value):
@@ -509,6 +608,38 @@ class SwitchbotAttribute(ui.Window):
 		self.provider.SetAttribute(self.selectedSlot, self.alternative, self.index, kind, value)
 		self.SetAttribute(GetAffectString(kind, value), value)
 		self.__OnAttributeUpdate()
+
+	def SetWheelEvents(self, choices, choose):
+		# choices(index) -> [(kind, name)] in the picker's order; choose(index, kind, name): what picking does.
+		self.wheelChoicesEvent = choices
+		self.wheelChooseEvent = choose
+
+	def WheelType(self, delta):
+		# A notch over the bonus field: the bonus above (up) / below (down) in the picker's list, as if picked
+		# there. The field takes every notch; a running slot changes nothing (like its disabled picker).
+		if self.index < 0 or self.provider.IsActive(self.selectedSlot) or not self.wheelChoicesEvent:
+			return True
+		choices = self.wheelChoicesEvent(self.index)
+		kind = self.provider.GetAttribute(self.selectedSlot, self.alternative, self.index)[0]
+		target = StepChoice([choice[0] for choice in choices], kind, delta)
+		if target is None or not self.wheelChooseEvent:
+			return True
+		self.valuePicker.Close()
+		self.wheelChooseEvent(self.index, target, dict(choices)[target])
+		return True
+
+	def WheelValue(self, delta):
+		# A notch over the value field: the next higher (up) / lower (down) allowed value, clamped at max / min.
+		if self.index < 0 or self.provider.IsActive(self.selectedSlot):
+			return True
+		(kind, value) = self.provider.GetAttribute(self.selectedSlot, self.alternative, self.index)
+		if not kind:
+			return True
+		target = StepValue(self.provider.Values(self.selectedSlot, kind), value, delta)
+		if target is not None:
+			self.valuePicker.Close()
+			self.ChooseValue(target)
+		return True
 
 	def __OnEditLineIMEUpdate(self):
 		ui.EditLine.OnIMEUpdate(self.valueEditLine)
@@ -606,11 +737,17 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		self.stopButton = None
 		self.scrollPicker = None
 		self.instantWindow = None
+		self.rerollDialog = None
+		self.rerollSlot = -1
+		self.rerollRequest = None
 		self.lastItemVnums = {}
 		self.pendingPlacedItems = set()
+		self.r1 = None
+		self.r1Failed = getattr(self, "r1Failed", False)
 
 	def __LoadWindow(self):
 		self.AddFlag("movable")
+		self.AddFlag("float")
 		self.SetSize(BOARD_WIDTH, BOARD_HEIGHT)
 		self.SetTitleName(localeInfo.SWITCHBOT_TITLE)
 		
@@ -671,6 +808,7 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 			attr.Create(MAIN_PANEL_WIDTH, i)
 			attr.SetPosition(0, INPUT_HEIGHT + (INPUT_HEIGHT * i))
 			attr.SetSearchEvent(ui.__mem_func__(self.__OnSearchAttribute))
+			attr.SetWheelEvents(ui.__mem_func__(self.__AttributeWheelChoices), ui.__mem_func__(self.__ChooseAttribute))
 			attr.SetAttributeUpdateEvent(ui.__mem_func__(self.__OnAttributeUpdate))
 			attr.SetEscapeEvent(ui.__mem_func__(self.Close))
 			attr.Show()
@@ -729,7 +867,7 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		selectedOptions.changed = self.OptionsChanged
 		bonuscatalog.receiver.AddListener(self.BonusCatalogChanged)
 
-		self.SelectSlot(0)
+		self.SelectSlot(0, notify=False)
 			
 	def __BindEvents(self):
 		self.SetCloseEvent(ui.__mem_func__(self.Close))
@@ -737,20 +875,51 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		self.startButton.SetEvent(lambda arg = True : self.SetActive(arg))
 		self.stopButton.SetEvent(lambda arg = False : self.SetActive(arg))
 		self.saveButton.SetEvent(ui.__mem_func__(self.OpenSaveConfiguration))
+		self.__LoadR1()
+
+	def __LoadR1(self):
+		"""The R1 look (root/uiswitchbotr1.py) drawn into this window unless Settings -> "Starý vzhled" chose the
+		original look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uiswitchbotr1
+			self.r1 = uiswitchbotr1.SwitchbotSkin(self, localeInfo.SWITCHBOT_TITLE)
+		except Exception:
+			uir1.TraceFailure("the switchbot")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.Close()
 		bonuscatalog.receiver.RemoveListener(self.BonusCatalogChanged)
 		if self.scrollPicker:
 			self.scrollPicker.Destroy()
 		if self.instantWindow:
 			self.instantWindow.Destroy()
+		self.__OnRerollCancel()
+		self.rerollDialog = None
 		instantOptions.Reset()
 		if selectedOptions.changed == self.OptionsChanged:
 			selectedOptions.Reset()
 		self.__Initialize()
 
 	def Open(self):
+		self.__SyncLook()
+		if not bonuscatalog.IsReady():
+			ShowSlotLockedMessage()
 		self.Show()
 		self.SetTop()
 		self.SetCenterPosition()
@@ -759,7 +928,13 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 			if bonuscatalog.IsSlotAllowed(slot):
 				selectedOptions.Request(slot)
 
+	def OnUpdate(self):
+		# A request or its reply lost on the way (a warp) must not leave the rows empty until the window is
+		# reopened: occupied slots without options are asked for again, the reply refreshes the window.
+		selectedOptions.Retry()
+
 	def Close(self):
+		self.__OnRerollCancel()
 		if self.scrollPicker:
 			self.scrollPicker.Close()
 		if self.instantWindow:
@@ -780,9 +955,10 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		self.pendingPlacedItems.add(slot_num)
 		self.SelectSlot(slot_num)
 		
-	def SelectSlot(self, selectedSlot):
+	def SelectSlot(self, selectedSlot, notify=True):
 		if not bonuscatalog.IsSlotAllowed(selectedSlot):
-			ShowSlotLockedMessage()
+			if notify:
+				ShowSlotLockedMessage()
 			return
 
 		if self.scrollPicker:
@@ -797,6 +973,9 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		
 	def GetSelectedSlot(self):
 		return self.selectedSlot
+
+	def GetSelectedAlternative(self):
+		return self.alternative
 		
 	def SelectAlternative(self, alternative):
 		self.alternativeButtons[self.alternative].SetUp()	
@@ -824,26 +1003,75 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		else:
 			switchbot.Stop(self.selectedSlot)
 			
+	def AskReroll(self, slot):
+		"""the server refused to start a slot whose item already carries the bonuses (SLOT_MATCHED).
+		Ask the player; once he confirmed the start is repeated with the same configuration and rolls anyway.
+		Returns False when there is nothing to ask about (the caller then shows the plain refusal)."""
+		if not 0 <= slot < switchbot.SLOT_COUNT or switchbot.IsActive(slot) or \
+				not player.GetItemIndex(player.SWITCHBOT, slot):
+			return False
+		request = selectedOptions.BuildRequest(slot, force=True)
+		if request is None:
+			return False
+		import uiCommon
+		if not self.rerollDialog:
+			dialog = uiCommon.QuestionDialog2()
+			dialog.SetText1(uir1.Tr_(u"Předmět už má požadované bonusy.", "The item already has the requested bonuses."))
+			dialog.SetText2(uir1.Tr_(u"Opravdu chceš bonusy přetočit?", "Do you really want to reroll them?"))
+			dialog.SetAcceptText(uir1.Tr_(u"Přetočit", "Reroll"))
+			dialog.SetCancelText(uir1.Tr_(u"Zrušit", "Cancel"))
+			dialog.SetAcceptEvent(ui.__mem_func__(self.__OnRerollAccept))
+			dialog.SetCancelEvent(ui.__mem_func__(self.__OnRerollCancel))
+			self.rerollDialog = dialog
+		self.rerollSlot = slot
+		self.rerollRequest = request
+		self.rerollDialog.Open()
+		return True
+
+	def __OnRerollAccept(self):
+		self.__CloseRerollDialog()
+		slot, self.rerollSlot = self.rerollSlot, -1
+		request, self.rerollRequest = self.rerollRequest, None
+		if request is not None and 0 <= slot < switchbot.SLOT_COUNT and not switchbot.IsActive(slot):
+			selectedOptions.Start(slot, expected=request, force=True)
+
+	def __OnRerollCancel(self):
+		self.__CloseRerollDialog()
+		self.rerollSlot = -1
+		self.rerollRequest = None
+
+	def __CloseRerollDialog(self):
+		if self.rerollDialog:
+			self.rerollDialog.Close()
+
 	def SelectScroll(self, vnum):
 		if switchbot.IsActive(self.selectedSlot):
 			return
-		if vnum != selectedOptions.Scroll(self.selectedSlot):
-			for alternative in range(switchbot.ALTERNATIVE_COUNT):
-				for index in range(ATTR_SLOT_COUNT):
-					switchbot.SetAttribute(self.selectedSlot, alternative, index, 0, 0)
+		if not SameKind(vnum, selectedOptions.Scroll(self.selectedSlot)):
+			self.__ClearSlotAttributes(self.selectedSlot)
 		selectedOptions.Request(self.selectedSlot, vnum)
 		self.RefreshSwitchbotWindow()
 
+	def __ClearSlotAttributes(self, slot):
+		for alternative in range(switchbot.ALTERNATIVE_COUNT):
+			for index in range(ATTR_SLOT_COUNT):
+				attributeMemory.SetAttribute(slot, alternative, index, 0, 0)
+
 	def OptionsChanged(self, slot):
-		if not switchbot.IsActive(slot):
+		# The bonuses are trimmed only against the options of the item that is in the slot now; options that have
+		# not arrived (or belong to another item) are no reason to throw the player's bonuses away.
+		catalog = selectedOptions.Catalog(slot)
+		if catalog and not switchbot.IsActive(slot):
 			for alternative in range(switchbot.ALTERNATIVE_COUNT):
 				for index in range(ATTR_SLOT_COUNT):
 					kind, value = switchbot.GetAttribute(slot, alternative, index)
+					if not kind:
+						continue
 					maximum = selectedOptions.Maximum(slot, kind)
-					if not maximum or index >= selectedOptions.Catalog(slot)['slots']:
-						switchbot.SetAttribute(slot, alternative, index, 0, 0)
+					if not maximum or index >= catalog['slots']:
+						attributeMemory.SetAttribute(slot, alternative, index, 0, 0)
 					elif value > maximum:
-						switchbot.SetAttribute(slot, alternative, index, kind, maximum)
+						attributeMemory.SetAttribute(slot, alternative, index, kind, maximum)
 		if slot == self.selectedSlot:
 			self.RefreshSwitchbotWindow()
 
@@ -859,7 +1087,10 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 	def OpenInstant(self):
 		if not self.instantWindow:
 			self.instantWindow = InstantSwitchbotWindow(self)
-		self.instantWindow.Open()
+		if self.instantWindow.IsShow():
+			self.instantWindow.Close()		# the button that opens a window closes it on a second click
+		else:
+			self.instantWindow.Open()
 
 	def OpenSaveConfiguration(self):
 		if not self.configurationSaveWindow:
@@ -907,6 +1138,8 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 			self.scrollPicker.Refresh(self.selectedSlot)
 		if self.instantWindow and self.instantWindow.IsShow():
 			self.instantWindow.Refresh()
+		if self.r1:
+			self.r1.Sync()
 		
 	def RefreshSwitchbotItem(self, slot):
 		itemTab = self.itemTabs.get(slot, None)
@@ -920,20 +1153,28 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 			self.scrollPicker.Refresh(self.selectedSlot)
 		if self.instantWindow and self.instantWindow.IsShow():
 			self.instantWindow.Refresh()
+		if self.r1:
+			self.r1.Sync()
 
 	def __RefreshItemOptions(self, slot, vnum):
 		if self.lastItemVnums.get(slot) == vnum and not (vnum and slot in self.pendingPlacedItems):
 			return
+		# Not a new item: the first look of this window at the slot, or after a new catalog or a warp.
+		sameItem = slot not in self.lastItemVnums
 		self.lastItemVnums[slot] = vnum
 		if not vnum:
 			selectedOptions.Request(slot)
 			return
 		self.pendingPlacedItems.discard(slot)
-		scroll = selectedOptions.Scroll(slot) if switchbot.IsActive(slot) else RecommendedScroll(vnum)
-		if scroll != selectedOptions.Scroll(slot):
-			for alternative in range(switchbot.ALTERNATIVE_COUNT):
-				for index in range(ATTR_SLOT_COUNT):
-					switchbot.SetAttribute(slot, alternative, index, 0, 0)
+		current = selectedOptions.Scroll(slot)
+		if switchbot.IsActive(slot):
+			scroll = current
+		elif sameItem and bonuscatalog.IsOfferedScroll(current):
+			scroll = HeldScroll(current)
+		else:
+			scroll = selectedOptions.Wanted(slot, vnum)
+		if current and not SameKind(scroll, current):
+			self.__ClearSlotAttributes(slot)
 		selectedOptions.Request(slot, scroll)
 		
 	def __RefreshItemSlots(self):
@@ -951,6 +1192,8 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 			self.alternativePanel.Show()
 			
 	def __RefreshAttributeRows(self):
+		if self.IsShow():
+			ShowEmptyOptionsMessage(selectedOptions.Catalog(self.selectedSlot))
 		for i in range(ATTR_SLOT_COUNT):
 			row = self.attrDict.get(i, None)
 			if not row:
@@ -1040,6 +1283,20 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 
 		self.attributeSearchWindow = wnd
 		
+	def __AttributeWheelChoices(self, attrIdx):
+		# the list the picker of row attrIdx offers (__OnSearchAttribute), in its order, with the row's own bonus
+		attributes = selectedOptions.Attributes(self.selectedSlot)
+		selectedAttributes = [switchbot.GetAttribute(self.selectedSlot, self.alternative, attrIndex)[0] for attrIndex in range(ATTR_SLOT_COUNT)]
+		return WheelChoices(attributes, selectedAttributes, attrIdx)
+
+	def __ChooseAttribute(self, attrIdx, key, value):
+		# the wheel over a bonus field: the same as picking that bonus in the row's picker; an open picker's list
+		# no longer matches the rows (its exclusions), so it is closed
+		if self.attributeSearchWindow and self.attributeSearchWindow.IsShow():
+			self.attributeSearchWindow.Close()
+		self.attrSearchIdx = attrIdx
+		self.__OnAcceptSearch(key, value)
+
 	def __OnAcceptSearch(self, key, value):
 		if self.attrSearchIdx < 0 or self.attrSearchIdx >= ATTR_SLOT_COUNT:
 			return
@@ -1051,7 +1308,7 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		maxValue = selectedOptions.Maximum(self.selectedSlot, key)
 			
 		attrRow.SetAttribute(value, maxValue)
-		switchbot.SetAttribute(self.selectedSlot, self.alternative, self.attrSearchIdx, key, maxValue)
+		attributeMemory.SetAttribute(self.selectedSlot, self.alternative, self.attrSearchIdx, key, maxValue)
 		
 		self.__RefreshButtons()
 		if self.instantWindow and self.instantWindow.IsShow():
@@ -1078,11 +1335,11 @@ class SwitchbotWindow(ui.BoardWithTitleBar):
 		catalog = selectedOptions.Catalog(slot)
 		maximum = selectedOptions.Maximum(slot, attrType)
 		if catalog and (not maximum or attrIndex >= catalog['slots']):
-			switchbot.SetAttribute(slot, alternative, attrIndex, 0, 0)
+			attributeMemory.SetAttribute(slot, alternative, attrIndex, 0, 0)
 		else:
 			if maximum:
 				attrValue = min(attrValue, maximum)
-			switchbot.SetAttribute(slot, alternative, attrIndex, attrType, attrValue)
+			attributeMemory.SetAttribute(slot, alternative, attrIndex, attrType, attrValue)
 
 		self.RefreshSwitchbotWindow()
 		
@@ -1216,7 +1473,25 @@ class SearchListWindow(ui.BoardWithTitleBar):
 		self.acceptEvent = None
 		self.acceptArgsType = "VALUE"
 		self.cancelEvent = None
+		self.r1 = None
 		
+	def SetTitleName(self, name):
+		ui.BoardWithTitleBar.SetTitleName(self, name)
+		if self.r1:
+			self.r1.SetTitle(name)
+
+	def __ApplyR1Look(self):
+		"""The R1 look (root/uiswitchbotsearchr1.py) drawn into this window unless Settings -> "Starý vzhled" chose
+		the original one; a failure traces to syserr and keeps the original window."""
+		if not uir1.UseR1():
+			return
+		try:
+			import uiswitchbotsearchr1
+			self.r1 = uiswitchbotsearchr1.Build(self)
+		except Exception:
+			uir1.TraceFailure("switchbot attribute picker")
+			self.r1 = None
+
 	def MakeWindow(self, width, height, maxInput = 50):
 		self.SetSize(width, height)
 		
@@ -1291,6 +1566,7 @@ class SearchListWindow(ui.BoardWithTitleBar):
 		self.cancelButton.Show()
 		
 		self.__AdjustScrollbar()
+		self.__ApplyR1Look()
 		
 	def __OnSearchIMEUpdate(self):
 		ui.EditLine.OnIMEUpdate(self.searchEditLine)
@@ -1316,6 +1592,8 @@ class SearchListWindow(ui.BoardWithTitleBar):
 			self.listBox.SetSize(listBoxWidth - 4, self.container.GetHeight() - 4)
 			self.listBox.SetItemSize(listBoxWidth - 4, self.SearchListItem.LIST_ITEM_HEIGHT)
 			self.scrollBar.Hide()
+		if self.r1:
+			self.r1.Sync()
 		
 	def RemoveAllItems(self):
 		self.listItems = {}
@@ -1403,11 +1681,7 @@ class SearchListWindow(ui.BoardWithTitleBar):
 	def OnMouseWheel(self, length):
 		if not self.scrollBar.IsShow():
 			return False
-		if length > 0:
-			self.scrollBar.OnUp()
-		else:
-			self.scrollBar.OnDown()
-		return True
+		return uiwheel.Scroll(self.scrollBar, length)	# one bonus per notch (the list's row step)
 		
 	def Open(self):
 		self.Show()
@@ -1499,6 +1773,9 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 	
 	listItems = {}
 	
+	r1 = None
+	r1Failed = False
+
 	def __init__(self, wndSwitchbot=None):
 		ui.BoardWithTitleBar.__init__(self)
 		
@@ -1509,11 +1786,37 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 		self.wndSwitchbot = wndSwitchbot
 		
 		self.__LoadWindow()
+		self.__LoadR1()
 		
 	def __del__(self):
 		ui.BoardWithTitleBar.__del__(self)
 		
+	def __LoadR1(self):
+		"""The R1 look (root/uiswitchbotpresetsr1.py) drawn into this window unless Settings -> "Starý vzhled" chose
+		the original look; a failure traces to syserr and keeps the original window (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uiswitchbotpresetsr1
+			self.r1 = uiswitchbotpresetsr1.Build(self)
+		except Exception:
+			uir1.TraceFailure("the switchbot presets")
+			self.r1 = None
+		if not self.r1:
+			self.r1Failed = True
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		if uir1.UseR1():
+			self.__LoadR1()
+		elif self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Destroy()
 		self.saveButton = None
 		self.nameInput = None
 		self.valueEditLine = None
@@ -1612,6 +1915,9 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 			
 			self.listItems[key] = line
 			
+		if self.r1:
+			self.r1.Sync()
+
 	def SaveConfigurations(self):
 		try:
 			presetstorage.save("switchbot", self.dict, switchbot.ALTERNATIVE_COUNT, player.ATTRIBUTE_SLOT_MAX_NUM)
@@ -1626,12 +1932,15 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 		if not self.wndSwitchbot:
 			return
 			
-		selectedSlot = self.wndSwitchbot.GetSelectedSlot()			
-		for alternativeIdx in range(len(config["alternatives"])):
-			alternative = config["alternatives"][alternativeIdx]
-			for attrIdx in range(len(alternative)):
-				(attrType, attrValue) = alternative[attrIdx]
-				self.wndSwitchbot.SetSavedAttribute(selectedSlot, alternativeIdx, attrIdx, attrType, attrValue)
+		# Načíst fills the variant shown (Varianta 1 | 2) of the selected slot; the other variant stays
+		# as it is (it previously went into Varianta 1 and wiped Varianta 2 with the preset's
+		# empty second row). SetSavedAttribute is the manual edit path: limits, memory, refresh.
+		selectedSlot = self.wndSwitchbot.GetSelectedSlot()
+		alternative = self.wndSwitchbot.GetSelectedAlternative()
+		attributes = PresetAttributes(config, alternative)
+		for attrIdx in range(len(attributes)):
+			(attrType, attrValue) = attributes[attrIdx]
+			self.wndSwitchbot.SetSavedAttribute(selectedSlot, alternative, attrIdx, attrType, attrValue)
 		
 	def __OnDeleteConfiguration(self, key):
 		config = self.dict.get(key, None)
@@ -1644,6 +1953,7 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 		self.LoadConfigurations()
 			
 	def Open(self):
+		self.__SyncLook()
 		self.Show()
 		self.LoadConfigurations()
 		self.AdjustPosition()
@@ -1651,6 +1961,11 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 	def Close(self):
 		self.Hide()
 		
+	def OnMouseWheel(self, length):
+		if not self.scrollBar or not self.scrollBar.IsShow():
+			return False
+		return uiwheel.Scroll(self.scrollBar, length)	# one preset per notch (the list's row step)
+
 	def AdjustPosition(self):
 		if not self.wndSwitchbot:
 			return 
@@ -1688,12 +2003,13 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 			
 		return key
 		
-	def __BuildDict(self, slot, name):	
+	def __BuildDict(self, slot, alternative, name):
+		# Uložit stores the variant shown, in the first row (the storage keeps one row per variant;
+		# the others stay empty), so Načíst can put it into either variant.
 		key = self.__GetNewKey()
-		alternatives = []
-		for alternative in range(switchbot.ALTERNATIVE_COUNT):
-			attributes = [switchbot.GetAttribute(slot, alternative, i) for i in range(player.ATTRIBUTE_SLOT_MAX_NUM)]
-			alternatives.append(attributes)
+		empty = [(0, 0)] * player.ATTRIBUTE_SLOT_MAX_NUM
+		alternatives = [[switchbot.GetAttribute(slot, alternative, i) for i in range(player.ATTRIBUTE_SLOT_MAX_NUM)]]
+		alternatives += [list(empty) for unused in range(switchbot.ALTERNATIVE_COUNT - 1)]
 		
 		new_dict = {
 			"name" : name,
@@ -1712,7 +2028,7 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 		if not name:
 			return
 		
-		(key, new_dict) = self.__BuildDict(selectedSlot, name)
+		(key, new_dict) = self.__BuildDict(selectedSlot, self.wndSwitchbot.GetSelectedAlternative(), name)
 		self.dict[key] = new_dict
 		
 		self.nameEditLine.SetText("")
@@ -1724,17 +2040,31 @@ class ConfigurationWindow(ui.BoardWithTitleBar):
 
 class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 	"""Inventory based instant reroller with its own target and bonus choices."""
+	# an item picked up from the slot is not dropped / given away on the ground or on a character
+	# (game.OnMouseLeftButtonUp), like an item picked up from a switchbot slot.
+	KEEPS_ITEM_ON_GROUND_DROP = True
+
 	def __init__(self, owner):
 		ui.BoardWithTitleBar.__init__(self)
 		self.owner = owner
 		self.AddFlag('movable')
+		self.AddFlag('float')		# a click brings it above the switchbot and the other windows
 		self.SetSize(374, 266)
 		self.SetTitleName('Instaswitchbot')
 		self.SetCloseEvent(self.Close)
+		self.r1 = None
+		self.r1Failed = False
+		# The R1 panels are drawn into this layer: made first, so they lie under the slot, the rows and the footer.
+		self.backdrop = ui.Window()
+		self.backdrop.SetParent(self)
+		self.backdrop.AddFlag('not_pick')
+		self.backdrop.SetSize(374, 266)
+		self.backdrop.Show()
 		self.rows = []
 		self.displayedVnum = 0
+		self.transfer = switchbottransfer.Transfer()
 		self.searchWindow = None
-		instantOptions.changed = self.Refresh
+		instantOptions.changed = ui.__mem_func__(self.OptionsChanged)
 		self.itemSlot = ui.GridSlotWindow()
 		self.itemSlot.SetParent(self)
 		self.itemSlot.SetPosition(9, 34)
@@ -1742,6 +2072,7 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 		self.itemSlot.SetSlotBaseImage('d:/ymir work/ui/public/slot_base.sub', 1, 1, 1, 1)
 		self.itemSlot.SetSelectEmptySlotEvent(self.AttachItem)
 		self.itemSlot.SetSelectItemSlotEvent(self.ClickItem)
+		self.itemSlot.SetUnselectItemSlotEvent(self.UseItem)
 		self.itemSlot.SetOverInItemEvent(self.OverItem)
 		self.itemSlot.SetOverOutItemEvent(self.OutItem)
 		self.itemSlot.Show()
@@ -1752,6 +2083,7 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 			row.Create(318, index)
 			row.SetPosition(48, 34 + index * INPUT_HEIGHT)
 			row.SetSearchEvent(self.Search)
+			row.SetWheelEvents(self.WheelChoices, self.WheelChoose)
 			row.SetAttributeUpdateEvent(self.Changed)
 			row.SetEscapeEvent(self.Close)
 			row.Show()
@@ -1765,22 +2097,109 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 		self.yangIcon.Show()
 		self.fee = controls.Text(self, 32, 237, FormatFee(bonuscatalog.InstantFee()))
 		self.start = controls.Button(self, 216, 232, 'Točit okamžitě', self.Start)
+		self.__LoadR1()
+
+	def __LoadR1(self):
+		"""The R1 look (root/uiswitchbotinstantr1.py, variant A) drawn into this window unless Settings -> "Starý
+		vzhled" chose the original look; a failure traces to syserr and keeps the original look (not retried)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uiswitchbotinstantr1
+			self.r1 = uiswitchbotinstantr1.InstantSkin(self)
+		except Exception:
+			uir1.TraceFailure("the Instaswitchbot")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
+	def Hide(self):
+		# ui.Window.__init__ already calls Hide(): nothing set in __init__ may be needed here
+		r1 = getattr(self, 'r1', None)
+		if r1:
+			r1.HideHint()
+		ui.BoardWithTitleBar.Hide(self)
+
+	def AdjustPosition(self):
+		"""Beside the switchbot, never over it (like the saved configurations beside it): right of it, left of it
+		when the screen has no room on the right, the top edges level."""
+		owner = self.owner
+		if not owner:
+			self.SetCenterPosition()
+			return
+		x, y = owner.GetGlobalPosition()
+		width, height = self.GetWidth(), self.GetHeight()
+		screenWidth, screenHeight = wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()
+		right = x + owner.GetWidth() + INSTANT_SIDE_GAP
+		if right + width <= screenWidth:
+			newX = right
+		elif x - INSTANT_SIDE_GAP - width >= 0:
+			newX = x - INSTANT_SIDE_GAP - width
+		else:
+			newX = max(0, screenWidth - width)
+		self.SetPosition(newX, max(0, min(y, screenHeight - height)))
 
 	def AttachItem(self, unused):
-		if not mouseModule.mouseController.isAttached() or instantOptions.running:
+		if not mouseModule.mouseController.isAttached() or instantOptions.running or self.transfer.pending is not None:
+			return
+		if mouseModule.mouseController.GetAttachedType() == player.SLOT_TYPE_SWITCHBOT:
+			if self.transfer.Begin(mouseModule.mouseController.GetAttachedSlotNumber()):
+				instantOptions.SetTarget(None)
+				mouseModule.mouseController.DeattachObject()
 			return
 		if mouseModule.mouseController.GetAttachedType() != player.SLOT_TYPE_INVENTORY:
 			return
 		cell = mouseModule.mouseController.GetAttachedSlotNumber()
 		mouseModule.mouseController.DeattachObject()
+		if cell == instantOptions.cell:
+			return		# put back where it was picked up: the target and its bonuses stay
 		if cell >= 0 and player.GetItemIndex(player.INVENTORY, cell):
 			instantOptions.SetTarget(cell)
 
 	def ClickItem(self, unused):
+		"""the left click as on a switchbot slot (SwitchbotItemTab.SelectItemSlot): the item on the cursor
+		(an inventory item: it can be dragged back into the switchbot, the inventory, ...); Alt pastes its link."""
+		if constInfo.GET_ITEM_QUESTION_DIALOG_STATUS() == 1:
+			return
 		if mouseModule.mouseController.isAttached():
 			self.AttachItem(0)
-		elif not instantOptions.running:
+			return
+		if instantOptions.running:
+			return
+		cell = instantOptions.cell
+		itemVnum = player.GetItemIndex(player.INVENTORY, cell) if cell is not None else 0
+		if not itemVnum:
+			return
+		if app.IsPressed(app.DIK_LALT):
+			if app.ENABLE_REFINE_ELEMENT_SYSTEM:
+				link = constInfo.GetItemLinkEx(cell, player.INVENTORY)
+			else:
+				link = player.GetItemLink(player.INVENTORY, cell)
+			ime.PasteString(link)
+		else:
+			itemCount = player.GetItemCount(player.INVENTORY, cell)
+			mouseModule.mouseController.AttachObject(self, player.SLOT_TYPE_INVENTORY, cell, itemVnum, itemCount)
+
+	def UseItem(self, unused):
+		"""the right click as on a switchbot slot (SwitchbotItemTab.UseItemSlot): the item back to the
+		inventory. It already lies there, so the slot just lets it go (the target is cleared)."""
+		if app.SELL == app.GetCursor():
+			return
+		if constInfo.GET_ITEM_QUESTION_DIALOG_STATUS() == 1:
+			return
+		if not instantOptions.running:
+			self.transfer.Cancel()
 			instantOptions.SetTarget(None)
+		mouseModule.mouseController.DeattachObject()
+		self.OutItem()
 
 	def OverItem(self, unused):
 		if instantOptions.cell is not None and player.GetItemIndex(player.INVENTORY, instantOptions.cell):
@@ -1795,14 +2214,23 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 			tooltip.HideToolTip()
 
 	def Open(self):
+		self.__SyncLook()
 		self.Refresh()
-		self.SetCenterPosition()
+		self.AdjustPosition()
 		self.SetTop()
 		self.Show()
 
 	def OnUpdate(self):
+		transferred = self.transfer.Poll()
+		if transferred is not None:
+			instantOptions.SetTarget(transferred)
 		cell = instantOptions.cell
 		vnum = player.GetItemIndex(player.INVENTORY, cell) if cell is not None else 0
+		if cell is not None and vnum != self.displayedVnum and self.displayedVnum and not instantOptions.running:
+			# the item left its cell (picked up and moved to the switchbot / elsewhere): the slot is empty,
+			# like a switchbot slot, and does not show what else comes into that cell later
+			instantOptions.SetTarget(None)
+			cell, vnum = None, 0
 		if vnum != self.displayedVnum:
 			self.Refresh()
 
@@ -1827,12 +2255,27 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 		wnd.Open()
 		self.searchWindow = wnd
 
+	def WheelChoices(self, index):
+		if not instantOptions.Catalog():
+			return []
+		return WheelChoices(instantOptions.Attributes(), [kind for kind, value in instantOptions.attrs], index)
+
+	def WheelChoose(self, index, kind, name):
+		# the wheel over a bonus field: the same as picking it in the row's picker (an open picker is stale)
+		if self.searchWindow:
+			self.searchWindow.Close()
+		self.searchIndex = index
+		self.ChooseAttribute(kind, name)
+
 	def ChooseAttribute(self, kind, name):
 		value = instantOptions.Maximum(None, kind)
 		instantOptions.SetAttribute(None, 0, self.searchIndex, kind, value)
 		self.rows[self.searchIndex].SetAttribute(name, value)
 
 	def Changed(self, unused):
+		self.Refresh()
+
+	def OptionsChanged(self):
 		self.Refresh()
 
 	def SelectScroll(self, vnum):
@@ -1851,8 +2294,10 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 		self.itemSlot.RefreshSlot()
 		self.picker.Refresh(None)
 		catalog = instantOptions.Catalog()
+		if self.IsShow():
+			ShowEmptyOptionsMessage(catalog)
 		for index, row in enumerate(self.rows):
-			row.RefreshAttributeRow(0, 0, index)
+			row.RefreshAttributeRow(0, 0, index, keepValueMenu=True)
 			if catalog and catalog['values'] and index < catalog['slots']:
 				row.Show()
 			else:
@@ -1862,6 +2307,8 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 			self.start.Enable()
 		else:
 			self.start.Disable()
+		if self.r1:
+			self.r1.Sync()
 
 	def Start(self):
 		request = instantOptions.BuildRequest()
@@ -1869,6 +2316,7 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 			instantOptions.Start(request)
 
 	def Close(self):
+		self.transfer.Cancel()
 		if self.searchWindow:
 			self.searchWindow.Close()
 			self.searchWindow = None
@@ -1878,7 +2326,14 @@ class InstantSwitchbotWindow(ui.BoardWithTitleBar):
 		self.Hide()
 		return True
 
+	def OnPressEscapeKey(self):
+		self.Close()
+		return True
+
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.Close()
 		self.picker.Destroy()
 		instantOptions.changed = None

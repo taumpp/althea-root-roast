@@ -242,7 +242,7 @@ class TaskRow(ui.Window):
 		self.progress.SetPosition(27, 45 + extra)
 		self.progress.SetValue(row["progress"], row["target"])
 		self.submit.SetPosition(130, 48 + extra)
-		self.submit.SetToolTipText(name + u" · " + row["reward_text"])
+		self.submit.SetToolTipText(name + u" | " + row["reward_text"])
 		self.divider.SetPosition(0, self.HEIGHT - 1)
 		self.canSubmit = row["event_kind"] == 3 and not row["complete"]
 		if self.canSubmit:

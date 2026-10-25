@@ -45,6 +45,31 @@ def format_time(seconds):
 	return "%02d:%02d" % (minutes, seconds)
 
 
+BIO_TOP = 49
+BAND_HEIGHT = 21
+
+
+def dungeon_band_top(bio_rows):
+	"""The Dungeony band sits under the Biolog rows (or in the Biolog band's place when Biolog is not tracked)."""
+	bio_rows = max(0, _whole_number(bio_rows))
+	return BIO_TOP + bio_rows * ROW_HEIGHT + 2 if bio_rows else BIO_TOP - BAND_HEIGHT
+
+
+def dungeon_list_top(bio_rows):
+	return dungeon_band_top(bio_rows) + BAND_HEIGHT
+
+
+def biolog_row_count(height, bio_total, dungeon_total):
+	"""Biolog rows that fit: one per tracked research, like the dungeon rows; with dungeons tracked, room for the
+	Dungeony band and one dungeon row stays. At least one row while anything is tracked (it then shows "(+N)")."""
+	bio_total = max(0, _whole_number(bio_total))
+	if not bio_total:
+		return 0
+	reserve = BAND_HEIGHT + 2 + ROW_HEIGHT if _whole_number(dungeon_total) > 0 else 0
+	available = (_whole_number(height) - BIO_TOP - FOOTER_RESERVE - reserve) // ROW_HEIGHT
+	return max(1, min(bio_total, available))
+
+
 def visible_count(height, total, list_top=LIST_TOP):
 	available = (_whole_number(height) - _whole_number(list_top) - FOOTER_RESERVE) // ROW_HEIGHT
 	return max(0, min(_whole_number(total), available))

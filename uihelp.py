@@ -4,6 +4,7 @@ import app
 import ui
 import localeInfo
 import uiScriptLocale
+import keybindings
 
 ENABLE_HELP_MULTIPAGE = 0
 
@@ -91,9 +92,20 @@ class HelpWindow(ui.ScriptWindow):
 		self.Hide()
 
 	def OnKeyDown(self, key):
-		if app.DIK_H == key and 0 != self.eventClose:
+		# Help locks native input, so its assigned shortcut cannot reach game.py.
+		manager = keybindings.GetManager()
+		if manager:
+			shortcut = manager.shortcut_from_dik(key)
+			if shortcut and manager.shortcut_owner(shortcut.serialize()) == "system.help":
+				manager.dispatch_key_down(key)
+		elif app.DIK_H == key and 0 != self.eventClose:
 			self.eventClose()
+		return True
 
+	def OnKeyUp(self, key):
+		manager = keybindings.GetManager()
+		if manager:
+			manager.release_key(key)
 		return True
 
 	def OnIMEReturn(self):

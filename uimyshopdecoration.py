@@ -121,7 +121,7 @@ class MyShopDecorationWindow(ui.ScriptWindow):
 			timeButton.SetDownVisual("d:/ymir work/ui/game/offline_shop/shop_btn_q_mark_1.png")
 			timeButton.SetPosition(142, 36 + i * 26)
 			timeButton.SetText("")
-			timeButton.SetToolTipText("This shit will expire in xxxxx", -70, -12)
+			timeButton.SetToolTipText(localeInfo.SHOP_SKIN_UNLOCKED_FOR, -70, -12)
 			timeButton.Show()
 			self.__modelInfoButtons.append(timeButton)
 		##
@@ -135,7 +135,7 @@ class MyShopDecorationWindow(ui.ScriptWindow):
 			timeButton.SetDownVisual("d:/ymir work/ui/game/offline_shop/shop_btn_q_mark_1.png")
 			timeButton.SetPosition(142, 36 + i * 26)
 			timeButton.SetText("")
-			timeButton.SetToolTipText("This shit will expire in xxxxx", -70, -12)
+			timeButton.SetToolTipText(localeInfo.SHOP_SKIN_UNLOCKED_FOR, -70, -12)
 			timeButton.Show()
 			self.__bannerInfoButtons.append(timeButton)
 		##

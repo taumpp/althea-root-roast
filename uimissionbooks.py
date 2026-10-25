@@ -44,6 +44,7 @@ class MissionBookWindow(ui.ScriptWindow):
         self.cancelDialog = None
         self.children = []
         self.targets = []
+        self.r1 = None
         self.suspended = False
         self.restoreMain = False
         self.restoreTracker = False
@@ -99,6 +100,21 @@ class MissionBookWindow(ui.ScriptWindow):
                          self.rewardText, self.empty, self.emptyHint,
                          self.checkbox, self.cancelButton]
         self.RefreshActive()
+        self.ApplyR1Look()
+
+    def ApplyR1Look(self):
+        """R1 look (root/uimissionbooksr1.py) unless Settings -> "Starý vzhled" chose the original one; a build
+        failure undoes every change and keeps the original look (traced to syserr, not tried again this session)."""
+        self.r1 = None
+        try:
+            import uimissionbooksr1
+        except Exception:
+            return
+        self.r1 = uimissionbooksr1.Build(self)
+
+    def SyncR1(self):
+        if self.r1:
+            self.r1.SyncSafe()
 
     def ResizeForTargets(self, count):
         width, height = {0: (302, 344), 1: (302, 344),
@@ -136,6 +152,7 @@ class MissionBookWindow(ui.ScriptWindow):
             widget.Show() if visible else widget.Hide()
         self.cancelButton.Show() if visible else self.cancelButton.Hide()
         if not active:
+            self.SyncR1()
             return
         book, mission = active
         self.bookIcon = book_image(self, book, 18, 34)
@@ -152,6 +169,7 @@ class MissionBookWindow(ui.ScriptWindow):
             target = Target(self, vnum, required, x, 82, kind, name)
             self.targets.append(target)
         self.RefreshProgress()
+        self.SyncR1()
         if self.IsShow():
             self.OpenTargets()
 
@@ -269,6 +287,9 @@ class MissionBookWindow(ui.ScriptWindow):
         self.cancelButton.SetEvent(None)
         self.checkbox.SetEvent(None)
         self.titleBar.SetCloseEvent(None)
+        if self.r1:
+            self.r1.Destroy()
+            self.r1 = None
         self.ClearActive()
         for widget in self.children:
             widget.Hide()

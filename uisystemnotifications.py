@@ -69,6 +69,43 @@ def _Bar(parent, x, y, width, height, color):
     return bar
 
 
+def DisplayEntry(entry):
+    """The entry as a row shows it. Old stored Switchbot results share the same typed category: a display copy is
+    translated so history and its navigation target stay intact."""
+    if entry["category"] == "switchbot":
+        entry = dict(entry)
+        entry["message"] = SwitchbotMessage(entry["message"])
+    return entry
+
+
+def IconPath(entry):
+    """The icon file of a row (item icon, dungeon portrait, Switchbot item) or "" for no icon."""
+    path = ""
+    if entry["category"] == "switchbot":
+        path = "icon/item/71084.tga"
+    elif entry["category"] == "dungeon":
+        path = HUD_ROOT + "portrait/%d_41x32.png" % entry["target"]
+        if not app.IsExistFile(path):
+            path = HUD_ROOT + "dungeon_normal.png"
+    elif entry["icon_vnum"]:
+        try:
+            item.SelectItem(entry["icon_vnum"])
+            path = item.GetIconImageFileName()
+        except (RuntimeError, OSError):
+            pass
+    return path
+
+
+def _BuildR1(window):
+    """The R1 look of the message window (uisystemnotificationsr1) or None for the original look ("Starý vzhled",
+    or R1 failed: then the original look is already back)."""
+    try:
+        import uisystemnotificationsr1
+    except Exception:
+        return None
+    return uisystemnotificationsr1.Build(window)
+
+
 def _Button(parent, x, y, caption, callback):
     button = ui.Button()
     button.SetParent(parent)
@@ -171,13 +208,15 @@ class Bell(ui.Window):
 
 class _Frame(ui.Window):
     """Board and titlebar retain their fixed native corners and one outer width."""
+    INSET = 4  # the R1 look draws its frame over the whole width (uisystemnotificationsr1)
+
     def __init__(self, width, height, title):
         ui.Window.__init__(self)
         self.AddFlag("movable")
         self.AddFlag("float")
         self.board = ui.Board()
         self.board.SetParent(self)
-        self.board.SetPosition(4, 0)
+        self.board.SetPosition(self.INSET, 0)
         self.board.AddFlag("not_pick")
         self.board.Show()
         self.titleBar = ui.TitleBar()
@@ -191,9 +230,13 @@ class _Frame(ui.Window):
 
     def SetSize(self, width, height):
         ui.Window.SetSize(self, width, height)
-        self.board.SetSize(width - 8, height)
+        self.board.SetPosition(self.INSET, 0)
+        self.board.SetSize(width - 2 * self.INSET, height)
         self.titleBar.SetWidth(width)
         self.titleName.SetPosition(width // 2, 3)
+        r1 = self.__dict__.get("r1")
+        if r1:
+            r1.Layout(width, height)
 
     def Clamp(self, x, y, usable_height):
         self.SetPosition(max(4, min(int(x), wndMgr.GetScreenWidth() - self.GetWidth() - 4)),
@@ -223,11 +266,7 @@ class _MessageRow(ui.Window):
         self.openLabel = _Line(self, 293, 31, Text("OPEN"), color=GOLD, align="right")
 
     def SetEntry(self, entry, width):
-        if entry["category"] == "switchbot":
-            # Old stored results share the same typed category. Translate a
-            # display copy so history and its navigation target stay intact.
-            entry = dict(entry)
-            entry["message"] = SwitchbotMessage(entry["message"])
+        entry = DisplayEntry(entry)
         self.entry = entry
         self.identity = entry["id"]
         self.SetSize(width, 76)
@@ -247,19 +286,7 @@ class _MessageRow(ui.Window):
         self.name.SetFontColor(*(INK if not entry["read"] else DIM))
         _Fit(self.message, entry["message"], width - 65)
         self.icon.Hide()
-        path = ""
-        if entry["category"] == "switchbot":
-            path = "icon/item/71084.tga"
-        elif entry["category"] == "dungeon":
-            path = HUD_ROOT + "portrait/%d_41x32.png" % entry["target"]
-            if not app.IsExistFile(path):
-                path = HUD_ROOT + "dungeon_normal.png"
-        elif entry["icon_vnum"]:
-            try:
-                item.SelectItem(entry["icon_vnum"])
-                path = item.GetIconImageFileName()
-            except (RuntimeError, OSError):
-                pass
+        path = IconPath(entry)
         if path:
             try:
                 self.icon.LoadImage(path)
@@ -309,11 +336,22 @@ class MessageWindow(_Frame):
     ROW_HEIGHT = 80
     LIST_TOP = 34
     FOOTER = 42
+    # The rest of the geometry. The R1 look (uisystemnotificationsr1) sets its own values on the instance and
+    # deletes them again when it falls back to the original look.
+    ROW_X = 14
+    ROW_WIDTH = 304
+    ROW_WIDTH_SCROLL = 288
+    SCROLL_X = 306
+    FOOTER_Y = 30  # distance of the footer controls from the bottom edge
+    SETTINGS_X = 20
+    READ_X = 218
 
     def __init__(self, activate_callback, read_all_callback, settings_callback, close_callback):
         _Frame.__init__(self, self.WIDTH, 316, Text("TITLE"))
         self.activate_callback = activate_callback
         self.close_callback = close_callback
+        self.read_all_callback = read_all_callback
+        self.settings_callback = settings_callback
         self.entries = []
         self.offset = 0
         self.capacity = 3
@@ -329,6 +367,7 @@ class MessageWindow(_Frame):
         self.tooltip.SetDefaultFontName(fontconfig.FontForRole(fontconfig.ROLE_BODY))
         self.measure = _Line(self, 0, 0)
         self.measure.Hide()
+        self.r1 = _BuildR1(self)
         self.Hide()
 
     def SetEntries(self, entries):
@@ -339,17 +378,17 @@ class MessageWindow(_Frame):
 
     def _LayoutRows(self):
         overflow = max(0, len(self.entries) - self.capacity)
-        width = 288 if overflow else 304
+        width = self.ROW_WIDTH_SCROLL if overflow else self.ROW_WIDTH
         for index, row in enumerate(self.rows):
             position = self.offset + index
             if index < self.capacity and position < len(self.entries):
-                row.SetPosition(14, self.LIST_TOP + index * self.ROW_HEIGHT)
+                row.SetPosition(self.ROW_X, self.LIST_TOP + index * self.ROW_HEIGHT)
                 row.SetEntry(self.entries[position], width)
             else:
                 row.Hide()
         self.empty.Hide() if self.entries else self.empty.Show()
         if overflow:
-            self.scroll.SetPosition(306, self.LIST_TOP)
+            self.scroll.SetPosition(self.SCROLL_X, self.LIST_TOP)
             self.scroll.SetScrollBarSize(self.capacity * self.ROW_HEIGHT - 4)
             self.scroll.SetMiddleBarSize(float(self.capacity) / len(self.entries))
             self.scroll.SetScrollStep(1.0 / overflow)
@@ -357,15 +396,17 @@ class MessageWindow(_Frame):
             self.scroll.Show()
         else:
             self.scroll.Hide()
-        y = self.GetHeight() - 30
-        self.settings.SetPosition(20, y)
-        self.readAll.SetPosition(218, y)
+        y = self.GetHeight() - self.FOOTER_Y
+        self.settings.SetPosition(self.SETTINGS_X, y)
+        self.readAll.SetPosition(self.READ_X, y)
 
     def _Scroll(self):
         self.HideHint()
         overflow = max(0, len(self.entries) - self.capacity)
         self.offset = int(round(self.scroll.GetPos() * overflow))
-        # SetPos(..., False) inside layout does not invoke this callback again.
+        # The layout repositions the thumb. While the thumb is dragged the client
+        # reports that as another move even for SetPos(..., False); the scroll
+        # bar keeps this handler from running nested (uicrimsonember).
         self._LayoutRows()
 
     def OnMouseWheel(self, delta):
@@ -432,6 +473,7 @@ class MessageWindow(_Frame):
         self.Hide()
         self.titleBar.SetCloseEvent(None)
         self.activate_callback = self.close_callback = None
+        self.read_all_callback = self.settings_callback = None
         self.readAll.SetEvent(None)
         self.settings.Destroy()
         self.scroll.Destroy()
@@ -439,6 +481,10 @@ class MessageWindow(_Frame):
             row.Destroy()
         self.rows = []
         self.entries = []
+        r1 = self.__dict__.get("r1")
+        if r1:
+            r1.Destroy()
+        self.r1 = None
         self.tooltip = self.measure = self.readAll = self.settings = self.scroll = self.empty = None
 
 
@@ -469,7 +515,7 @@ class SettingsWindow(_Frame):
             self._Own(_Line(self, 60, y + 24, Text(hint), color=DIM))
             for column, x in (("hud", 291), ("messages", 427)):
                 if category == "switchbot" and column == "hud":
-                    self._Own(_Line(self, x, y + 14, "—", color=DIM, align="center"))
+                    self._Own(_Line(self, x, y + 14, "-", color=DIM, align="center"))
                     continue
                 key = category + "_" + column
                 checkbox = self._Own(ui.ToggleButton())
@@ -487,8 +533,8 @@ class SettingsWindow(_Frame):
         _Fit(hint, Text("ALARM_HINT"), 476)
         self.error = self._Own(_Line(self, 20, 292, "", color=GOLD))
         self.history = self._Own(_Button(self, 20, 314, Text("HISTORY"), history_callback))
-        self.cancel = self._Own(_Button(self, 286, 314, Text("CANCEL"), ui.__mem_func__(self.Close)))
-        self.apply = self._Own(_Button(self, 394, 314, Text("APPLY"), ui.__mem_func__(self.Apply)))
+        self.apply = self._Own(_Button(self, 286, 314, Text("APPLY"), ui.__mem_func__(self.Apply)))
+        self.cancel = self._Own(_Button(self, 394, 314, Text("CANCEL"), ui.__mem_func__(self.Close)))
         self.Hide()
 
     def _Own(self, child):

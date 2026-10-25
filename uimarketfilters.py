@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 from copy import deepcopy
-import re
 import item
 import net
 import ui
@@ -10,6 +9,7 @@ import uicrimsoncontrols
 import uitooltip
 from uicrimsonember import SettingsScrollBar
 import marketfilters as model
+import marketobtainable
 
 ASSETS = 'd:/ymir work/ui/public/crimson/controls/market_filters/'
 INPUTS = 'd:/ymir work/ui/public/crimson/controls/inputs/'
@@ -17,6 +17,15 @@ TEXT = 0xffeadfc8
 MUTED = 0xffb4aa98
 ACCENT = 0xffdab16c
 ERROR = 0xffff7979
+# The R1 look (root/uivirtualmarketr1.Theme) set by the market window while it builds in that look; None = the
+# original look. It maps the dialog's textures, text colours and action buttons to R1.
+_R1 = None
+
+
+def _File(path):
+    if _R1 is not None:
+        return _R1.Path(path) or path
+    return path
 
 
 def label(parent, x, y, text, width=568, role=fontconfig.ROLE_BODY, color=TEXT):
@@ -25,6 +34,9 @@ def label(parent, x, y, text, width=568, role=fontconfig.ROLE_BODY, color=TEXT):
     widget.SetPosition(x, y)
     widget.AddFlag('not_pick')
     widget.SetFontName(fontconfig.FontForRole(role))
+    if _R1 is not None:
+        widget.SetFontName(_R1.Font(role, fontconfig.FontForRole(role)))
+        color = _R1.FilterColor(color)
     widget.SetText(text)
     set_color(widget, color)
     widget.SetLimitWidth(width)
@@ -49,7 +61,7 @@ def input_box(parent, x, y, width=90, placeholder='', value=''):
     image = ui.ImageBox()
     image.SetParent(parent)
     image.SetPosition(x, y)
-    image.LoadImage(INPUTS + {61: 'parameter_02.tga', 90: 'parameter_03.tga', 220: 'parameter_06.tga'}[width])
+    image.LoadImage(_File(INPUTS + {61: 'parameter_02.tga', 90: 'parameter_03.tga', 220: 'parameter_06.tga'}[width]))
     image.Show()
     edit = ui.EditLine()
     edit.SetParent(image)
@@ -64,14 +76,14 @@ def input_box(parent, x, y, width=90, placeholder='', value=''):
 
 
 def bonus_text(kind):
+    import bonuslabels
     if kind not in uitooltip.ItemToolTip.AFFECT_DICT:
         return None
     try:
-        text = str(uitooltip.GET_AFFECT_STRING(kind, 12345))
-        if not text or text == 'None': return None
-        unit = '%' if '%' in text else 'bodů'
-        name = re.sub(r'[+−-]?\s*12345(?:[.,]0+)?\s*%?', '', text)
-        return ' '.join(name.split()).strip(' :'), unit
+        result = bonuslabels.Describe(uitooltip.GET_AFFECT_STRING, kind)
+        if result is None:
+            return None
+        return result[0], result[1] or 'bodů'
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -82,10 +94,10 @@ class FilterChoice(ui.Button):
         self.SetParent(parent)
         self.SetPosition(x, y)
         family = 'dropdown' if dropdown else 'selection_row'
-        self.SetUpVisual(ASSETS + '%s_%s_%d.png' % (family, 'normal' if dropdown or not selected else 'selected', width))
-        self.SetOverVisual(ASSETS + '%s_hover_%d.png' % (family, width))
-        self.SetDownVisual(ASSETS + '%s_%s_%d.png' % (family, 'open' if dropdown else 'selected', width))
-        self.SetDisableVisual(ASSETS + '%s_disabled_%d.png' % (family, width))
+        self.SetUpVisual(_File(ASSETS + '%s_%s_%d.png' % (family, 'normal' if dropdown or not selected else 'selected', width)))
+        self.SetOverVisual(_File(ASSETS + '%s_hover_%d.png' % (family, width)))
+        self.SetDownVisual(_File(ASSETS + '%s_%s_%d.png' % (family, 'open' if dropdown else 'selected', width)))
+        self.SetDisableVisual(_File(ASSETS + '%s_disabled_%d.png' % (family, width)))
         self.label = label(self, 9 if dropdown else 6, 11 if dropdown else 12, text,
             width - (36 if dropdown else 12))
         self.label.SetVerticalAlignCenter()
@@ -100,7 +112,8 @@ class FilterPicker(ui.BoardWithTitleBar):
 
     def __init__(self, owner):
         ui.BoardWithTitleBar.__init__(self)
-        self.SetParent(owner)
+        # Keep the popup in the UI layer: native picking skips children outside
+        # their parent's rectangle, even when they are visible and float.
         self.owner = owner
         self.AddFlag('float')
         self.SetSize(350, 292)
@@ -113,7 +126,7 @@ class FilterPicker(ui.BoardWithTitleBar):
         self.selectEvent = None
         self.anchor = None
         self.ownerPosition = None
-        self.searchImage, self.search = input_box(self, 24, 44, 220, 'Hledat…')
+        self.searchImage, self.search = input_box(self, 24, 44, 220, 'Hledat...')
         self.search.OnIMEUpdate = ui.__mem_func__(self._SearchChanged)
         self.search.SetEscapeEvent(self.OnPressEscapeKey)
         self.search.SetReturnEvent(self._SelectFirst)
@@ -124,6 +137,7 @@ class FilterPicker(ui.BoardWithTitleBar):
         self.scrollBar.SetScrollBarSize(self.VISIBLE * self.ROW_HEIGHT)
         self.scrollBar.SetScrollEvent(self._Scrolled)
         self.SetOnRunMouseWheelEvent(self._Wheel)
+        self.r1Skin = _R1.FilterSkin(self, 'Výběr filtru', self.scrollBar) if _R1 is not None else None
         self.Hide()
 
     def Open(self, anchor, title, options, selected, event):
@@ -133,6 +147,8 @@ class FilterPicker(ui.BoardWithTitleBar):
         self.options = list(options)
         self.selected = selected
         self.SetTitleName(title)
+        if self.r1Skin is not None:
+            self.r1Skin.SetTitle(title)
         self.search.SetText('')
         self._Filter()
         x, y = anchor.GetGlobalPosition()
@@ -142,7 +158,7 @@ class FilterPicker(ui.BoardWithTitleBar):
         if top + self.GetHeight() > screenH - 8: top = y - self.GetHeight() - 3
         x = max(8, min(x, screenW - self.GetWidth() - 8))
         top = max(8, min(top, screenH - self.GetHeight() - 8))
-        self.SetPosition(x - ownerX, top - ownerY)
+        self.SetPosition(x, top)
         self.ownerPosition = (ownerX, ownerY)
         self.Show()
         self.SetTop()
@@ -210,7 +226,8 @@ class FilterPicker(ui.BoardWithTitleBar):
         self.anchor = None
 
     def OnUpdate(self):
-        if self.ownerPosition != self.owner.GetGlobalPosition(): self.Close()
+        if self.owner is None or not self.owner.IsShow() or self.ownerPosition != self.owner.GetGlobalPosition():
+            self.Close()
 
     def OnPressEscapeKey(self):
         self.Close()
@@ -227,6 +244,29 @@ class FilterPicker(ui.BoardWithTitleBar):
         self.owner = None
 
 
+def _ObtainablePairs():
+    """The (type, subtype) of every obtainable item (marketobtainable); None without the list."""
+    allowed = marketobtainable.Allowed()
+    if not allowed:
+        return None
+    pairs = set()
+    for vnum in allowed:
+        try:
+            item.SelectItem(int(vnum))
+            pairs.add((int(item.GetItemType()), int(item.GetItemSubType())))
+        except Exception:
+            continue
+    return pairs
+
+
+def _ObtainableCatalog(catalog):
+    """The engine's filter catalog without the type / subtype rows no obtainable item has, so the category rail and
+    the Podkategorie list offer only what a player can get. Unchanged without the list."""
+    if not catalog:
+        return catalog
+    return marketobtainable.FilterCatalog(catalog, _ObtainablePairs())
+
+
 class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
     def __init__(self, applyEvent):
         ui.BoardWithTitleBar.__init__(self)
@@ -237,12 +277,14 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
         self.bonusValues = []
         self.bonusKinds = []
         self.catalogLoaded = False
+        self.subcategoryCache = {}
         self.SetSize(616, 300)
         self.SetTitleName('Filtry předmětů')
         self.SetCloseEvent(self.Close)
         self.AddFlag('movable')
         self.AddFlag('float')
         self.picker = FilterPicker(self)
+        self.r1Skin = _R1.FilterSkin(self, 'Filtry předmětů') if _R1 is not None else None
         self.Hide()
 
     def LoadCatalog(self):
@@ -250,10 +292,11 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
         self.state.set_other_available(
             getattr(net, 'IsVirtualMarketCategoryOtherAvailable', lambda: 0)())
         if not self.catalogLoaded and hasattr(item, 'GetMarketFilterCatalog'):
-            catalog = item.GetMarketFilterCatalog()
+            catalog = _ObtainableCatalog(item.GetMarketFilterCatalog())
             if catalog:
                 self.state.set_catalog(catalog)
                 self.catalogLoaded = True
+                self.subcategoryCache = {}
 
     def _Keep(self, widget):
         self.widgets.append(widget)
@@ -294,7 +337,7 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
                 edit.SetEscapeEvent(self.OnPressEscapeKey)
                 edit.SetReturnEvent(self._Apply)
                 if percent: self._Label(at + 94, y + 24, '%', width=15)
-        self._Label(x + 118, y + 23, '–', width=20, color=ACCENT)
+        self._Label(x + 118, y + 23, '-', width=20, color=ACCENT)
 
     def _Choices(self, y, key, title, options, width):
         self._Label(24, y, title, True)
@@ -307,8 +350,17 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
         button = self._Keep(ui.Button())
         button.SetParent(self)
         button.SetPosition(x, y)
-        uicrimsoncontrols.ApplyVisuals(button, family)
+        prefix = _R1.ActionPrefix(family) if _R1 is not None else None
+        if prefix:
+            button.SetUpVisual(prefix + '_normal.png')
+            button.SetOverVisual(prefix + '_hover.png')
+            button.SetDownVisual(prefix + '_pressed.png')
+            button.SetDisableVisual(prefix + '_disabled.png')
+        else:
+            uicrimsoncontrols.ApplyVisuals(button, family)
         button.SetText(text)
+        if prefix:
+            _R1.StyleButtonText(button, family == '170x24')
         button.SetEvent(event)
         button.Show()
         return button
@@ -341,7 +393,7 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
             self._Choices(y, 'job', 'Povolání', model.JOBS, 88)
             y += 62
         if 'level' in fields or 'refine' in fields:
-            if 'level' in fields: self._Range(24, y, 'level', 'Požadovaný level')
+            if 'level' in fields: self._Range(24, y, 'level', 'Požadovaná úroveň')
             if 'refine' in fields: self._Range(320, y, 'refine', 'Vylepšení', [(v, '+%d' % v) for v in info['refines']])
             y += 62
         if 'gender' in fields:
@@ -356,10 +408,10 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
             y += 68
         if 'grade' in fields:
             self._Label(24, y, 'Třída', True, 272)
-            self._Label(320, y, 'Čistota', True, 272)
+            self._Label(320, y, 'Čirost', True, 272)
             for x, key, index, names in ((24, 'grade', 0, model.GRADES), (320, 'step', 1, model.STEPS)):
                 options = [(-1, 'Libovolná')] + [(v, names[v]) for v in sorted(set(row[index] for row in info['variants']))]
-                self._Dropdown(x, y + 22, 272, key, options, 'Třída' if key == 'grade' else 'Čistota')
+                self._Dropdown(x, y + 22, 272, key, options, 'Třída' if key == 'grade' else 'Čirost')
             y += 62
             self._Range(24, y, 'strength', 'Zesílení alchymie',
                 [(v, '+%d' % v) for v in sorted(set(row[2] for row in info['variants']))])
@@ -389,9 +441,9 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
                 remove = self._Keep(ui.Button())
                 remove.SetParent(self)
                 remove.SetPosition(573, rowY + 1)
-                remove.SetUpVisual('d:/ymir work/ui/public/crimson_close_01.tga')
-                remove.SetOverVisual('d:/ymir work/ui/public/crimson_close_02.tga')
-                remove.SetDownVisual('d:/ymir work/ui/public/crimson_close_03.tga')
+                remove.SetUpVisual(_File('d:/ymir work/ui/public/crimson_close_01.tga'))
+                remove.SetOverVisual(_File('d:/ymir work/ui/public/crimson_close_02.tga'))
+                remove.SetDownVisual(_File('d:/ymir work/ui/public/crimson_close_03.tga'))
                 remove.SetEvent(lambda row=index: self._SetBonus(row, 0))
                 remove.SetToolTipText('Odebrat bonus')
                 remove.Show()
@@ -406,6 +458,8 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
         self._Action(310, y, 'Zrušit', self.Close)
         self._Action(422, y - 1, 'Použít filtry', self._Apply, '170x24')
         self.SetSize(616, y + 43)
+        if self.r1Skin is not None:
+            self.r1Skin.Resize(616, y + 43)
         x, top = self.GetGlobalPosition()
         self.SetPosition(max(0, min(x, wndMgr.GetScreenWidth() - 616)),
             max(0, min(top, wndMgr.GetScreenHeight() - self.GetHeight())))
@@ -472,6 +526,21 @@ class AdvancedMarketFilterDialog(ui.BoardWithTitleBar):
     def SelectCategory(self, category):
         self.LoadCatalog()
         self.state.select_category(category)
+        self.Close()
+
+    def RailEntries(self, key):
+        """The entries ((category, (kind, subtype)), name) a row of the market's category rail opens into
+        (marketfilters.RAIL_ROWS, those the client's item_proto catalog has). Empty without the catalog."""
+        self.LoadCatalog()
+        if not self.catalogLoaded:
+            return []
+        if key not in self.subcategoryCache:
+            self.subcategoryCache[key] = list(model.rail_entries(key, self.state.catalog))
+        return list(self.subcategoryCache[key])
+
+    def SelectSubcategory(self, category, subtype):
+        self.LoadCatalog()
+        self.state.select_subcategory(category, subtype)
         self.Close()
 
     def Reset(self):

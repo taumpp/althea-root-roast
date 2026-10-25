@@ -365,11 +365,14 @@ class QuestDialog(ui.ScriptWindow):
 
 	def __init__(self, skin, idx):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Prioritize(self)
 		self.SetWindowName("QuestDialog")
 
 		self.focusIndex = 0
 
 		self.board = None
+		self.r1 = None
 		self.sx = 0
 		self.sy = 0
 
@@ -442,9 +445,45 @@ class QuestDialog(ui.ScriptWindow):
 		except RuntimeError:
 			dbg.TraceError("QuestDialog.BindObject")
 
+		self.__DressR1(skin)
 		self.SetCenterPosition()
 		if self.SKIN_CINEMA == skin:
 			self.board.Hide()
+
+	def __DressR1(self, skin):
+		"""The R1 dialog frame and buttons (root/uir1quest.py) unless Settings -> "Starý vzhled" chose the original
+		look, R1 failed before or the quest uses skin 3 (its own picture and buttons); the original board otherwise.
+		R1 also sizes the ordinary dialog to its content (the cinema skin keeps the game's geometry)."""
+		self.r1 = None
+		if skin == 3 or not self.board:
+			return
+		try:
+			import uir1quest
+			if uir1quest.UseR1():
+				self.r1 = uir1quest.Dress(self.board, self, fixed=(skin == self.SKIN_CINEMA))
+		except Exception:
+			self.r1 = None
+
+	def __R1Layout(self):
+		if self.r1:
+			self.r1.Layout(self)
+
+	def __R1Fix(self):
+		# The quest places the dialog itself (size, pictures, text position): R1 keeps the game's geometry.
+		if self.r1:
+			self.r1.Fix()
+
+	def OnMouseWheel(self, delta):
+		# R1 scrolls a long list of answers; otherwise the wheel goes on as before.
+		if self.r1 and self.r1.Wheel(self, delta):
+			return True
+		parent = getattr(ui.ScriptWindow, "OnMouseWheel", None)
+		return parent(self, delta) if parent else False
+
+	def __BarButton(self, layer = "UI"):
+		if self.r1:
+			return self.r1.BarButton(BarButton, layer)
+		return BarButton(layer)
 
 	# QUEST_CANCEL
 	def OnCancel(self):
@@ -453,6 +492,9 @@ class QuestDialog(ui.ScriptWindow):
 	# END_OF_QUEST_CANCEL
 
 	def CloseSelf(self):
+		# Hide first: the R1 dress (uir1quest) can keep the dialog alive after Destroy, and a shown empty
+		# root (800x450, centred) would keep catching clicks, the wheel and ESC in the middle of the screen.
+		self.Hide()
 		QuestDialog.QuestCurtain.CurtainMode = self.nextCurtainMode
 		self.btnNext = None
 		self.descWindow = None
@@ -496,9 +538,13 @@ class QuestDialog(ui.ScriptWindow):
 		self.images = None
 		self.eventCurtain = None
 		self.board = None
+		self.r1 = None
 		self.descWindow = None
 
 	def OnUpdate(self):
+		if self.r1:
+			self.r1.Sync()
+
 		if self.skin == self.SKIN_CINEMA:
 			event.UpdateEventSet(self.descIndex, 50, -(wndMgr.GetScreenHeight() - 44))
 
@@ -509,8 +555,10 @@ class QuestDialog(ui.ScriptWindow):
 				event.SetEventSetWidth(self.descIndex, self.board.GetWidth() - 40)
 		elif self.skin:
 			if self.board:
-				event.UpdateEventSet(self.descIndex, self.board.GetGlobalPosition()[0] + 20, -self.board.GetGlobalPosition()[1] - 20)
-				event.SetEventSetWidth(self.descIndex, self.board.GetWidth() - 40)
+				tx, ty = self.r1.TextOrigin() if self.r1 else (20, 20)
+				event.UpdateEventSet(self.descIndex, self.board.GetGlobalPosition()[0] + tx, -self.board.GetGlobalPosition()[1] - ty)
+				event.SetEventSetWidth(self.descIndex, self.board.GetWidth() - 2 * tx)
+				self.__R1Layout()
 		# END_OF_AUTO_RESIZE_BOARD
 		else:
 			event.UpdateEventSet(self.descIndex, 0, 0)
@@ -551,10 +599,12 @@ class QuestDialog(ui.ScriptWindow):
 		self.OnCloseEvent = f
 
 	def SetEventSetPosition(self, x, y):
+		self.__R1Fix()
 		self.sx = x
 		self.sy = y
 
 	def AdjustEventSetPosition(self, x, y):
+		self.__R1Fix()
 		self.sx += x
 		self.sy += y
 
@@ -567,7 +617,7 @@ class QuestDialog(ui.ScriptWindow):
 
 		yPos = event.GetEventSetLocalYPosition(self.descIndex)
 
-		b = BarButton()
+		b = self.__BarButton()
 		b.SetParent(self.board)
 
 		if app.ENABLE_QUEST_WIDTH_EXPANSION:
@@ -592,6 +642,7 @@ class QuestDialog(ui.ScriptWindow):
 		b.Show()
 		b.SetTextColor(0xffffffff)
 		self.btnNext = b
+		self.__R1Layout()
 	# END_OF_QUEST_CANCEL
 
 	# QUEST_INPUTADDCANCEL
@@ -603,9 +654,9 @@ class QuestDialog(ui.ScriptWindow):
 		self.nextButtonType = event.BUTTON_TYPE_DONE
 		yPos = event.GetEventSetLocalYPosition(self.descIndex)
 
-		b = BarButton()
+		b = self.__BarButton()
 		b.SetParent(self.board)
-		c = BarButton()
+		c = self.__BarButton()
 		c.SetParent(self.board)
 
 		b.SetSize(130, 30)
@@ -625,6 +676,7 @@ class QuestDialog(ui.ScriptWindow):
 		c.SetTextColor(0xffffffff)
 		self.btnNext = b
 		self.btnQuit = c
+		self.__R1Layout()
 	# END_OF_QUESTADDCANCEL
 
 	def MakeQuestion(self, n): # n은 모든 퀘스트 대화창의 마지막 버튼인 "닫기"를 포함한 전체 퀘스트 버튼 개수. by 김준호
@@ -666,6 +718,8 @@ class QuestDialog(ui.ScriptWindow):
 		if cur_questpage_number != 1:
 			cur_questpage_number = 1
 
+		self.__R1Layout()
+
 	def MakeEachButton(self, i):
 		if self.skin == 3:
 			button = BarButton("TOP_MOST", 0x50000000, 0x50404040, 0x50606060)
@@ -676,7 +730,7 @@ class QuestDialog(ui.ScriptWindow):
 			button.SetTextColor(0xff000000)
 		else:
 			i = i % questbutton_max
-			button = BarButton("TOP_MOST")
+			button = self.__BarButton("TOP_MOST")
 			button.SetParent(self.board)
 			if app.ENABLE_QUEST_WIDTH_EXPANSION:
 				button.SetSize(560, 26)
@@ -689,7 +743,7 @@ class QuestDialog(ui.ScriptWindow):
 		return button
 
 	def MakeNextPrevPageButton(self):
-		button = BarButton("TOP_MOST")
+		button = self.__BarButton("TOP_MOST")
 		button.SetParent(self.board)
 		button.SetSize(52, 26)
 		button.SetText("a")
@@ -764,6 +818,8 @@ class QuestDialog(ui.ScriptWindow):
 		if entire_questbutton_number > questbutton_max:
 			self.nextbutton.Show()
 
+		self.__R1Layout()
+
 	def FadeOut(self, speed):
 		self.eventCurtain.FadeOut(speed)
 
@@ -790,12 +846,12 @@ class QuestDialog(ui.ScriptWindow):
 
 	# QUEST_INPUT
 	def OnKeyDown(self, key):
+		# Enter is submitted once through the IME route (also numeric Enter).
+		if key in (app.DIK_RETURN, app.DIK_NUMPADENTER):
+			return True
 		if self.btnAnswer == None:
 			## 선택문이 없고 "다음", "확인" 등의 일방 버튼만 있는 경우에 대한 처리
 			if None != self.btnNext:
-				if app.DIK_RETURN == key:
-					self.OnPressEscapeKey()
-
 				if app.DIK_UP == key or app.DIK_DOWN == key:
 					self.btnNext.ShowToolTip()
 
@@ -822,15 +878,15 @@ class QuestDialog(ui.ScriptWindow):
 
 		self.focusIndex = focusIndex;
 
+		if self.r1:
+			self.r1.Reveal(self, focusIndex)
+
 		focusBtn = self.btnAnswer[focusIndex]
 		lastFocusBtn = self.btnAnswer[lastFocusIndex]
 
 		if focusIndex != lastFocusIndex:
 			focusBtn.ShowToolTip()
 			lastFocusBtn.HideToolTip()
-
-		if app.DIK_RETURN == key:
-			focusBtn.CallEvent()
 
 		return True
 
@@ -876,6 +932,14 @@ class QuestDialog(ui.ScriptWindow):
 		if self.needInputaddCancelString:
 			self.CloseSelf()
 			return True
+
+		import uiconfirm
+		if self.btnAnswer:
+			if 0 <= self.focusIndex < len(self.btnAnswer):
+				uiconfirm.Activate(self.btnAnswer[self.focusIndex])
+		elif self.btnNext is not None:
+			uiconfirm.Activate(self.btnNext)
+		return True
 
 	def OnIMEUpdate(self):
 		if not self.editLine:
@@ -995,6 +1059,7 @@ class QuestDialog(ui.ScriptWindow):
 		self.board.UpdateRect()
 
 	def OnImage(self, x, y, filename, desc = ""):
+		self.__R1Fix()
 		filename = self.__GetQuestImageFileName(filename)
 
 		# IMAGE_EXCEPTION_BUG_FIX
@@ -1156,7 +1221,10 @@ class QuestDialog(ui.ScriptWindow):
 				event.AddEventSetLocalYPosition(self.descIndex, 4)
 
 	def OnSize(self, width, height):
+		self.__R1Fix()
 		self.board.SetSize(width, height)
+		if self.r1:
+			self.r1.Sync()
 
 	def OnTitleImage(self, filename):
 		img = ui.ImageBox("TOP_MOST")
@@ -1176,6 +1244,7 @@ class QuestDialog(ui.ScriptWindow):
 		self.titleShowTime = app.GetTime()
 
 	def OnLeftImage(self, imgfile):
+		self.__R1Fix()
 		imgfile = self.__GetQuestImageFileName(imgfile)
 		if not self.imgLeft:
 			self.imgLeft = ui.ExpandedImageBox("TOP_MOST")
@@ -1199,6 +1268,7 @@ class QuestDialog(ui.ScriptWindow):
 			self.imgLeft.Hide()
 
 	def OnTopImage(self, imgfile):
+		self.__R1Fix()
 		imgfile = self.__GetQuestImageFileName(imgfile)
 
 		bd = self.board
@@ -1228,6 +1298,7 @@ class QuestDialog(ui.ScriptWindow):
 			self.imgTop.Hide()
 
 	def OnBackgroundImage(self, imgfile):
+		self.__R1Fix()
 		imgfile = self.__GetQuestImageFileName(imgfile)
 		c = self.board
 		w = c.GetWidth()

@@ -8,12 +8,18 @@ ICON_GAP = 4
 ICON_RIGHT = 548
 ICON_Y = 206
 NAME_X = 276
-NAME_Y = 207
+NAME_Y = 202
+LEVEL_Y = 219
 CAPTION_X = 269
 CAPTION_Y = 198
 CAPTION_WIDTH = 287
 CAPTION_HEIGHT = 40
 NAME_GAP = 8
+
+
+def BossLevelText(bossVnum, mobData):
+    level = mobData.GetMonsterLevel(bossVnum)
+    return "Lv. %d" % level if level > 0 else ""
 
 
 def ReadBossElements(bossVnum, enabled, mobData):

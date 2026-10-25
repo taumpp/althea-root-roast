@@ -20,6 +20,7 @@ import dbg
 import fontconfig
 import uicrimsoncontrols
 import uiskilltreedismantle
+import ownedcount
 
 
 def _SetImageDiffuseColor(imageBox, red, green, blue, alpha):
@@ -309,6 +310,15 @@ RENEW_TOOLTIP_TITLE_Y = 12
 RENEW_TOOLTIP_ROWS_Y = 36
 RENEW_TOOLTIP_ROW_HEIGHT = 36
 RENEW_TOOLTIP_HEIGHT = RENEW_TOOLTIP_ROWS_Y + MAX_VISIBLE_RENEW_COST_ROWS * RENEW_TOOLTIP_ROW_HEIGHT + 8
+# the panel is as large as its rows (RENEW_TOOLTIP_WIDTH x RENEW_TOOLTIP_HEIGHT only while it scrolls):
+# at least RENEW_TOOLTIP_MIN_WIDTH wide, RENEW_TOOLTIP_PAD px right of the widest row, RENEW_TOOLTIP_BOTTOM px under
+# the last row's content (an item icon is 32 px tall, the yang price RENEW_YANG_ROW_HEIGHT)
+RENEW_TOOLTIP_MIN_WIDTH = 180
+RENEW_TOOLTIP_PAD = 12
+RENEW_TOOLTIP_BOTTOM = 10
+RENEW_ITEM_ROW_HEIGHT = 32
+RENEW_YANG_ROW_HEIGHT = 16
+RENEW_YANG_ROW_Y = 8
 
 try:
 	_INTEGER_TYPES = (int, long)
@@ -1410,7 +1420,24 @@ class RenewToolTipAnchor(ui.Window):
 		self.clickHandler = None
 
 
+def _TextWidth(line):
+	try:
+		return int(line.GetTextSize()[0])
+	except Exception:
+		return len(line.GetText()) * 7
+
+
+def _MoneyText(amount):
+	"""The yang amount with the game's thousand separators ("6.800.000"), the format of the R1 price."""
+	try:
+		import uir1price
+		return uir1price.FormatAmount(amount)
+	except Exception:
+		return str(amount)
+
+
 class RenewCostToolTip(uiToolTip.ToolTip):
+	yangPrice = None	# class-level: the base class may hide the tooltip before __init__ made the price
 
 	def __init__(self):
 		uiToolTip.ToolTip.__init__(self, RENEW_TOOLTIP_WIDTH, isPickable=True)
@@ -1476,7 +1503,24 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 		self.scrollBar.upButton.SetEvent(ui.__mem_func__(self.__OnScrollUp))
 		self.scrollBar.downButton.SetEvent(ui.__mem_func__(self.__OnScrollDown))
 		self.scrollBar.Hide()
+		self.__CreateYangPrice()
 		self.Hide()
+
+	def __CreateYangPrice(self):
+		"""R1 look: the yang row is the shared R1 price (root/uir1price.py: the coin, "6.800.000 Yang" in Tahoma 12, red
+		when the player has less). "Starý vzhled" keeps the original "Yang: 6.800.000" line."""
+		if getattr(self, "r1Frame", None) is None:
+			return
+		try:
+			import uir1price
+			self.yangPrice = uir1price.Price(self, 12, RENEW_TOOLTIP_ROWS_Y + RENEW_YANG_ROW_Y, "left")
+		except Exception:
+			self.yangPrice = None
+			try:
+				import uir1
+				uir1.TraceFailure("the skill tree renewal price")
+			except Exception:
+				pass
 
 	def SetAnchorButton(self, button):
 		if button:
@@ -1606,6 +1650,10 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 			self.startLine:self.startLine + MAX_VISIBLE_RENEW_COST_ROWS
 		]
 
+		if self.yangPrice is not None:
+			self.yangPrice.Clear()
+		contentWidth = 0
+		contentBottom = RENEW_TOOLTIP_ROWS_Y
 		for index, widgets in enumerate(self.rowWidgets):
 			widgets["icon"].Hide()
 			widgets["name"].Hide()
@@ -1616,7 +1664,9 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 			row = pageRows[index]
 			rowY = RENEW_TOOLTIP_ROWS_Y + index * RENEW_TOOLTIP_ROW_HEIGHT
 			if row[0] == "item":
-				unusedKind, unusedVnum, requiredCount, ownedCount, displayName, iconPath = row
+				unusedKind, vnum, requiredCount, unusedOwned, displayName, iconPath = row
+				# counted now, not when the server sent the price: the inventory may have changed since
+				ownedCount = ownedcount.Owned(vnum)
 				if iconPath:
 					widgets["icon"].LoadImage(iconPath)
 					widgets["icon"].Show()
@@ -1626,31 +1676,55 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 				widgets["name"].SetPackedFontColor(self.NORMAL_COLOR)
 				widgets["name"].SetText(displayName)
 				widgets["name"].Show()
-				if ownedCount < requiredCount:
-					countColor = self.DISABLE_COLOR
-				else:
-					countColor = self.NORMAL_COLOR
-				widgets["count"].SetPackedFontColor(countColor)
-				widgets["count"].SetText(
-					uiScriptLocale.SKILL_TREE_OWNED_COST % (ownedCount, requiredCount)
-				)
+				ownedcount.Paint(widgets["count"], ownedCount, requiredCount)	# "12 / 25" green / red
 				widgets["count"].Show()
+				nameX = widgets["name"].GetLocalPosition()[0]
+				contentWidth = max(contentWidth, nameX + _TextWidth(widgets["name"]), 50 + _TextWidth(widgets["count"]))
+				contentBottom = rowY + RENEW_ITEM_ROW_HEIGHT
 			elif row[0] == "yang":
-				widgets["name"].SetPosition(12, rowY + 9)
-				widgets["name"].SetPackedFontColor(self.NORMAL_COLOR)
-				widgets["name"].SetText(uiScriptLocale.SKILL_TREE_YANG_COST % str(row[1]))
-				widgets["name"].Show()
+				if self.yangPrice is not None:
+					import uir1price
+					self.yangPrice.SetAnchor(12, rowY + RENEW_YANG_ROW_Y)
+					self.yangPrice.SetPrice(row[1], uir1price.CanAfford(row[1]))
+					contentWidth = max(contentWidth, 12 + self.yangPrice.GetWidth())
+				else:
+					widgets["name"].SetPosition(12, rowY + 9)
+					widgets["name"].SetPackedFontColor(self.NORMAL_COLOR)
+					widgets["name"].SetText(uiScriptLocale.SKILL_TREE_YANG_COST % _MoneyText(row[1]))
+					widgets["name"].Show()
+					contentWidth = max(contentWidth, 12 + _TextWidth(widgets["name"]))
+				contentBottom = rowY + RENEW_YANG_ROW_Y + RENEW_YANG_ROW_HEIGHT
 			else:
 				widgets["name"].SetPosition(12, rowY + 9)
 				widgets["name"].SetPackedFontColor(self.NORMAL_COLOR)
 				widgets["name"].SetText(uiScriptLocale.SKILL_TREE_COST_UNAVAILABLE)
 				widgets["name"].Show()
+				contentWidth = max(contentWidth, 12 + _TextWidth(widgets["name"]))
+				contentBottom = rowY + RENEW_YANG_ROW_Y + RENEW_YANG_ROW_HEIGHT
 
 		if len(self.costRows) <= MAX_VISIBLE_RENEW_COST_ROWS:
 			self.startLine = 0
 			self.scrollBar.Hide()
 		else:
 			self.scrollBar.Show()
+		self.__FitToContent(contentWidth, contentBottom)
+
+	def __FitToContent(self, contentWidth, contentBottom):
+		"""The panel as large as its rows (an item and the yang drew a 320 x 332 box): the widest row plus
+		RENEW_TOOLTIP_PAD (the title fits too), RENEW_TOOLTIP_BOTTOM under the last row. A list that scrolls keeps the
+		full size, so the panel does not jump while scrolling."""
+		if len(self.costRows) > MAX_VISIBLE_RENEW_COST_ROWS:
+			width, height = RENEW_TOOLTIP_WIDTH, RENEW_TOOLTIP_HEIGHT
+		else:
+			titleWidth = _TextWidth(self.titleText)
+			width = max(RENEW_TOOLTIP_MIN_WIDTH, contentWidth + RENEW_TOOLTIP_PAD, titleWidth + 2 * RENEW_TOOLTIP_PAD)
+			width = min(RENEW_TOOLTIP_WIDTH, width)
+			height = contentBottom + RENEW_TOOLTIP_BOTTOM
+		self.toolTipWidth = width
+		self.toolTipHeight = height
+		self.titleText.SetPosition(width // 2, RENEW_TOOLTIP_TITLE_Y)
+		self.scrollBar.SetPosition(width - 18, RENEW_TOOLTIP_ROWS_Y)
+		self.SetSize(width, height)
 
 	def OnMouseWheel(self, delta):
 		if delta > 0:
@@ -1685,7 +1759,14 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 	def Show(self):
 		self.__UpdateAnchorPosition()
 		self._hideRequested = False
+		if self.costRows:
+			self.__RefreshRows()		# the owned counts as they are now
 		uiToolTip.ToolTip.Show(self)
+
+	def RefreshOwnedCounts(self):
+		"""The rows' "owned / need" again (the inventory changed)."""
+		if self.costRows and self.IsShow():
+			self.__RefreshRows()
 
 	def Hide(self):
 		self._hideRequested = True
@@ -1717,10 +1798,26 @@ class RenewCostToolTip(uiToolTip.ToolTip):
 		self.parentWindow = 0
 		self.scrollBar = None
 		self.titleText = None
+		if self.yangPrice is not None:
+			self.yangPrice.Destroy()
+		self.yangPrice = None
 		self.rowWidgets = []
 		self.itemCosts = ()
 		self.costRows = ()
 		self.yangCost = 0
+
+
+def _CostItemName(vnum):
+	try:
+		item.SelectItem(vnum)
+		return item.GetItemName()
+	except Exception:
+		return uiScriptLocale.SKILL_TREE_NODE_UNKNOWN_ITEM % vnum
+
+
+def _CostItemText(vnum, count):
+	"""One item price of a node: "Name  12 / 25" with the count green / red (root/ownedcount.py)."""
+	return "%s  %s" % (_CostItemName(vnum), ownedcount.Tagged(ownedcount.Owned(vnum), count))
 
 
 class SkillTreeWindow(ui.ScriptWindow):
@@ -1759,6 +1856,8 @@ class SkillTreeWindow(ui.ScriptWindow):
 		self.upgradeDialog = None
 		self.upgradeDialogNodeId = None
 		self.upgradeDialogRevision = None
+		self.upgradeDialogPending = False
+		self.upgradeDialogMaxed = False
 		self.activationHandler = None
 		self.renewHandler = None
 		self.openHandler = None
@@ -1766,6 +1865,8 @@ class SkillTreeWindow(ui.ScriptWindow):
 		self.presentationReady = False
 		self.presentationError = False
 		self.lastCharacterLevel = None
+		self.r1 = None
+		self.r1Failed = False
 
 		self.__LoadWindow()
 
@@ -1944,7 +2045,7 @@ class SkillTreeWindow(ui.ScriptWindow):
 		self.activationMutationPending = False
 		self.__LoadActivationStatusImage(STATUS_OFF_ASSET)
 		self.activationButton.SetText(uiScriptLocale.SKILL_TREE_ENABLE)
-		self.remainingTimeText.SetText(u"\u2014")
+		self.remainingTimeText.SetText(u"-")
 		self.activationButton.Disable()
 		self.renewButton.Disable()
 		if self.renewHoverArea:
@@ -2010,10 +2111,19 @@ class SkillTreeWindow(ui.ScriptWindow):
 	def GetPointSourceOrder(self):
 		return self.model.GetPointSourceOrder() if self.model else ()
 
+	def GetDismantlePointBudget(self):
+		if not self.model:
+			return None
+		balance = self.model.GetPointBalance()
+		if balance is None:
+			return None
+		return balance, self.model.pointCap
+
 	def CanDismantle(self, points):
+		budget = self.GetDismantlePointBudget()
 		return bool(self.model and self.model.CanBeginDismantle()
 			and self.dismantleHandler
-			and self.model.GetPointBalance() + points <= self.model.pointCap)
+			and budget is not None and 0 < points <= budget[1] - budget[0])
 
 	def RequestDismantle(self, slots):
 		return bool(self.dismantleHandler and self.dismantleHandler(slots))
@@ -2066,6 +2176,7 @@ class SkillTreeWindow(ui.ScriptWindow):
 		))
 		if self.dismantleWindow and self.dismantleWindow.IsShow():
 			self.dismantleWindow.Refresh()
+		self.__RefreshUpgradeDialog()
 		return True
 
 	def SelectNode(self, nodeId):
@@ -2114,13 +2225,13 @@ class SkillTreeWindow(ui.ScriptWindow):
 			return False
 		for row in cost.get("items", ()):
 			try:
-				if player.GetItemCountByVnum(row["vnum"]) < row["count"]:
+				if not ownedcount.IsEnough(ownedcount.Owned(row["vnum"]), row["count"]):
 					return False
 			except Exception:
 				return False
 		return True
 
-	def RequestNodeUpgrade(self, nodeId):
+	def RequestNodeUpgrade(self, nodeId, keepPosition=None):
 		if not self.CanUpgradeNode(nodeId):
 			return False
 		presenter = self.model.GetNodePresenters().get(nodeId)
@@ -2134,10 +2245,54 @@ class SkillTreeWindow(ui.ScriptWindow):
 			return False
 		self.__CloseUpgradeDialog()
 		dialog = uiCommon.QuestionDialog2()
-		dialog.SetText1(u"%s: %s \u2192 %s" % (texts[0], current, nextValue))
+		dialog.SetText1(u"%s: %s -> %s" % (texts[0], current, nextValue))
 		dialog.SetText2(skilltreelocale.GetPointCostText(
 			_ClientLocaleKey(), cost["points"],
 		))
+		dialog.textLine2.SetPackedFontColor(0xffe6bd78)
+		yangLine = ui.TextLine()
+		yangLine.SetParent(dialog.board)
+		yangLine.AddFlag("not_pick")
+		yangLine.SetWindowHorizontalAlignCenter()
+		yangLine.SetHorizontalAlignCenter()
+		yangLine.SetVerticalAlignCenter()
+		yangLine.SetPosition(0, 72)
+		yangLine.SetText(skilltreelocale.GetYangCostText(
+			_ClientLocaleKey(), cost.get("yang", 0),
+		))
+		try:
+			hasYang = player.GetElk() >= cost.get("yang", 0)
+		except Exception:
+			hasYang = False
+		yangLine.SetPackedFontColor(0xffe6bd78 if hasYang else 0xffef7070)
+		yangLine.Show()
+		dialog.yangLine = yangLine
+		# the item price under the yang line, one row each: "Name  12 / 25" with the count green / red (it was not
+		# listed at all; root/ownedcount.py)
+		itemLines = []
+		rowHeight = 20		# px per item price row
+		for index, itemCost in enumerate(cost.get("items", ())):
+			itemLine = ui.TextLine()
+			itemLine.SetParent(dialog.board)
+			itemLine.AddFlag("not_pick")
+			itemLine.SetWindowHorizontalAlignCenter()
+			itemLine.SetHorizontalAlignCenter()
+			itemLine.SetVerticalAlignCenter()
+			itemLine.SetPosition(0, 72 + rowHeight * (index + 1))
+			itemLine.SetPackedFontColor(0xffe6bd78)
+			itemLine.SetText(_CostItemText(itemCost["vnum"], itemCost["count"]))
+			itemLine.Show()
+			itemLines.append(itemLine)
+		dialog.itemLines = itemLines
+		extraHeight = rowHeight * len(itemLines)
+		pointWidth = dialog.textLine2.GetTextSize()[0]
+		width = max(340, dialog.textLine1.GetTextSize()[0] + 40,
+			pointWidth + 59, yangLine.GetTextSize()[0] + 40,
+			max([line.GetTextSize()[0] for line in itemLines] or [0]) + 40)
+		dialog.SetSize(width, 132 + extraHeight)
+		dialog.SetWidth(width)
+		dialog.acceptButton.SetPosition(-40, 94 + extraHeight)
+		dialog.cancelButton.SetPosition(40, 94 + extraHeight)
 		acceptText, cancelText = skilltreelocale.GetUpgradeActionText(_ClientLocaleKey())
 		dialog.SetAcceptText(acceptText)
 		dialog.SetCancelText(cancelText)
@@ -2147,31 +2302,156 @@ class SkillTreeWindow(ui.ScriptWindow):
 			dialog.acceptButton.Disable()
 		pointIcon = ui.ImageBox()
 		pointIcon.SetParent(dialog.board)
-		pointIcon.SetPosition(81, 43)
 		pointIcon.LoadImage(SKIN_PATH + "point_currency.tga")
+		pointIcon.SetPosition((width - pointWidth - pointIcon.GetWidth() - 5) // 2, 43)
+		dialog.textLine2.SetPosition((pointIcon.GetWidth() + 5) // 2, 50)
 		pointIcon.AddFlag("not_pick")
 		pointIcon.Show()
 		dialog.pointIcon = pointIcon
+		dialog.yangPrice = None
+		if getattr(dialog, "r1skin", None) is not None:
+			# R1 look (the dialog dressed by uir1dialog): the yang line is the shared R1 price (root/uir1price.py:
+			# the coin, "1.000.000 Yang" in Tahoma 12, red when the player has less) centred where the line was
+			try:
+				import uir1price
+				price = uir1price.Price(dialog.board, width // 2, 72 - uir1price.ICON_H // 2, "center")
+				price.SetPrice(cost.get("yang", 0), hasYang)
+				yangLine.Hide()
+				dialog.yangPrice = price
+			except Exception:
+				yangLine.Show()
+				try:
+					import uir1
+					uir1.TraceFailure("the skill tree upgrade price")
+				except Exception:
+					pass
 		dialog.SetAcceptEvent(ui.__mem_func__(self.__ConfirmNodeUpgrade))
 		dialog.SetCancelEvent(ui.__mem_func__(self.__CloseUpgradeDialog))
 		self.upgradeDialog = dialog
 		self.upgradeDialogNodeId = nodeId
 		self.upgradeDialogRevision = self.model.progressRevision
+		self.upgradeDialogPending = False
+		self.upgradeDialogMaxed = False
 		dialog.Open()
+		if keepPosition:
+			# The refreshed dialog opens where the previous one stood (same centre, same top)
+			try:
+				dialog.SetPosition(keepPosition[0] - dialog.GetWidth() // 2, keepPosition[1])
+			except Exception:
+				pass
 		return True
+
+	def __UpgradeDialogPosition(self):
+		"""Where the open dialog stands (its centre x and top y), so the refreshed one opens on the same spot."""
+		dialog = self.upgradeDialog
+		try:
+			x, y = dialog.GetGlobalPosition()
+			return x + dialog.GetWidth() // 2, y
+		except Exception:
+			return None
+
+	def __OpenMaxedDialog(self, nodeId, keepPosition=None):
+		"""The node reached its highest rank while its upgrade dialog was open. The dialog stays open
+		with "Max" (the value it now gives, no price, Vylepšit off) until the player closes it (X, Esc, the close button)."""
+		presenter = self.model.GetNodePresenters().get(nodeId) if self.model else None
+		texts = skilltreelocale.GetNodeText(_ClientLocaleKey(), nodeId)
+		if not presenter or not texts:
+			return False
+		current = skilltreelocale.FormatNodeValue(nodeId, presenter["current_total"])
+		if current is None:
+			return False
+		self.__CloseUpgradeDialog()
+		dialog = uiCommon.QuestionDialog2()
+		dialog.SetText1(u"%s: %s" % (texts[0], current))
+		dialog.SetText2(skilltreelocale.GetMaxRankText(
+			_ClientLocaleKey(), presenter["rank"], presenter["max_rank"],
+		))
+		dialog.textLine2.SetPackedFontColor(0xff75d98c)
+		width = max(340, dialog.textLine1.GetTextSize()[0] + 40, dialog.textLine2.GetTextSize()[0] + 40)
+		dialog.SetSize(width, 132)
+		dialog.SetWidth(width)
+		dialog.acceptButton.SetPosition(-40, 94)
+		dialog.cancelButton.SetPosition(40, 94)
+		acceptText, unusedCancelText = skilltreelocale.GetUpgradeActionText(_ClientLocaleKey())
+		dialog.SetAcceptText(acceptText)
+		dialog.SetCancelText(skilltreelocale.GetCloseText(_ClientLocaleKey()))
+		uicrimsoncontrols.ApplyVisuals(dialog.acceptButton, "61x21")
+		uicrimsoncontrols.ApplyVisuals(dialog.cancelButton, "61x21")
+		dialog.acceptButton.Disable()
+		dialog.yangLine = None
+		dialog.pointIcon = None
+		dialog.yangPrice = None
+		dialog.SetAcceptEvent(ui.__mem_func__(self.__CloseUpgradeDialog))
+		dialog.SetCancelEvent(ui.__mem_func__(self.__CloseUpgradeDialog))
+		self.upgradeDialog = dialog
+		self.upgradeDialogNodeId = nodeId
+		self.upgradeDialogRevision = self.model.progressRevision
+		self.upgradeDialogPending = False
+		self.upgradeDialogMaxed = True
+		dialog.Open()
+		if keepPosition:
+			# The refreshed dialog opens where the previous one stood (same centre, same top)
+			try:
+				dialog.SetPosition(keepPosition[0] - dialog.GetWidth() // 2, keepPosition[1])
+			except Exception:
+				pass
+		return True
+
+	def RefreshOwnedCounts(self):
+		"""The item prices' "owned / need" of the renew tooltip and the open upgrade dialog again (the interface
+		calls it when the inventory changes)."""
+		if self.renewToolTip:
+			self.renewToolTip.RefreshOwnedCounts()
+		dialog = self.upgradeDialog
+		if dialog and self.upgradeDialogNodeId is not None and getattr(dialog, "itemLines", None):
+			cost = self.model.GetNextCost(self.upgradeDialogNodeId) if self.model else None
+			items = cost.get("items", ()) if isinstance(cost, dict) else ()
+			for line, itemCost in zip(dialog.itemLines, items):
+				line.SetText(_CostItemText(itemCost["vnum"], itemCost["count"]))
+			if not self.upgradeDialogPending and not self.upgradeDialogMaxed and self.__CanAffordNextCost(self.upgradeDialogNodeId):
+				dialog.acceptButton.Enable()
+			else:
+				dialog.acceptButton.Disable()
 
 	def __ConfirmNodeUpgrade(self):
 		nodeId = self.upgradeDialogNodeId
 		revision = self.upgradeDialogRevision
-		self.__CloseUpgradeDialog()
 		if (
 			nodeId is not None
+			and not self.upgradeDialogPending
+			and not self.upgradeDialogMaxed
 			and self.model
 			and self.model.progressRevision == revision
 			and self.CanUpgradeNode(nodeId)
 			and self.__CanAffordNextCost(nodeId)
 		):
-			self.upgradeHandler(nodeId)
+			# The dialog stays open while the server answers; the next model refresh reopens it on the
+			# same spot with the new rank and price (or "Max"), so the player can click Vylepšit again.
+			if self.upgradeHandler(nodeId) is False:
+				self.__CloseUpgradeDialog()
+				return False
+			self.upgradeDialogPending = True
+			if self.upgradeDialog:
+				self.upgradeDialog.acceptButton.Disable()
+			return True
+		self.__CloseUpgradeDialog()
+		return False
+
+	def __RefreshUpgradeDialog(self):
+		"""After the server answered a confirmed upgrade: the same dialog again with the new rank and price, the
+		"Max" dialog when the node is full, nothing while the answer is still pending."""
+		dialog = self.upgradeDialog
+		nodeId = self.upgradeDialogNodeId
+		if not dialog or nodeId is None or not self.upgradeDialogPending or not self.model:
+			return False
+		presenter = self.model.GetNodePresenters().get(nodeId)
+		position = self.__UpgradeDialogPosition()
+		if presenter and presenter.get("state") == "maxed":
+			return self.__OpenMaxedDialog(nodeId, position)
+		if self.CanUpgradeNode(nodeId):
+			if not self.RequestNodeUpgrade(nodeId, position):
+				self.__CloseUpgradeDialog()
+				return False
 			return True
 		return False
 
@@ -2181,6 +2461,8 @@ class SkillTreeWindow(ui.ScriptWindow):
 		self.upgradeDialog = None
 		self.upgradeDialogNodeId = None
 		self.upgradeDialogRevision = None
+		self.upgradeDialogPending = False
+		self.upgradeDialogMaxed = False
 
 	def BeginTreeDrag(self, nodeId=None):
 		if not self.viewport:
@@ -2264,7 +2546,7 @@ class SkillTreeWindow(ui.ScriptWindow):
 		records = []
 		for vnum, requiredCount in validatedItems:
 			try:
-				ownedCount = max(0, int(player.GetItemCountByVnum(vnum)))
+				ownedCount = ownedcount.Owned(vnum)
 			except Exception:
 				ownedCount = 0
 			try:
@@ -2319,12 +2601,12 @@ class SkillTreeWindow(ui.ScriptWindow):
 		self.toolTip.AppendTextLine(u"%d / %d" % (rank, maxRank), self.toolTip.TITLE_COLOR)
 		current = skilltreelocale.FormatNodeValue(
 			presenter["node_id"], presenter.get("current_total", 0),
-		) or u"\u2014"
+		) or u"-"
 		if rank < maxRank and presenter.get("next_total") is not None:
 			nextTotal = skilltreelocale.FormatNodeValue(
 				presenter["node_id"], presenter["next_total"],
-			) or u"\u2014"
-			self.toolTip.AppendTextLine(current + u"  \u2192  " + nextTotal, bonuscolor.Text(current + nextTotal))
+			) or u"-"
+			self.toolTip.AppendTextLine(current + u"  ->  " + nextTotal, bonuscolor.Text(current + nextTotal))
 		else:
 			self.toolTip.AppendTextLine(current, bonuscolor.Text(current))
 		if player.GetStatus(player.LEVEL) < presenter["required_level"]:
@@ -2332,6 +2614,26 @@ class SkillTreeWindow(ui.ScriptWindow):
 				skilltreelocale.GetGateText(_ClientLocaleKey(), presenter["required_level"]),
 				self.toolTip.DISABLE_COLOR,
 			)
+		if rank < maxRank:
+			cost = self.model.GetNextCost(presenter["node_id"])
+			if isinstance(cost, dict):
+				balance = self.model.GetPointBalance()
+				hasPoints = balance is not None and balance >= cost.get("points", 0)
+				try:
+					hasYang = player.GetElk() >= cost.get("yang", 0)
+				except Exception:
+					hasYang = False
+				self.toolTip.AppendSpace(5)
+				self.toolTip.AppendTextLine(
+					skilltreelocale.GetPointCostText(_ClientLocaleKey(), cost["points"]),
+					0xffe6bd78 if hasPoints else 0xffef7070,
+				)
+				self.toolTip.AppendTextLine(
+					skilltreelocale.GetYangCostText(_ClientLocaleKey(), cost.get("yang", 0)),
+					0xffe6bd78 if hasYang else 0xffef7070,
+				)
+				for itemCost in cost.get("items", ()):
+					self.toolTip.AppendTextLine(_CostItemText(itemCost["vnum"], itemCost["count"]), 0xffe6bd78)
 		self.toolTip.ResizeToolTip()
 		self.toolTip.ShowToolTip()
 
@@ -2347,24 +2649,8 @@ class SkillTreeWindow(ui.ScriptWindow):
 			return
 		cost = presenter.get("next_rank_cost", {"yang": 0, "items": []})
 		for itemCost in cost["items"]:
-			vnum = itemCost["vnum"]
-			requiredCount = itemCost["count"]
-			try:
-				ownedCount = player.GetItemCountByVnum(vnum)
-			except Exception:
-				ownedCount = 0
-			try:
-				item.SelectItem(vnum)
-				itemName = item.GetItemName()
-			except Exception:
-				itemName = uiScriptLocale.SKILL_TREE_NODE_UNKNOWN_ITEM % vnum
-			color = self.toolTip.NORMAL_COLOR if ownedCount >= requiredCount else self.toolTip.DISABLE_COLOR
-			self.toolTip.AppendTextLine(
-				uiScriptLocale.SKILL_TREE_NODE_ITEM_OWNED % (
-					itemName, ownedCount, requiredCount,
-				),
-				color,
-			)
+			# "Name  12 / 25", the count green / red (root/ownedcount.py)
+			self.toolTip.AppendTextLine(_CostItemText(itemCost["vnum"], itemCost["count"]), self.toolTip.NORMAL_COLOR)
 		yangCost = cost["yang"]
 		if yangCost > 0:
 			ownedYang = player.GetElk()
@@ -2399,8 +2685,29 @@ class SkillTreeWindow(ui.ScriptWindow):
 				self.viewport.canvas.RefreshControls()
 			self.viewport.canvas.UpdateAnimation(now)
 
+	def __SyncLook(self):
+		"""The R1 look (root/uiskilltreer1.py) unless Settings -> "Starý vzhled" chose the original window; the switch
+		takes effect on the next opening. A failure traces to syserr and keeps the original look (not retried)."""
+		try:
+			import uir1
+			wanted = uir1.UseR1() and not self.r1Failed
+		except Exception:
+			return
+		if wanted and not self.r1:
+			try:
+				import uiskilltreer1
+				self.r1 = uiskilltreer1.SkillTreeSkin(self)
+			except Exception:
+				uir1.TraceFailure("the skill tree window")
+				self.r1Failed = True
+				self.r1 = None
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def Open(self):
 		wasShown = self.IsShow()
+		self.__SyncLook()
 		self.SetCenterPosition()
 		x, y = self.GetLocalPosition()
 		x, y = ClampSkillTreePosition(
@@ -2426,6 +2733,9 @@ class SkillTreeWindow(ui.ScriptWindow):
 		return True
 
 	def Destroy(self):
+		if getattr(self, "r1", None):
+			r1, self.r1 = self.r1, None
+			r1.Destroy()
 		self.__CloseUpgradeDialog()
 		if self.dismantleWindow:
 			self.dismantleWindow.Destroy()

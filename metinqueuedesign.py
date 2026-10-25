@@ -35,9 +35,9 @@ CATALOG = (
 	(19, "beacon", u"Světelná koule", u"Světelné jádro a proudy energie uvnitř kulatého povrchu."),
 	(20, "orbs", u"Tři oběžnice", u"Tři koule s vlastními proudy světla obíhají nad vrcholem."),
 	(21, "arrow", u"Šipka cíle", u"Plastická šipka míří na vybraný kámen."),
-	(24, "native_corona", u"Koróna · Althea", u"Autorské prostorové oblouky Althea."),
-	(25, "native_resonance", u"Rezonance · Althea", u"Autorské Althea stuhy a pomalé pulzování."),
-	(26, "native_serpent", u"Hadí spirála · Althea", u"Dva hadi s animovanými hlavami a hřbetními ploutvemi."),
+	(24, "native_corona", u"Koróna | Althea", u"Autorské prostorové oblouky Althea."),
+	(25, "native_resonance", u"Rezonance | Althea", u"Autorské Althea stuhy a pomalé pulzování."),
+	(26, "native_serpent", u"Hadí spirála | Althea", u"Dva hadi s animovanými hlavami a hřbetními ploutvemi."),
 	(28, "current_pulse", u"Pulzující obal", u"Pohyblivý částicový obal kolem kamene."),
 	(30, "talismans", u"Runové talismany", u"Čtyři vyřezávané talismany s třásněmi obíhají kámen."),
 	(34, "spiral_pair", u"Dvojitá šroubovice", u"Dvě úzké protilehlé stuhy opisují klidnou šroubovici."),
@@ -52,17 +52,17 @@ RING_STYLE_CHOICES = (
 	(4, u"Propletené dráhy"), (6, u"Lotos"), (7, u"Přerušené oblouky"),
 	(9, u"Světelný běžec"), (12, u"Jemný vír"), (16, u"Prstencový kompas"),
 	(19, u"Dvojitý prstenec"), (20, u"Rezonance"), (21, u"Prstenec jisker"),
-	(22, u"Původní · Krystaly"), (23, u"Původní · Lotos"),
-	(24, u"Původní · Uhlíky"), (25, u"Původní · Závoj"),
-	(26, u"Původní · Závoj Althea"), (27, u"Původní · Koróna"),
-	(28, u"Původní · Rezonance"),
+	(22, u"Původní | Krystaly"), (23, u"Původní | Lotos"),
+	(24, u"Původní | Uhlíky"), (25, u"Původní | Závoj"),
+	(26, u"Původní | Závoj Althea"), (27, u"Původní | Koróna"),
+	(28, u"Původní | Rezonance"),
 )
 RING_NAMES = dict(RING_STYLE_CHOICES)
 ORIGINAL_RING_STYLES = {6: 22, 9: 23, 12: 24, 15: 25, 22: 26, 24: 27, 25: 28}
 SPARK_PRESETS = (10, 12, 24, 25, 26, 35, 40, 49)
 OVERHEAD_PRESETS = (19, 20, 21, 48, 49)
 PREVIOUS_ART_PRESETS = (5, 6, 12, 14, 15, 21, 24, 25, 26, 28)
-FOCUS_CHOICES = ((0, u"Všechny stejně"), (1, u"Ostatní tlumené"), (2, u"Pouze první"))
+FOCUS_CHOICES = ((0, u"Všechny stejně"), (1, u"Ostatní tlumené"), (2, u"Jen první"))
 PULSE_CHOICES = ((0, u"Podle efektu"), (1, u"Vypnuto"), (2, u"Jemné"), (3, u"Výrazné"))
 ART_REVISION_CHOICES = ((1, u"Nová kresba"), (0, u"Předchozí kresba"))
 MODEL_VNUMS = (8001, 8005, 8013)

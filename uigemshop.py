@@ -19,6 +19,7 @@ import constInfo
 import ime
 import wndMgr
 import uiToolTip
+import ownedcount
 
 class SelectGems(ui.ScriptWindow):
 	def __init__(self):
@@ -348,7 +349,9 @@ class SelectGemsShop(ui.ScriptWindow):
 
 		self.questionDialog = uiCommon.QuestionDialog2()
 		self.questionDialog.SetText1(localeInfo.GEM_SYSTEM_ADD_SLOT % (gemshopadditemvnum))
-		self.questionDialog.SetText2(localeInfo.GEM_SYSTEM_ADD_SLOT2 % (openslotitemcount))
+		# the unlock item with how many the player has: "Name  0 / 1" green / red (root/ownedcount.py)
+		self.questionDialog.SetText2("%s  %s" % (gemshopadditemvnum,
+			ownedcount.Tagged(ownedcount.Owned(self.GEM_SHOP_ADD_ITEM_VNUM), openslotitemcount)))
 		self.questionDialog.SetAcceptEvent(ui.__mem_func__(self.SlotAddQuestionAccept))
 		self.questionDialog.SetCancelEvent(ui.__mem_func__(self.SlotAddQuestionCancle))
 		self.questionDialog.SetWidth(350)
@@ -386,8 +389,10 @@ class SelectGemsShop(ui.ScriptWindow):
 				unlockSlotItemName = item.GetItemName()
 				openSlotItemCount = 1
 
-				self.questionDialog = uiCommon.QuestionDialog()
-				self.questionDialog.SetText(localeInfo.GEM_SYSTEM_ADD_SLOT % (unlockSlotItemName, openSlotItemCount))
+				self.questionDialog = uiCommon.QuestionDialog2()
+				self.questionDialog.SetText1(localeInfo.GEM_SYSTEM_ADD_SLOT % (unlockSlotItemName, openSlotItemCount))
+				self.questionDialog.SetText2("%s  %s" % (unlockSlotItemName,
+					ownedcount.Tagged(ownedcount.Owned(self.GEM_SHOP_ADD_ITEM_VNUM), openSlotItemCount)))
 			else:
 				self.questionDialog.SetText(localeInfo.GEM_SYSTEM_BUY_ITEM)
 		else:

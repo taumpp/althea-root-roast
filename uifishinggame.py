@@ -19,11 +19,19 @@ import dbg
 import player
 import ui
 import uiScriptLocale
+import localeInfo
 import math
 import systemSetting
 import servergamedata
 
 DEBUG = False
+# R1 look of the window (owner RYB1 = A, 12. 10. 2026): the R1 frame (uir1frame), muted water, the bone ring with
+# marks that turns red while the fish is inside, three seals under the ring as the counter, a red time bar,
+# ULOVEK / VEDLE above the ring.
+# The game itself (fish movement, the 65 px goal, click rules, server goals) is unchanged.
+# "Starý vzhled" (settingslook 'legacy') keeps the original window.
+R1_ROOT = "d:/ymir work/ui/public/althea_r1_rybareni/"
+R1_HEAD_EXTRA = 4            # the R1 header is 27 px, the original title bar 23
 FISH_MOVE_INTERVAL = 1.0 / 60.0
 MAX_FISH_MOVE_STEPS = 15 # Avoid a long catch-up jump after a rendering pause.
 
@@ -102,6 +110,12 @@ class FishGame(ui.ScriptWindow):
 
 		self.goalCount = 0
 
+		self.r1 = False
+		self.r1GoalHot = None
+		self.r1Fish = []
+		self.r1Result = None
+		self.r1ResultUntil = 0.0
+
 	def __Load(self):
 		try:
 			pyScrLoader = ui.PythonScriptLoader()
@@ -147,11 +161,93 @@ class FishGame(ui.ScriptWindow):
 			self.debug_text_mouse_pos.SetPosition(50, 50 + (12 * 2))
 
 		self.CreateFishImage()
+		try:
+			import uir1
+			if uir1.UseR1():
+				self.__DressR1()
+		except Exception:
+			import dbg
+			dbg.TraceError("FishGame R1 look failed, the original look is used")
+			self.r1 = False
+
+	def __DressR1(self):
+		"""R1 textures in place of the original ones; same sizes and positions for everything the game measures."""
+		import uir1
+		import uir1frame
+		import uir1tokens as T
+		# the shared R1 frame (header, X, background) drawn into the board; without it the original look stays
+		if uir1frame.Dress(self, dict(board="board")) is None:
+			return
+		kit = uir1.Kit()
+		width, height = self.GetWidth(), self.GetHeight() + R1_HEAD_EXTRA
+		self.SetSize(width, height)
+		if self.board:
+			self.board.SetSize(width, height)
+		for child in (self.backGroundWater, self.hitCount, self.fishing_timer_baseImg, self.timerGauge):
+			(x, y) = child.GetLocalPosition()
+			child.SetPosition(x, y + R1_HEAD_EXTRA)
+		self.backGroundWater.LoadImage(R1_ROOT + "water.png")
+		# a drawn top-down fish (dark body, light rim, tail beat over 4 frames): the original one vanished on the
+		# muted water and the first bone fish looked broken (owner 12. 10.)
+		self.fish_image_list = [R1_ROOT + "fish_%d.png" % frame for frame in (1, 2, 3, 4)]
+		if self.fishImage:
+			self.fishImage.Hide()
+		self.CreateFishImage()
+		self.goalCircle.LoadImage(R1_ROOT + "ring.png")
+		self.r1GoalHot = False
+		# the counter (owner RYB2: C without the fish): three seals under the ring, a caught fish lights one green (owner 14. 10.)
+		(circleX, circleY) = self.goalCircle.GetLocalPosition()
+		waterX, waterY = self.backGroundWater.GetLocalPosition()
+		goals = max(1, self.goalTarget)
+		self.hitCount.LoadImage(R1_ROOT + "pips_base.png")
+		self.hitCount.SetPosition(waterX + circleX + self.goalCircle.GetWidth() // 2 - (22 + (goals - 1) * 26) // 2,
+			waterY + circleY + self.goalCircle.GetHeight() + 1)
+		self.fishing_goal_count_text.Hide()
+		self.r1Fish = []
+		for index in range(goals):
+			seal = ui.ImageBox()
+			seal.SetParent(self.hitCount)
+			seal.AddFlag("not_pick")
+			seal.SetPosition(index * 26, 0)
+			seal.LoadImage(R1_ROOT + "pip_off.png")
+			seal.Show()
+			self.r1Fish.append(seal)
+		# the time: a thin red bar along the bottom of the water
+		self.fishing_timer_baseImg.LoadImage(R1_ROOT + "timer_base.png")
+		self.fishing_timer_baseImg.SetPosition(waterX + 16, waterY + 226 - 18)
+		self.timerGauge.LoadImage(R1_ROOT + "timer_fill.png")
+		self.timerGauge.SetPosition(waterX + 17, waterY + 226 - 17)
+		# ULOVEK / VEDLE in the band between the header and the ring (owner 12. 10. marked the spot; uikit.Text has
+		# no bottom alignment, so the top of the line is placed 30 px above the ring); the seals sit under the ring
+		self.r1Result = uir1.Text(self.backGroundWater, "", circleX + self.goalCircle.GetWidth() // 2,
+			max(2, circleY - 30), kit.font("button_s"), T.RED_HI, align="center", valign="top", outline=True)
+		self.r1Result.Hide()
+		self.r1 = True
+
+	def __PaintGoalR1(self, hot):
+		if not self.r1 or hot == self.r1GoalHot:
+			return
+		self.r1GoalHot = hot
+		self.goalCircle.LoadImage(R1_ROOT + ("ring_hot.png" if hot else "ring.png"))
+
+	def __PaintCountR1(self):
+		for index, fish in enumerate(self.r1Fish):
+			fish.LoadImage(R1_ROOT + ("pip_on.png" if index < self.goalCount else "pip_off.png"))
+
+	def __ShowResultR1(self, hit):
+		import uir1tokens as T
+		self.r1Result.SetText(localeInfo.FISHING_R1_CATCH if hit else localeInfo.FISHING_R1_MISS)
+		self.r1Result.SetPackedFontColor(T.GREEN_HI if hit else T.RED_HI)		# owner 14. 10.: ÚLOVEK green, VEDLE red
+		self.r1Result.Show()
+		self.r1ResultUntil = app.GetTime() + 0.6
 
 	def Destroy(self):
 		self.__Initialize()
 
 	def OnUpdate(self):
+		if self.r1 and self.r1Result and self.r1ResultUntil and app.GetTime() >= self.r1ResultUntil:
+			self.r1Result.Hide()
+			self.r1ResultUntil = 0.0
 		hitImageShowTime = max(0, self.hitImageShowDelay - app.GetTime())
 		if hitImageShowTime <= 0:
 
@@ -257,10 +353,16 @@ class FishGame(ui.ScriptWindow):
 			circleDistance = math.sqrt((xCenterCircle - xFish) ** 2 + (yCenterCircle - yFish) ** 2)
 			if circleDistance < circleRadius:
 				self.fishInGoal = True
-				self.goalCircle.SetDiffuseColor(1.0, 0.7, 0.7, 1.0)
+				if self.r1:
+					self.__PaintGoalR1(True)
+				else:
+					self.goalCircle.SetDiffuseColor(1.0, 0.7, 0.7, 1.0)
 			else:
 				self.fishInGoal = False
-				self.goalCircle.SetDiffuseColor(1.0, 1.0, 1.0, 1.0)
+				if self.r1:
+					self.__PaintGoalR1(False)
+				else:
+					self.goalCircle.SetDiffuseColor(1.0, 1.0, 1.0, 1.0)
 
 		## Mouse Position Debug
 		if DEBUG:
@@ -287,6 +389,10 @@ class FishGame(ui.ScriptWindow):
 		self.fishInGoal = False
 
 		self.fishing_goal_count_text.SetText("%d / %d" % (self.goalCount, self.goalTarget))
+		if self.r1:
+			self.__PaintCountR1()
+			self.__PaintGoalR1(False)
+			self.r1Result.Hide()
 		self.__OnMoveFish()
 		self.fishImage.SetPosition(self.xFishDest, self.yFishDest)
 
@@ -316,6 +422,9 @@ class FishGame(ui.ScriptWindow):
 
 			self.goalCount += 1
 			self.fishing_goal_count_text.SetText("%d / %d" % (self.goalCount, self.goalTarget))
+			if self.r1:
+				self.__PaintCountR1()
+				self.__PaintGoalR1(False)
 
 			player.FishingGameGoal(self.goalCount)
 		else:
@@ -326,6 +435,18 @@ class FishGame(ui.ScriptWindow):
 		self.nextHit = now + 1.0
 		if self.goalCount >= self.goalTarget:
 			self.closeTimer = app.GetTime() + 0.05   # 50ms before closing
+
+	def SpaceHit(self):
+		"""Space while the game is open (game.OnKeyDown -> interface.MinigameSpaceHit): the click where the mouse is,
+		only over the water. Always True: Space never attacks while the game is open (with the rod in hand that
+		would pull it out)."""
+		water = self.backGroundWater
+		if water:
+			(xMouse, yMouse) = wndMgr.GetMousePosition()
+			(x, y) = water.GetGlobalPosition()
+			if x <= xMouse < x + water.GetWidth() and y <= yMouse < y + water.GetHeight():
+				self.OnMouseLeftButtonDownEvent()
+		return True
 
 	def OnMouseOverIn(self):
 		if systemSetting.IsSoftwareCursor():
@@ -389,6 +510,9 @@ class FishGame(ui.ScriptWindow):
 		self.fishImage.Show()
 
 	def CreateHitEffect(self, x, y):
+		if self.r1:
+			self.__ShowResultR1(True)
+			return
 		self.hitImage = ui.ExpandedImageBox()
 		self.hitImage.SetParent(self.backGroundWater)
 		self.hitImage.SetPosition(x, y)
@@ -403,6 +527,9 @@ class FishGame(ui.ScriptWindow):
 		self.hitImageShowDelay = app.GetTime() + 0.5
 
 	def CreateMissEffect(self, x, y):
+		if self.r1:
+			self.__ShowResultR1(False)
+			return
 		self.missImage = ui.ExpandedImageBox()
 		self.missImage.SetParent(self.backGroundWater)
 		self.missImage.SetPosition(x + 10, y - 5)

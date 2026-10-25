@@ -4,6 +4,7 @@ import item
 import wndMgr
 import net
 import app
+import uir1frame
 
 class SelectItemWindow(ui.ScriptWindow):
 	def __init__(self):
@@ -64,7 +65,7 @@ class SelectItemWindow(ui.ScriptWindow):
 		SLOT_X_COUNT = 5
 		self.itemSlot.ArrangeSlot(0, SLOT_X_COUNT, size, 32, 32, 0, 0)
 		self.itemSlot.RefreshSlot()
-		self.itemSlot.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		uir1frame.SetSlotBase(self, self.itemSlot, "d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
 
 		self.board.SetSize(self.board.GetWidth(), 76 + 32*size)
 		self.SetSize(self.board.GetWidth(), 76 + 32*size)

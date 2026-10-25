@@ -61,7 +61,9 @@ def submission(row, now, level, inventory, elixir=False, clock=False, available=
         return False
     if elixir and inventory(row["elixir"]) < row["elixir_cost"]:
         return False
-    if row["due"] > now and (not clock or inventory(row["clock"]) < row["clock_cost"]):
+    if clock and inventory(row["clock"]) < row["clock_cost"]:
+        return False
+    if row["due"] > now and not clock:
         return False
     return True
 

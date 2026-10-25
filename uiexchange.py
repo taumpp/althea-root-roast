@@ -14,6 +14,7 @@ import app
 import time
 import playerSettingModule
 import exchangequickadd
+import uir1frame
 ###################################################################################################
 ## Exchange
 if app.WJ_ENABLE_TRADABLE_ICON:
@@ -34,6 +35,8 @@ class ExchangeDialog(ui.ScriptWindow):
 	}
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton')
 		self.TitleName = 0
 		self.tooltipItem = 0
 		self.xStart = 0
@@ -363,18 +366,36 @@ class ExchangeDialog(ui.ScriptWindow):
 
 		self.TargetSlot.RefreshSlot()
 
+	# R1 (): the yang fields (115 px wells, the text right-aligned 3 px inside) show the amount
+	# as the one R1 yang price of the client, "1.000.000 Yang"; an amount too wide for the well with the unit keeps
+	# the dots without it. "Starý vzhled" keeps localeInfo.AddPointToNumberString.
+	R1_MONEY_ROOM = 108
+
+	def __SetMoney(self, line, amount):
+		if self.__dict__.get("r1frame") is None:
+			line.SetText(str(localeInfo.AddPointToNumberString(amount)))
+			return
+		import uir1price
+		line.SetText(uir1price.FormatYang(amount))
+		try:
+			wide = int(line.GetTextSize()[0]) > self.R1_MONEY_ROOM
+		except Exception:
+			wide = False
+		if wide:
+			line.SetText(uir1price.FormatAmount(amount))
+
 	def Refresh(self):
 		self.RefreshOwnerSlot()
 		self.RefreshTargetSlot()
 
-		self.OwnerMoney.SetText(str(localeInfo.AddPointToNumberString(exchange.GetElkFromSelf())))
-		self.TargetMoney.SetText(str(localeInfo.AddPointToNumberString(exchange.GetElkFromTarget())))
+		self.__SetMoney(self.OwnerMoney, exchange.GetElkFromSelf())
+		self.__SetMoney(self.TargetMoney, exchange.GetElkFromTarget())
 
 		if True == exchange.GetAcceptFromSelf():
 			if not app.ENABLE_NEW_EXCHANGE_WINDOW:
 				self.OwnerAcceptLight.Down()
 			else:
-				self.OwnerSlot.SetSlotBaseImage("d:/ymir work/ui/public/slot_base.sub", 0.3500, 0.8500, 0.3500, 1.0)
+				uir1frame.SetSlotBase(self, self.OwnerSlot, "d:/ymir work/ui/public/slot_base.sub", 0.3500, 0.8500, 0.3500, 1.0)
 				self.LogsDropList.AppendItem(self.Item(self, localeInfo.NEW_EXCHANGE_YOU_ACCEPT % (str((time.strftime("[%H:%M:%S]")))), 0))
 		else:
 			self.AcceptButton.Enable()
@@ -382,14 +403,14 @@ class ExchangeDialog(ui.ScriptWindow):
 			if not app.ENABLE_NEW_EXCHANGE_WINDOW:
 				self.OwnerAcceptLight.SetUp()
 			else:
-				self.OwnerSlot.SetSlotBaseImage("d:/ymir work/ui/public/slot_base.sub", 1.0, 1.0, 1.0, 1.0)
+				uir1frame.SetSlotBase(self, self.OwnerSlot, "d:/ymir work/ui/public/slot_base.sub", 1.0, 1.0, 1.0, 1.0)
 
 		if True == exchange.GetAcceptFromTarget():
 			if not app.ENABLE_NEW_EXCHANGE_WINDOW:
 				self.TargetAcceptLight.Down()
 			else:
 				self.TargetAcceptButton.Down()
-				self.TargetSlot.SetSlotBaseImage("d:/ymir work/ui/public/slot_base.sub", 0.3500, 0.8500, 0.3500, 1.0)
+				uir1frame.SetSlotBase(self, self.TargetSlot, "d:/ymir work/ui/public/slot_base.sub", 0.3500, 0.8500, 0.3500, 1.0)
 				self.LogsDropList.AppendItem(self.Item(self, localeInfo.NEW_EXCHANGE_ACCEPT % (str((time.strftime("[%H:%M:%S]"))), exchange.GetNameFromTarget()), 0))
 		else:
 			if not app.ENABLE_NEW_EXCHANGE_WINDOW:
@@ -399,7 +420,7 @@ class ExchangeDialog(ui.ScriptWindow):
 					self.LogsDropList.AppendItem(self.Item(self, localeInfo.NEW_EXCHANGE_ABORT % (str((time.strftime("[%H:%M:%S]"))), exchange.GetNameFromTarget()), 0))
 				
 				self.TargetAcceptButton.SetUp()
-				self.TargetSlot.SetSlotBaseImage("d:/ymir work/ui/public/slot_base.sub", 1.0, 1.0, 1.0, 1.0)
+				uir1frame.SetSlotBase(self, self.TargetSlot, "d:/ymir work/ui/public/slot_base.sub", 1.0, 1.0, 1.0, 1.0)
 
 	def OverInOwnerItem(self, slotIndex):
 		if 0 != self.tooltipItem:

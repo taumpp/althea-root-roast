@@ -105,9 +105,13 @@ class Model:
     def hud_rows(self):
         return [r for r in self.rows.values() if r['hud'] and r['learned'] > 0]
 
+    def control_rows(self):
+        return [self.rows[s] for s in SOURCES.get(self.identity, ())
+                if self.rows[s]['learned'] > 0]
+
     def command(self, skill, on, now):
         row = self.rows.get(skill)
-        if not row or not row['hud'] or not row['learned']:
+        if not row or not row['learned']:
             return None
         if on and self.remaining(skill, now):
             return None

@@ -2,83 +2,140 @@ import ui, player, item, net, app, localeInfo
 from uiToolTip import ItemToolTip, GET_AFFECT_STRING
 
 import osfInfo
+import characterbonuses
+import textcase
 
 IMG_DIR = "d:/ymir work/ui/game/characterdetails/"
-# only need setting here bro do u have question?
+# Categories define presentation order; native APPLY mapping owns point identities. Every bonus of a group belongs
+# in its category (the element resistances beside each other in Obranne); Ostatni keeps the stats, HP / SP, the
+# shop, dungeon and skill tree bonuses. A name this EXE does not know is skipped (getattr), no row is invented.
+def _Apply(name):
+	return getattr(item, "APPLY_" + name, None)
+
 bonus_list = [
 	[localeInfo.BONUS_TABLE_TITLE_1,
 		[
-			[item.APPLY_ATTBONUS_MONSTER,53],
-			[item.APPLY_ATTBONUS_METIN,160],
-			[item.APPLY_ATTBONUS_BOSS,161],
-			[item.APPLY_ATTBONUS_UNDEAD,47],
-			[item.APPLY_ATTBONUS_DEVIL,48],
-			[item.APPLY_ATTBONUS_ORC,45],
-			[item.APPLY_ATTBONUS_ANIMAL,44],
-			[item.APPLY_ATTBONUS_MILGYO,46],
-			[item.APPLY_STEAL_HP,63],
-			[item.APPLY_HP_REGEN,32],
-			[item.APPLY_EXP_DOUBLE_BONUS,83],
-			[item.APPLY_GOLD_DOUBLE_BONUS,84],
-			[item.APPLY_ITEM_DROP_BONUS,85],
-			[item.APPLY_ENCHANT_ELECT, item.GetApplyPoint(item.APPLY_ENCHANT_ELECT)],
-			[item.APPLY_ENCHANT_FIRE, item.GetApplyPoint(item.APPLY_ENCHANT_FIRE)],
-			[item.APPLY_ENCHANT_ICE, item.GetApplyPoint(item.APPLY_ENCHANT_ICE)],
-			[item.APPLY_ENCHANT_WIND, item.GetApplyPoint(item.APPLY_ENCHANT_WIND)],
-			[item.APPLY_ENCHANT_EARTH, item.GetApplyPoint(item.APPLY_ENCHANT_EARTH)],
-			[item.APPLY_ENCHANT_DARK, item.GetApplyPoint(item.APPLY_ENCHANT_DARK)],
+			_Apply("ATTBONUS_MONSTER"),
+			_Apply("ATTBONUS_ORDINARY_MONSTER"),
+			_Apply("ATTBONUS_METIN"),
+			_Apply("ATTBONUS_BOSS"),
+			_Apply("ATTBONUS_UNDEAD"),
+			_Apply("ATTBONUS_DEVIL"),
+			_Apply("ATTBONUS_ORC"),
+			_Apply("ATTBONUS_ANIMAL"),
+			_Apply("ATTBONUS_MILGYO"),
+			_Apply("ATTBONUS_INSECT"),
+			_Apply("ATTBONUS_DESERT"),
+			_Apply("ATTBONUS_CZ"),
+			_Apply("PVM_ATTBONUS"),
+			_Apply("RESIST_MONSTER"),
+			_Apply("RESIST_BOSS"),
+			_Apply("STEAL_HP"),
+			_Apply("STEAL_SP"),
+			_Apply("HP_REGEN"),
+			_Apply("EXP_DOUBLE_BONUS"),
+			_Apply("GOLD_DOUBLE_BONUS"),
+			_Apply("ITEM_DROP_BONUS"),
+			_Apply("ENCHANT_ELECT"),
+			_Apply("ENCHANT_ELEC"),
+			_Apply("ENCHANT_FIRE"),
+			_Apply("ENCHANT_ICE"),
+			_Apply("ENCHANT_WIND"),
+			_Apply("ENCHANT_EARTH"),
+			_Apply("ENCHANT_DARK"),
 		]
 	],
 	[localeInfo.BONUS_TABLE_TITLE_2,
 		[
-			[item.APPLY_ATTBONUS_HUMAN,43],
-			[item.APPLY_ATTBONUS_WARRIOR,54],
-			[item.APPLY_ATTBONUS_ASSASSIN,55],
-			[item.APPLY_ATTBONUS_SURA,56],
-			[item.APPLY_ATTBONUS_SHAMAN,57],
-			[item.APPLY_RESIST_WARRIOR,59],
-			[item.APPLY_RESIST_ASSASSIN,60],
-			[item.APPLY_RESIST_SURA,61],
-			[item.APPLY_RESIST_SHAMAN,62],
-			[item.APPLY_RESIST_HUMAN,159],
-			[item.APPLY_RESIST_SWORD,69],
-			[item.APPLY_RESIST_TWOHAND,70],
-			[item.APPLY_RESIST_DAGGER,71],
-			[item.APPLY_RESIST_BELL,72],
-			[item.APPLY_RESIST_FAN,73],
-			[item.APPLY_RESIST_BOW,74],
-			[item.APPLY_RESIST_MAGIC,77],
+			_Apply("ATTBONUS_HUMAN"),
+			_Apply("ATTBONUS_WARRIOR"),
+			_Apply("ATTBONUS_ASSASSIN"),
+			_Apply("ATTBONUS_SURA"),
+			_Apply("ATTBONUS_SHAMAN"),
+			_Apply("ATTBONUS_WOLFMAN"),
+			_Apply("RESIST_WARRIOR"),
+			_Apply("RESIST_ASSASSIN"),
+			_Apply("RESIST_SURA"),
+			_Apply("RESIST_SHAMAN"),
+			_Apply("RESIST_WOLFMAN"),
+			_Apply("RESIST_HUMAN"),
+			_Apply("RESIST_SWORD"),
+			_Apply("RESIST_TWOHAND"),
+			_Apply("RESIST_DAGGER"),
+			_Apply("RESIST_BELL"),
+			_Apply("RESIST_FAN"),
+			_Apply("RESIST_BOW"),
+			_Apply("RESIST_CLAW"),
+			_Apply("RESIST_MAGIC"),
+			_Apply("RESIST_SWORD_REDUCTION"),
+			_Apply("RESIST_TWOHAND_REDUCTION"),
+			_Apply("RESIST_DAGGER_REDUCTION"),
+			_Apply("RESIST_BELL_REDUCTION"),
+			_Apply("RESIST_FAN_REDUCTION"),
+			_Apply("RESIST_BOW_REDUCTION"),
+			_Apply("RESIST_CLAW_REDUCTION"),
+			_Apply("RESIST_MAGIC_REDUCTION"),
 		]
 	],
 	[localeInfo.BONUS_TABLE_TITLE_3,
 		[
-			[item.APPLY_SKILL_DAMAGE_BONUS,121],
-			[item.APPLY_NORMAL_HIT_DAMAGE_BONUS,122],
-			[item.APPLY_CRITICAL_PCT,40],
-			[item.APPLY_PENETRATE_PCT,41],
-			[item.APPLY_POISON_PCT,37],
-			[item.APPLY_SLOW_PCT,39],
-			[item.APPLY_STUN_PCT,38],
-			[item.APPLY_CAST_SPEED,21],
-			[item.APPLY_ATT_GRADE_BONUS,95],
+			_Apply("SKILL_DAMAGE_BONUS"),
+			_Apply("NORMAL_HIT_DAMAGE_BONUS"),
+			_Apply("CRITICAL_PCT"),
+			_Apply("PENETRATE_PCT"),
+			_Apply("BLOCK_PENETRATION"),
+			_Apply("DEFENSE_BREAKTHROUGH"),
+			_Apply("POISON_PCT"),
+			_Apply("BLEEDING_PCT"),
+			_Apply("SLOW_PCT"),
+			_Apply("STUN_PCT"),
+			_Apply("MANA_BURN_PCT"),
+			_Apply("CAST_SPEED"),
+			_Apply("ATT_SPEED"),
+			_Apply("ATT_GRADE_BONUS"),
+			_Apply("MAGIC_ATT_GRADE"),
+			_Apply("MAGIC_ATTBONUS_PER"),
+			_Apply("MELEE_MAGIC_ATTBONUS_PER"),
 		]
 	],
 	[localeInfo.BONUS_TABLE_TITLE_4,
 		[
-			[item.APPLY_SKILL_DEFEND_BONUS,123],
-			[item.APPLY_NORMAL_HIT_DEFEND_BONUS,124],
-			[item.APPLY_ANTI_CRITICAL_PCT,136],
-			[item.APPLY_ANTI_PENETRATE_PCT,137],
-			[item.APPLY_BLOCK,67],
-			[item.APPLY_REFLECT_MELEE,79],
-			[item.APPLY_DODGE,68],
-			[item.APPLY_POISON_REDUCE,81],
-			[item.APPLY_RESIST_FIRE,75],
-			[item.APPLY_RESIST_ELEC,76],
-			[item.APPLY_RESIST_WIND,78],
+			_Apply("SKILL_DEFEND_BONUS"),
+			_Apply("NORMAL_HIT_DEFEND_BONUS"),
+			_Apply("ANTI_CRITICAL_PCT"),
+			_Apply("ANTI_PENETRATE_PCT"),
+			_Apply("BLOCK"),
+			_Apply("REFLECT_MELEE"),
+			_Apply("REFLECT_CURSE"),
+			_Apply("DODGE"),
+			_Apply("POISON_REDUCE"),
+			_Apply("BLEEDING_REDUCE"),
+			_Apply("IMMUNE_STUN"),
+			_Apply("IMMUNE_SLOW"),
+			_Apply("IMMUNE_FALL"),
+			_Apply("RESIST_FIRE"),
+			_Apply("RESIST_ELEC"),
+			_Apply("RESIST_WIND"),
+			_Apply("RESIST_ICE"),
+			_Apply("RESIST_EARTH"),
+			_Apply("RESIST_DARK"),
+			_Apply("MAGIC_DEF_GRADE"),
+			_Apply("DEF_GRADE_BONUS"),
 		]
 	],
 ]
+
+# Fill the existing categories and append all remaining registered bonus kinds.
+bonus_list = characterbonuses.Catalog(item, ItemToolTip.AFFECT_DICT,
+    GET_AFFECT_STRING, bonus_list, app.GetLocalePath().split("/")[-1])
+
+def GetBonusName(bonus):
+    return bonus[2]
+
+def GetBonusValue(bonus, now=None):
+    # POINT addresses survive historical APPLY numbering differences. An
+    # unmapped, localized APPLY uses the authoritative server APPLY alias.
+    return characterbonuses.Value(bonus)
 
 stat_list = [
  [localeInfo.BONUS_TABLE_4, player.KILL_ALLPLAYER],
@@ -89,16 +146,47 @@ stat_list = [
  [localeInfo.BONUS_TABLE_9, player.KILL_METINSTONE]
 ]
 
+def BonusLabel(bonus):
+	"""The R1 name of a bonus row: the catalogue label (characterbonuses.Catalog, the tooltip affect string
+	without its value), its spaces collapsed, a trailing ':' dropped and its first letter upper case (the
+	value-first strings: "%d%% šance odrazit přímý tělesný útok")."""
+	return textcase.CapitalFirst(" ".join(GetBonusName(bonus).split()).rstrip(":").strip())
+
+def _UseKitLook():
+	"""The Althea UI kit panel (uicharacterdetailskit) unless Settings -> "Starý vzhled" chose the original look;
+	an import problem keeps the original panel."""
+	try:
+		import uicharacterdetailskit
+	except Exception:
+		import dbg
+		import traceback
+		dbg.TraceError("character details kit: %s" % traceback.format_exc())
+		return False
+	return uicharacterdetailskit.UseKitLook()
+
+
+def _SourceStore():
+	"""Rozpad zdrojů ze serveru (bonussources.server), None když modul chybí."""
+	try:
+		import bonussources
+		return bonussources.server
+	except Exception:
+		return None
+
 class CharacterDetailsUI(ui.ScriptWindow):
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
 	def Destroy(self):
+		self.__DestroyKitPanel()
 		self.ClearDictionary()
 		self.btnIndex = 0
 		self.isPacketLoaded = False
 	def Show(self):
+		self.__SyncLook()
 		ui.ScriptWindow.Show(self)
 		self.SetTop()
+		if self.btnIndex == 0:
+			characterbonuses.totals.Request()
 		self.Refresh()
 	def Close(self):
 		self.Hide()
@@ -106,7 +194,8 @@ class CharacterDetailsUI(ui.ScriptWindow):
 		self.Close()
 		return True
 	def AdjustPosition(self, x, y):
-		self.SetPosition(x + self.GetWidth(), y)
+		# Beside the character window: the offset is the uiscript board width, also when the R1 panel is wider.
+		self.SetPosition(x + getattr(self, "layoutWidth", self.GetWidth()), y)
 	def __ClickRadioButton(self, buttonList, buttonIndex):
 		try:
 			radioBtn = buttonList[buttonIndex]
@@ -117,12 +206,78 @@ class CharacterDetailsUI(ui.ScriptWindow):
 		radioBtn.Down()
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		self.kitPanel = None
+		self.loadedLook = None
+		self.kitFailed = False
+		self.Destroy()
+		self.__LoadScript()
+
+	def __DestroyKitPanel(self):
+		kitPanel = getattr(self, "kitPanel", None)
+		self.kitPanel = None
+		if kitPanel is not None:
+			kitPanel.Destroy()
+
+	def __LoadKitPanel(self):
+		"""The kit look drawn into this window over the hidden original board; False (traced) when the original
+		look is chosen or the kit panel cannot be built - the original panel is built instead."""
+		if self.kitFailed or not _UseKitLook():
+			return False
+		try:
+			import uicharacterdetailskit
+			spec = {
+				"tabs" : (localeInfo.CHARACTER_DETAILS_BONUS_TAB, localeInfo.CHARACTER_DETAILS_STATS_TAB),
+				"sections" : [(title, [(BonusLabel(bonus), bonus) for bonus in rows]) for title, rows in bonus_list],
+				"stats" : [(label, kind) for label, kind in stat_list],
+				"value" : GetBonusValue,
+				"visible" : characterbonuses.Visible,
+				"stat" : lambda kind: localeInfo.DottedNumber(player.GetKillLOG(kind)),
+				"close" : ui.__mem_func__(self.Close),
+				"row_in" : ui.__mem_func__(self.OverInBonus),
+				"row_out" : ui.__mem_func__(self.OverOutBonus),
+				"sources" : ui.__mem_func__(self.SourcesBreakdown),
+				"item_in" : ui.__mem_func__(self.OverInSourceItem),
+				"item_out" : ui.__mem_func__(self.OverOutBonus),
+			}
+			# One rectangle for both tabs: PANEL_W x the uiscript height (the character window height).
+			self.SetSize(max(self.layoutWidth, uicharacterdetailskit.PANEL_W), self.GetHeight())
+			self.kitPanel = uicharacterdetailskit.BonusPanel(self, spec)
+			self.GetChild("MainBoard").Hide()
+		except Exception:
+			import dbg
+			import traceback
+			dbg.TraceError("character details kit: %s" % traceback.format_exc())
+			self.kitFailed = True
+			self.__DestroyKitPanel()
+			self.SetSize(self.layoutWidth, self.GetHeight())
+			if self.IsChild("MainBoard"):
+				self.GetChild("MainBoard").Show()
+			return False
+		self.loadedLook = "kit"
+		self.SetCategory(0)
+		return True
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / "Nový vzhled" switches this panel too: rebuilt on the next opening."""
+		if self.loadedLook is None:
+			return
+		wanted = "kit" if (not self.kitFailed and _UseKitLook()) else "legacy"
+		if wanted == self.loadedLook:
+			return
+		self.__DestroyKitPanel()
+		for child in getattr(self, "Children", ()) or ():
+			if hasattr(child, "Hide"):
+				child.Hide()   # the old board must not linger until it is collected
 		self.Destroy()
 		self.__LoadScript()
 	def __LoadScript(self):
 		try:
 			pyScrLoader = ui.PythonScriptLoader()
 			pyScrLoader.LoadScriptFile(self, "UIScript/CharacterDetailsWindow.py")
+			# The board width of the uiscript (once: a later reload may find the window still at the R1 width).
+			if not getattr(self, "layoutWidth", 0):
+				self.layoutWidth = self.GetWidth()
+			self.SetSize(self.layoutWidth, self.GetHeight())
 
 			self.GetChild("bonus_button").SAFE_SetEvent(self.SetCategory,0)
 			self.GetChild("stat_button").SAFE_SetEvent(self.SetCategory,1)
@@ -130,6 +285,10 @@ class CharacterDetailsUI(ui.ScriptWindow):
 		except:
 			import exception
 			exception.Abort("CharacterDetailsUI.__LoadScript")
+
+		if self.__LoadKitPanel():
+			return
+		self.loadedLook = "legacy"
 
 		#self.ScrollBar = self.GetChild("ScrollBar")
 		#self.ScrollBar.SetScrollEvent(ui.__mem_func__(self.OnScroll))
@@ -222,17 +381,7 @@ class CharacterDetailsUI(ui.ScriptWindow):
 				bonusImage.Show()
 				elementList["%d_%d_image"%(i,j)] = bonusImage
 
-				bonusText = GET_AFFECT_STRING(bonus_data[j][0], 0)
-				
-				disabledStr = ["%","+"]
-				newText = ""
-				for x in bonusText:
-					if x in disabledStr:
-						continue
-					if x.isdigit():
-						continue
-					newText+=x
-				bonusText=newText
+				bonusText = BonusLabel(bonus_data[j])
 				bonusImage.SAFE_SetStringEvent("MOUSE_OVER_IN",self.OverInBonus, bonusText)
 				bonusImage.SAFE_SetStringEvent("MOUSE_OVER_OUT",self.OverOutBonus)
 				
@@ -280,12 +429,135 @@ class CharacterDetailsUI(ui.ScriptWindow):
 
 		self.SetCategory(0)
 	
+	def SourcesBreakdown(self, bonus, request=True):
+		"""Odkud bonus mám: rozpad řádku (bonussources) se serverovou hodnotou řádku; chyba = jen zbytek."""
+		import bonussources
+		members = characterbonuses.Members(bonus)
+		sources = _SourceStore()
+		if request and sources is not None:
+			sources.RequestRows([characterbonuses.Key(part) for part in members])
+		if len(members) > 1:
+			combined = bonussources.Breakdown(BonusLabel(bonus), False)
+			combined.components = [self.SourcesBreakdown(part, False) for part in members]
+			return combined
+		if members[0] is not bonus:
+			return self.SourcesBreakdown(members[0], False)
+		key = characterbonuses.Key(bonus)
+		total = bonussources.FromScaled(characterbonuses.totals.GetExact(key))
+		# Krok 2: přesný rozpad ze serveru, dokud nepřijde (nebo starý server), platí odhad klienta.
+		entries = None
+		if sources is not None:
+			entries = sources.Get(key)
+		try:
+			return bonussources.Build(bonus, total, title=BonusLabel(bonus), server_entries=entries)
+		except Exception:
+			import dbg
+			import traceback
+			dbg.TraceError("bonus sources: %s" % traceback.format_exc())
+			return bonussources.Breakdown(BonusLabel(bonus), bonus[3])
+
+	def OverInSourceItem(self, cell):
+		"""Najetí na předmět v rozpadu: tooltip toho předmětu ze slotu výbavy, jako v inventáři. Jiný zdroj
+		(bonussources.Entry) ukáže tooltip své ikony z lišty efektů, jinak celý název a poznámku."""
+		import uir1
+		uir1.HideHint(self)
+		if not isinstance(cell, int):
+			self.__OverInSource(cell)
+			return
+		interface = osfInfo.GetInterfaceInstance()
+		tooltip = getattr(interface, "tooltipItem", None) if interface else None
+		if tooltip is None:
+			return
+		# Stejný předmět pod myší: tooltip (i otáčející se náhled modelu) nestavět znovu.
+		if getattr(self, "sourceTooltipCell", None) == cell:
+			return
+		self.sourceTooltipCell = cell
+		try:
+			tooltip.SetInventoryItem(cell)
+		except Exception:
+			import dbg
+			import traceback
+			dbg.TraceError("bonus sources: %s" % traceback.format_exc())
+
+	def __OverInSource(self, entry):
+		"""Tooltip zdroje: efekt z předmětu (lektvar, rosa) tooltip toho předmětu jako v inventáři, stejnou cestou jako
+		Výbava; jinak tooltip ikony z lišty efektů; jinak celý název a poznámka. Volá se i při každé obnově rozpadu,
+		když je řádek pod myší: stejný předmět se nestaví znovu, ikona a text dostanou aktuální čas."""
+		import bonussources
+		slot, vnum = bonussources.AffectItemSource(entry)
+		if slot is not None:
+			self.__HideSourceHover()
+			self.OverInSourceItem(slot)
+			return
+		self.sourceTooltipCell = None
+		interface = osfInfo.GetInterfaceInstance()
+		tooltip = getattr(interface, "tooltipItem", None) if interface else None
+		if vnum and tooltip is not None:
+			if getattr(self, "sourceTooltipVnum", None) == vnum:
+				return
+			self.__HideSourceHover()
+			try:
+				tooltip.SetItemToolTip(vnum)
+				self.sourceTooltipVnum = vnum
+				return
+			except Exception:
+				import dbg
+				import traceback
+				dbg.TraceError("bonus sources: %s" % traceback.format_exc())
+		self.sourceTooltipVnum = None
+		image = bonussources.AffectHoverImage(entry)
+		if image is not None:
+			try:
+				if getattr(self, "sourceHoverImage", None) is image and getattr(self, "sourceHoverHide", None):
+					tick = getattr(image, "TickHover", None)
+					if tick is not None:
+						tick()
+					return
+				self.__HideSourceHover()
+				self.sourceHoverHide = image.ShowHover()
+				self.sourceHoverImage = image
+				return
+			except Exception:
+				import dbg
+				import traceback
+				dbg.TraceError("bonus sources: %s" % traceback.format_exc())
+		self.__HideSourceHover()
+		if tooltip is None:
+			return
+		tooltip.ClearToolTip()
+		for text in (entry.name, entry.detail):
+			if text:
+				tooltip.AppendTextLine(text)
+		tooltip.ShowToolTip()
+
+	def __HideSourceHover(self):
+		hide = getattr(self, "sourceHoverHide", None)
+		self.sourceHoverHide = None
+		self.sourceHoverImage = None
+		if callable(hide):
+			try:
+				hide()
+			except Exception:
+				pass
+
 	def OverOutBonus(self):
+		self.__HideSourceHover()
+		self.sourceTooltipCell = None
+		self.sourceTooltipVnum = None
+		if getattr(self, "kitPanel", None) is not None:
+			import uir1
+			uir1.HideHint(self)
 		interface = osfInfo.GetInterfaceInstance()
 		if interface:
 			if interface.tooltipItem:
 				interface.tooltipItem.HideToolTip()
 	def OverInBonus(self, bonusName):
+		if getattr(self, "kitPanel", None) is not None:
+			# The R1 panel: the bonus name as the one R1 hint above the mouse cursor (the item tooltip board
+			# of the original panel was a bigger box with another padding).
+			import uir1
+			if uir1.TextTooltipShow(self, bonusName):
+				return
 		interface = osfInfo.GetInterfaceInstance()
 		if interface:
 			if interface.tooltipItem:
@@ -294,6 +566,8 @@ class CharacterDetailsUI(ui.ScriptWindow):
 				interface.tooltipItem.ShowToolTip()
 
 	def OnMouseWheel(self, nLen):
+		if getattr(self, "kitPanel", None) is not None:
+			return self.kitPanel.OnMouseWheel(nLen)
 		if self.btnIndex == 0:
 			if "scrollBar" in self.ElementDictionary:
 				scrollBar = self.ElementDictionary["scrollBar"]
@@ -343,7 +617,11 @@ class CharacterDetailsUI(ui.ScriptWindow):
 		self.Refresh()
 
 	def Refresh(self):
+		if getattr(self, "kitPanel", None) is not None:
+			self.kitPanel.Refresh()
+			return
 		elementList = self.ElementDictionary
+		now = app.GetTime()
 		(X_POS,Y_POS) = (3,43)
 		CATEGORY_Y_RANGE = 25
 		CATEGORY_Y_FIRST_BONUS_RANGE = 29
@@ -354,14 +632,21 @@ class CharacterDetailsUI(ui.ScriptWindow):
 			scrollBar = self.GetChild("scrollBar")
 			(basePos,windowHeight) = (0,bonusWindow.GetHeight()-46)
 
-			searchText = elementList["itemSearch"].GetText().lower()
+			searchText = textcase.SearchKey(elementList["itemSearch"].GetText())  # no case, no Czech accents
 
+			# Conditional rows stay allocated but vanish when their active value expires.
+			for i, (_, rows) in enumerate(bonus_list):
+				for j, row in enumerate(rows):
+					if not characterbonuses.Visible(row):
+						elementList["%d_%d_image" % (i, j)].Hide()
 			maxHeight = 0
 			if len(searchText) > 0:
 				for i in range(len(bonus_list)):
 					bonus_data = bonus_list[i][1]
 					for j in range(len(bonus_data)):
-						text = elementList["%d_%d_name"%(i,j)].GetText().lower()
+						if not characterbonuses.Visible(bonus_data[j]):
+							continue
+						text = textcase.SearchKey(GetBonusName(bonus_data[j]))
 						if text.find(searchText) != -1:
 						#if len(text) >= len(searchText):
 						#	if text[:len(searchText)] == searchText:
@@ -376,6 +661,8 @@ class CharacterDetailsUI(ui.ScriptWindow):
 						else:
 							maxHeight += CATEGORY_Y_FIRST_BONUS_RANGE
 							for j in range(len(bonus_data)):
+								if not characterbonuses.Visible(bonus_data[j]):
+									continue
 								maxHeight += CATEGORY_Y_FIRST_BONUS_RANGE
 
 			if maxHeight > windowHeight:
@@ -398,11 +685,13 @@ class CharacterDetailsUI(ui.ScriptWindow):
 					if ("%d_category"%i) in elementList:
 						elementList["%d_category"%i].Hide()
 						for j in range(len(bonus_data)):
-							text = elementList["%d_%d_name"%(i,j)].GetText().lower()
+							if not characterbonuses.Visible(bonus_data[j]):
+								continue
+							text = textcase.SearchKey(GetBonusName(bonus_data[j]))
 							if text.find(searchText) != -1:
 								elementList["%d_%d_image"%(i,j)].Show()
 								elementList["%d_%d_image"%(i,j)].SetPosition(BONUS_X, Y_POS - basePos, True)
-								elementList["%d_%d_value"%(i,j)].SetText(str(player.GetStatus(bonus_data[j][1])))
+								elementList["%d_%d_value"%(i,j)].SetText(GetBonusValue(bonus_data[j], now))
 								Y_POS += CATEGORY_Y_FIRST_BONUS_RANGE
 								images.append(elementList["%d_%d_image"%(i,j)])
 								textLines.append(elementList["%d_%d_name"%(i,j)])
@@ -423,13 +712,17 @@ class CharacterDetailsUI(ui.ScriptWindow):
 						if categoryBtn.buttonStatus == 0:
 							Y_POS += CATEGORY_Y_RANGE
 							for j in range(len(bonus_data)):
+								if not characterbonuses.Visible(bonus_data[j]):
+									continue
 								elementList["%d_%d_image"%(i,j)].Hide()
 						else:
 							Y_POS += CATEGORY_Y_FIRST_BONUS_RANGE
 							for j in range(len(bonus_data)):
+								if not characterbonuses.Visible(bonus_data[j]):
+									continue
 								elementList["%d_%d_image"%(i,j)].Show()
 								elementList["%d_%d_image"%(i,j)].SetPosition(BONUS_X, Y_POS - basePos, True)
-								elementList["%d_%d_value"%(i,j)].SetText(str(player.GetStatus(bonus_data[j][1])))
+								elementList["%d_%d_value"%(i,j)].SetText(GetBonusValue(bonus_data[j], now))
 								Y_POS += CATEGORY_Y_FIRST_BONUS_RANGE
 
 								images.append(elementList["%d_%d_image"%(i,j)])
@@ -470,11 +763,41 @@ class CharacterDetailsUI(ui.ScriptWindow):
 				if ("%d_stat"%i) in elementList:
 					elementList["%d_stat"%i].SetText(localeInfo.DottedNumber(player.GetKillLOG(stat_list[i][1])))
 
-	#def OnUpdate(self):
-	#	self.Refresh()
+	def OnUpdate(self):
+		if not self.IsShow():
+			return
+		if self.btnIndex == 1:
+			# Kill counters are client values; redraw the open tab whenever one changes.
+			kills = tuple(player.GetKillLOG(kind) for _, kind in stat_list)
+			if kills != getattr(self, "statVersion", None):
+				self.statVersion = kills
+				self.Refresh()
+			return
+		if self.btnIndex != 0:
+			return
+		characterbonuses.totals.Request()
+		sources = _SourceStore()
+		kitPanel = getattr(self, "kitPanel", None)
+		if sources is not None:
+			if kitPanel is not None and getattr(kitPanel, "cascade_row", None) is not None:
+				sources.Poll()
+			else:
+				sources.Stop()
+		version = characterbonuses.totals.Version()
+		if sources is not None:
+			version = (version, sources.Version())
+		if version == getattr(self, "bonusVersion", None):
+			return
+		self.bonusVersion = version
+		# One full refresh for every snapshot change (both looks): values, conditional row
+		# visibility and the scroll range follow the server state without a user action.
+		self.Refresh()
 
 	def SetCategory(self, categoryIndex):
 		self.btnIndex = categoryIndex
+		if getattr(self, "kitPanel", None) is not None:
+			self.kitPanel.SetTab(categoryIndex)
+			return
 		self.__ClickRadioButton([self.GetChild("bonus_button"),self.GetChild("stat_button")],categoryIndex)
 		self.ElementDictionary["itemSearch"].KillFocus()
 		if self.btnIndex == 0:

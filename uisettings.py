@@ -10,6 +10,7 @@ import uicrimsoncontrols as crimson
 import settingsbackend
 import settingsmodel
 import settingspages as pages
+import uidamagesettings
 from settingslocale import Text as T
 
 IMG = 'd:/ymir work/ui/game/crimson_ember/gameoption/'
@@ -29,6 +30,21 @@ class Search(ui.EditLine):
     def OnIMEUpdate(self):
         ui.EditLine.OnIMEUpdate(self)
         self.owner.SearchOptions()
+
+
+def MenuMusicChoices():
+    return [('shuffle', T('Náhodně (střídá skladby)','Shuffle'))] + list(settingsmodel.MENU_MUSIC_TRACKS)
+
+
+def AltheaTrackChoices():
+    """Our tracks (bgm/bgm/althea_*.flac, seamless loops) for 'Hudební doprovod -> Skladba', by their
+    names, the ones present in BGM/ only; (file, name)."""
+    try:
+        present = set(name.lower() for name in app.GetFileList('BGM/*.flac'))
+    except Exception:
+        present = set()
+    return [('althea_%s.flac' % key, name) for key, name in settingsmodel.MENU_MUSIC_TRACKS
+            if ('althea_%s.flac' % key) in present]
 
 
 class PageIndex:
@@ -66,11 +82,43 @@ class PageIndex:
     def refresh_rate(self,y):
         self._record('refresh_hz', T('Obnovovací frekvence (Hz)', 'Refresh rate (Hz)'))
 
+    def ui_scale(self,y):
+        if settingsbackend.ui_scale_info() is None:
+            return 0
+        self._record('ui_scale', T('Velikost rozhran\u00ed', 'Interface scale'))
+        return 118
+
+    def tree_shadow(self,y):
+        self._record('tree_shadow', pages.TREE_SHADOW_LABEL)
+
+    def background_fps(self,y):
+        if settingsbackend.background_fps_supported():
+            self._record('background_fps', pages.BACKGROUND_FPS_LABEL)
+
     def sky_picker(self,y):
         self._record('sky',T('Obloha','Sky'))
 
+    def damage_controls(self,y):
+        for key,label in (('damage_font',T('Písmo zásahů','Damage font')),
+                          ('damage_normal_color',T('Barva normálních zásahů','Normal hit color')),
+                          ('damage_critical_color',T('Barva kritických zásahů','Critical hit color')),
+                          ('damage_outline',T('Černý obrys číslic','Black number outline')),
+                          ('damage_height',T('Výška zásahů','Hit height')),
+                          ('damage_grouping',T('Oddělování tisíců','Thousands grouping'))):
+            self._record(key,label)
+
     def music_inline(self, y):
         self._record('track', T('Hudební doprovod','Background music'))
+
+    def menu_music(self, y):
+        self._record('menu_music', T('Hudba v menu','Menu music'))
+
+    def button_panels_inline(self):
+        for key, label in (('minimap_panel', T('Tlačítka u minimapy','Minimap buttons')),
+                           ('minimap_panel_order', T('Pořadí tlačítek','Button order')),
+                           ('minimap_panel_more', T('Menu Další','More menu')),
+                           ('inventory_panel', T('Tlačítka u inventáře','Inventory buttons'))):
+            self._record(key, label)
 
     def __getattr__(self, key):
         return lambda *args, **kwargs: None
@@ -101,7 +149,9 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.popup_widgets, self.edit_lines = [], []
         self.popup = self.key_window = self.key_page = self.editor = self.music_dialog = None
         self.message_dialog = None
+        self.damage_color_dialog = None
         self.queue_page = None
+        self.panels_page = None
         self.save_deadline = None
         self.closing = False
         self.custom_widgets = []
@@ -170,13 +220,13 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.search.SetSize(154,18)
         self.search.SetMax(40)
         self.search.SetFontName(fontconfig.FontForRole(fontconfig.ROLE_BODY))
-        self.search.SetInfoMessage(T('Hledat…','Search…'))
+        self.search.SetInfoMessage(T('Hledat...','Search…'))
         button=self._keep(ui.Button(),183,46,permanent=True)
         for method, state in (('SetUpVisual',0),('SetOverVisual',1),('SetDownVisual',2)):
             getattr(button,method)(IMG+'search_btn_%d.tga'%state)
         button.SetEvent(self.SearchOptions)
         self.nav_buttons={}
-        for group,stem,label,y in ((0,'first',T('Hra','Game'),76),(1,'middle',T('Obraz','Image'),286),(2,'end',T('Zvuk','Sound'),415)):
+        for group,stem,label,y in ((0,'first',T('Hra','Game'),76),(1,'middle',T('Obraz','Image'),313),(2,'end',T('Zvuk','Sound'),442)):
             button=self._keep(ui.RadioButton(),14,y,permanent=True)
             for method,state in (('SetUpVisual',0),('SetOverVisual',1),('SetDownVisual',2)):
                 getattr(button,method)(IMG+'%s_title_%d.tga'%(stem,state))
@@ -185,7 +235,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             button.SetEvent(lambda selected=group:self.SetOptionType(selected))
             self.nav_buttons[group]=button
         self.category_buttons={}
-        positions=(114,141,168,195,222,249,324,351,378,453)
+        # Seven Game pages; the Sound row ends at 507, above the ESC hint at 519.
+        positions=(114,141,168,195,222,249,276,351,378,405,480)
         for page,y in zip(pages.NAV,positions):
             button=self._keep(ui.RadioButton(),14,y,permanent=True)
             for method,state in (('SetUpVisual',0),('SetOverVisual',1),('SetDownVisual',2)):
@@ -230,6 +281,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.closing = True
         self._SaveScroll()
         self._ClosePopup()
+        if self.panels_page:
+            self.panels_page.Detach()
         if self.queue_page:
             self.queue_page.Destroy()
             self.queue_page = None
@@ -245,6 +298,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             self.editor.Close()
         if self.music_dialog and self.music_dialog.IsShow():
             self.music_dialog.Close()
+        if self.damage_color_dialog:
+            self.damage_color_dialog.Close()
         if self.message_dialog:
             self.message_dialog.Close()
         if getattr(self,'hWnd',None):
@@ -258,6 +313,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.Hide()
         if self.key_page:
             self.key_page.Destroy()
+        if self.panels_page:
+            self.panels_page.Destroy()
         if self.editor:
             self.editor.Destroy()
         if self.key_window:
@@ -269,6 +326,11 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.session=None
         self.family_name_state=None
         self.key_page=self.key_window=self.editor=self.music_dialog=self.message_dialog=None
+        if self.damage_color_dialog:
+            self.damage_color_dialog.Close()
+            self.damage_color_dialog.ClearDictionary()
+        self.damage_color_dialog=None
+        self.panels_page=None
         self.permanent,self.page_widgets,self.controls,self.edit_lines=[],[],[],[]
         self.children={}
 
@@ -325,6 +387,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.open_page(page)
 
     def _ClearPage(self):
+        if self.damage_color_dialog:
+            self.damage_color_dialog.Close()
         if self.editor and self.editor.IsShow():
             self.closing = True
             try:
@@ -334,6 +398,8 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self._ClosePopup()
         if self.queue_page:
             self.queue_page.Detach()
+        if self.panels_page:
+            self.panels_page.Detach()
         self.scrollbar.Hide()
         for edit in self.edit_lines:
             edit.KillFocus()
@@ -406,9 +472,27 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             return getattr(self.session,key)
         if key in settingsmodel.COLOR_BOUNDS:
             return self.session.colors[key]
+        if key == 'dps_meter':
+            # one switch with the target form's chip: the live state, not this session's copy
+            getter = getattr(settingsbackend,'dps_meter_enabled',None)
+            if getter is not None:
+                try:
+                    return int(getter())
+                except Exception:
+                    pass
         return self.session.values[key]
 
     def change(self,key,value,continuous=False):
+        if key == 'dps_meter' and callable(getattr(settingsbackend,'set_dps_meter',None)):
+            # saved and applied at once (live: an open DPS section collapses); the session follows
+            if self.Apply():
+                value = settingsbackend.set_dps_meter(value)
+                self.session.values[key] = value
+                before = getattr(self.session,'before',None)
+                if isinstance(before,dict) and isinstance(before.get('values'),dict):
+                    before['values'][key] = value
+                self._Refresh()
+            return
         if key == 'family_names':
             if self.Apply():
                 settingsbackend.request_family_names(value)
@@ -457,6 +541,9 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             self.content_height = height
             self._LayoutScroll(max(0,-self.content.GetLocalPosition()[1]))
 
+    def damage_controls(self,y):
+        uidamagesettings.build(self,y)
+
     def _Refresh(self):
         # A server acknowledgement owns this character's checkbox state.
         value = settingsbackend.family_names_value()
@@ -470,7 +557,9 @@ class GameOptionWindow(ui.BoardWithTitleBar):
                 import musicInfo
                 value=musicInfo.METIN2THEMA
             kind=control['kind']
-            if kind=='check':
+            if kind.startswith('damage_'):
+                uidamagesettings.refresh(control,self.session.values)
+            elif kind=='check':
                 checked=bool(value&control['mask']) if control.get('mask') else bool(value)
                 name='selected' if checked else 'unselected'
                 button=control['widget']
@@ -484,21 +573,35 @@ class GameOptionWindow(ui.BoardWithTitleBar):
                     control['status'].SetText(T('Zapnuto','On') if checked else T('Vypnuto','Off'))
             elif kind=='fps_cycle':
                 control['widget'].SetText('%d >'%value)
+            elif kind=='ui_scale':
+                control['widget'].SetText('%d %% >' % value)
+                self._RefreshUIScaleStatus(control, settingsbackend.ui_scale_info())
+            elif kind=='tree_shadow':
+                button=control['widget']
+                if settingsbackend.tree_shadow_supported():
+                    button.Enable()
+                    button.SetText(('%d m >'%value) if value else T('Bez omezení >','Unlimited >'))
+                    button.SetToolTipText(T('Stromy dál od postavy nevrhají stín. Menší dosah = více FPS v lese.',
+                                            'Trees farther from your character cast no shadow. Shorter distance = more FPS in forests.'))
+                else:
+                    button.SetText('-')
+                    button.Disable()
+                    button.SetToolTipText(T('Dostupné po aktualizaci hry.','Available after updating the client.'))
             elif kind=='refresh':
                 info=settingsbackend.refresh_rate_info()
                 button=control['widget']
                 if info is None:
-                    button.SetText('—')
+                    button.SetText('-')
                     button.Disable()
-                    control['status'].SetText(T('Dostupné po aktualizaci klienta.','Available after updating the client.'))
+                    control['status'].SetText(T('Dostupné po aktualizaci hry.','Available after updating the client.'))
                 elif info[2]:
-                    button.SetText('%d Hz'%info[1] if info[1] else '—')
+                    button.SetText('%d Hz'%info[1] if info[1] else '-')
                     button.Disable()
                     control['status'].SetText(T('V okně se používá nastavení Windows.','Windowed mode uses Windows display settings.'))
                 else:
                     button.Enable()
                     button.SetText('%d Hz >'%value if value else T('Auto >','Auto >'))
-                    control['status'].SetText(T('Nyní %d Hz · změna po restartu.','Now %d Hz · change after restart.')%info[1])
+                    control['status'].SetText(T('Teď %d Hz | změna po restartu.','Now %d Hz · change after restart.')%info[1])
             elif kind=='radio':
                 for selected,button,width in control['widgets']:
                     button.SetUpVisual(IMG+'checkbox_'+('selected' if value==selected else 'unselected')+'.tga')
@@ -521,10 +624,12 @@ class GameOptionWindow(ui.BoardWithTitleBar):
                     control['widget'].SetText(str(value))
 
     def _Format(self,key,value):
+        if key=='damage_height':
+            return '+%d %%'%round(value*100)
         if key=='fov':
             return '%d°'%round(value)
         if key=='grass_radius':
-            return '%.1f×'%(value/100.)
+            return '%.1fx'%(value/100.)
         if key in ('damage_size','stone_size'):
             return '%d %%'%round((1+value)*100)
         if key in ('contrast','saturation'):
@@ -598,6 +703,22 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         self.page_widgets.append(button)
         self.controls.append(dict(kind='fps_cycle',key='fps',label=label,widget=button,y=y))
 
+    def tree_shadow(self,y):
+        label=self.text(pages.TREE_SHADOW_LABEL,0,y,width=220,small=True)
+        button=_button(self.content,238,y-2,'',self._CycleTreeShadow,'88x21')
+        self.page_widgets.append(button)
+        self.controls.append(dict(kind='tree_shadow',key='tree_shadow',label=label,widget=button,y=y))
+
+    def background_fps(self,y):
+        # The fixed A7 image page has no free line; the option lives in the R1 look (the A7 look is a fallback).
+        return None
+
+    def _CycleTreeShadow(self):
+        choices=settingsmodel.TREE_SHADOW_CHOICES
+        current=self.value('tree_shadow')
+        index=choices.index(current) if current in choices else -1
+        self.change('tree_shadow',choices[(index+1)%len(choices)])
+
     def _CycleFrameLimit(self):
         current=self.value('fps')
         choices=sorted(set((60,120,144,165,180,240,current)))
@@ -619,6 +740,37 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         current=self.value('refresh_hz')
         next_index=(choices.index(current)+1)%len(choices) if current in choices else 0
         self.change('refresh_hz',choices[next_index])
+
+    def ui_scale(self,y):
+        if settingsbackend.ui_scale_info() is None:
+            return 0
+        self.section(T('Velikost rozhran\u00ed', 'Interface scale'), y)
+        label=self.text(T('Cel\u00e9 rozhran\u00ed a HUD', 'Entire interface and HUD'),
+                        0,y+36,width=220,small=True)
+        button=_button(self.content,238,y+34,'',ui.__mem_func__(self._CycleUIScale),'88x21')
+        button.SetToolTipText(T('Kliknut\u00edm vybere\u0161 dal\u0161\u00ed velikost.', 'Click to select the next scale.'))
+        self.page_widgets.append(button)
+        status=self.text('',0,y+63,small=True,color=DIM,width=348)
+        self.hint(T('50\u2013150 % po 5 %. Zm\u011bna plat\u00ed ihned.', '50\u2013150% in 5% steps. Changes apply immediately.'), y+87)
+        self.controls.append(dict(kind='ui_scale',key='ui_scale',label=label,
+                                  widget=button,status=status,y=y+36,refresh_at=0.))
+        self.content_height += 118
+        return 118
+
+    def _RefreshUIScaleStatus(self, control, info):
+        if info == control.get('info'):
+            return
+        control['info'] = info
+        if info is not None:
+            control['status'].SetText(T('Aktivn\u00ed: %g %% | Maximum: %g %%',
+                'Active: %g %% | Maximum: %g %%') % (info[1], info[2]))
+
+    def _CycleUIScale(self):
+        if settingsbackend.ui_scale_info() is None:
+            return
+        choices=settingsmodel.UI_SCALE_CHOICES
+        current=self.value('ui_scale')
+        self.change('ui_scale', choices[(choices.index(current)+1)%len(choices)])
 
     def hint(self,label,y):
         self.text(label,0,y,small=True,color=DIM,width=348)
@@ -766,6 +918,9 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         if self.page=='keys' and self.key_page:
             self.key_page.RestoreDefaults()
             return
+        if self.page=='panels' and self.panels_page:
+            self.panels_page.RestoreDefaults()
+            return
         keys={control['key'] for control in self.controls}
         # Reset only the current page, not unrelated renderer/color/camera state.
         if 'quality_preset' in keys:
@@ -810,7 +965,7 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             return False
         except (OSError,ValueError,TypeError,RuntimeError) as error:
             dbg.TraceError('[Settings A7] Save: %s'%error)
-            self._Message(T('Nastavení se nepodařilo uložit. Zůstává otevřené; zavření zkusí uložení znovu.',
+            self._Message(T('Nastavení se nepodařilo uložit. Okno zůstává otevřené a při zavření se uloží znovu.',
                             'Could not save settings. The window stays open; closing retries the save.'))
             return False
         return True
@@ -839,6 +994,16 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             self.queue_page = QueuePreviewPage(self)
         self.content_height = self.queue_page.Build()
 
+    def button_panels_inline(self):
+        if self.panels_page is None:
+            from uisettingsbuttonpanels import ButtonPanelsPage
+            self.panels_page = ButtonPanelsPage(self)
+        self.content_height = self.panels_page.Build()
+
+    @property
+    def minimap_page(self):
+        return self.panels_page.minimap if self.panels_page else None
+
     def OpenQueueEditor(self):
         if self.editor and self.editor.IsShow():
             self.editor.SetTop()
@@ -856,13 +1021,19 @@ class GameOptionWindow(ui.BoardWithTitleBar):
         if not self.closing and self.IsShow() and self.page=='queue' and not self.searching:
             self._Render()
 
+    def menu_music(self,y):
+        """Hudba v menu: the select / creation music - shuffle or one track (pregame-hall.cfg music=)."""
+        self.radios('menu_music','',y,MenuMusicChoices(),vertical=True)
+
     def music_inline(self,y):
         import musicInfo
         default = musicInfo.METIN2THEMA
         choices = [(default,T('Výchozí podle mapy','Map default'))]
+        ours = AltheaTrackChoices()
+        choices.extend(ours)
         names = set(app.GetFileList('BGM/*.mp3'))
         current = self.value('track')
-        if current and current!=default:
+        if current and current!=default and current not in dict(ours):
             names.add(current)
         choices.extend((name,name) for name in sorted(names,key=lambda name:name.lower()) if name!=default)
         self.radios('track','',y,choices,vertical=True)
@@ -873,10 +1044,17 @@ class GameOptionWindow(ui.BoardWithTitleBar):
             state = (settingsbackend.family_names_supported(), settingsbackend.family_names_value())
             if state != self.family_name_state:
                 self._Refresh()
+        if self.session and self.page=='interface' and not self.searching and self.IsShow():
+            for control in self.controls:
+                if control['kind']=='ui_scale' and app.GetTime() >= control['refresh_at']:
+                    control['refresh_at'] = app.GetTime() + .25
+                    self._RefreshUIScaleStatus(control, settingsbackend.ui_scale_info())
         if self.save_deadline is not None and app.GetTime() >= self.save_deadline:
             self.Apply()
         if self.queue_page and self.page=='queue' and not self.searching and self.IsShow():
             self.queue_page.OnUpdate()
+        if self.panels_page and self.page=='panels' and not self.searching and self.IsShow():
+            self.panels_page.OnUpdate()
 
     def history(self):
         interface=self.backend.interface()

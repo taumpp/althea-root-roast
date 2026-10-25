@@ -296,6 +296,11 @@ class MyCharacters:
 		if app.ENABLE_CONQUEROR_LEVEL:
 			self.Sungma_Stat_Point = { 0 : None, 1 : None, 2 : None, 3 : None, 4 : None }
 
+# the hall's tuning keys (DIK codes -> uipregamehall.Hall methods), active only with devkeys=1 in pregame-hall.cfg
+HALL_DEV_KEYS = {35: "ToggleUI", 68: "ToggleUI", 62: "CycleOther", 63: "Rebuild", 64: "CycleRig", 65: "CycleLayout",
+	67: "CycleDetail", 87: "StrikeNow"}
+HALL_MUSIC_KEY = 66  # F8 (owner 11. 10., temporary): the next music track, for everyone (not only devkeys)
+
 class SelectCharacterWindow(ui.Window):
 	if not app.DISABLE_WOLFMAN_CREATION:
 		RACE_FACE_PATH = {
@@ -455,6 +460,7 @@ class SelectCharacterWindow(ui.Window):
 		self.familyName = getattr(stream, "familyName", "") if self.familyNameStatus == 2 else ""
 		self.familyNameDialog = None
 		self.familyNameAutoSelectPending = False
+		self.r1 = None  # R1 column (root/uir1pregame.py); None = Living Sigil
 
 		## Init Value ##
 		self.SelectSlot = M2_INIT_VALUE
@@ -669,7 +675,7 @@ class SelectCharacterWindow(ui.Window):
 
 		if not self.mycharacters.GetMyCharacterCount():
 			self.stream.SetCharacterSlot(self.mycharacters.GetEmptySlot())
-			self.OpenCreate = True
+			self.OpenCreate = self.AutoCreateOnOpen()
 
 		self.descriptionBox = None
 
@@ -679,6 +685,8 @@ class SelectCharacterWindow(ui.Window):
 
 		self.dlgBoard.Show()
 		self.Show()
+		import uir1pregame
+		self.r1 = uir1pregame.AttachSelect(self)
 		if self.familyNameStatus not in (-1, 0, 2):
 			self.OpenFamilyNameDialog()
 
@@ -694,9 +702,21 @@ class SelectCharacterWindow(ui.Window):
 
 		app.ShowCursor()
 
-		if musicInfo.selectMusic != "":
-			snd.SetMusicVolume(systemSetting.GetMusicVolume())
-			snd.FadeInMusic("BGM/"+musicInfo.selectMusic)
+		# the hall's track alone (root/pregamemusic.py: the engine does not fade before the game - a FadeOutMusic
+		# left the login music playing on); the same file in the creation plays on
+		played = None
+		try:
+			import uipregamehall
+			played = uipregamehall.ApplyMusic(self._Hall() is not None)
+		except Exception:
+			played = None
+		if played is None and musicInfo.selectMusic != "":
+			try:
+				import pregamemusic
+				pregamemusic.Only("BGM/" + musicInfo.selectMusic)
+			except Exception:
+				snd.SetMusicVolume(systemSetting.GetMusicVolume())
+				snd.FadeInMusic("BGM/"+musicInfo.selectMusic)
 
 		## Default Setting ##
 	def EventProgress(self, event_type, slot):
@@ -770,33 +790,60 @@ class SelectCharacterWindow(ui.Window):
 		except Exception:
 			cnt = 5
 
-		if prev_slot is not None and prev_slot != self.SelectSlot and chr.HasInstance(prev_slot):
-			chr.SelectInstance(prev_slot)
-			try:
-				chr.PushOnceMotion(chr.MOTION_INTRO_NOT_SELECTED, 0.1)
-			except Exception:
-				pass
-			chr.Hide()
-
-		for i in range(cnt):
-			if i == self.SelectSlot:
-				continue
-			if chr.HasInstance(i):
-				chr.SelectInstance(i)
+		hall = self._Hall()
+		if hall is not None:
+			# the hall (uipregamehall): every character stays in its place, only the light follows the selection
+			self._RefreshR1("Select", prev_slot, self.SelectSlot)
+		else:
+			if prev_slot is not None and prev_slot != self.SelectSlot and chr.HasInstance(prev_slot):
+				chr.SelectInstance(prev_slot)
+				try:
+					chr.PushOnceMotion(chr.MOTION_INTRO_NOT_SELECTED, 0.1)
+				except Exception:
+					pass
 				chr.Hide()
 
-		if chr.HasInstance(self.SelectSlot):
-			chr.SelectInstance(self.SelectSlot)
-			chr.SetLoopMotion(chr.MOTION_INTRO_WAIT)
-			chr.Show()
+			for i in range(cnt):
+				if i == self.SelectSlot:
+					continue
+				if chr.HasInstance(i):
+					chr.SelectInstance(i)
+					chr.Hide()
+
+			if chr.HasInstance(self.SelectSlot):
+				chr.SelectInstance(self.SelectSlot)
+				chr.SetLoopMotion(chr.MOTION_INTRO_WAIT)
+				chr.Show()
 
 		if app.ENABLE_PET_MOUNT_COSTUME_CREATE:
 			self.ClearPetAndMountInstances()
+		self._RefreshR1()
+
+	def _Hall(self):
+		r1 = getattr(self, "r1", None)
+		if r1 is not None and getattr(r1, "is_hall", False) and not getattr(r1, "failed", False):
+			return r1
+		return None
+
+	def _HallDev(self):
+		hall = self._Hall()
+		if hall is not None and getattr(hall, "cfg", {}).get("devkeys", 0):
+			return hall
+		return None
+
+	def _RefreshR1(self, method="Refresh", *args):
+		if getattr(self, "r1", None) is not None:
+			import uir1pregame
+			return uir1pregame.Safe(self.r1, method, *args)
+		return None
 
 	def Close(self):
 		if self.familyNameDialog:
 			self.familyNameDialog.Close()
 			self.familyNameDialog = None
+		if getattr(self, "r1", None) is not None:
+			self._RefreshR1("Destroy")
+			self.r1 = None
 		#print "##---------------------------------------- NEW INTRO SELECT CLOSE"
 		# A queued phase can be closed before Open(), or again during shutdown.
 		self.mycharacters = None
@@ -984,11 +1031,28 @@ class SelectCharacterWindow(ui.Window):
 			if self.SelectSlot >= 0 and not self.Disable:
 				self.CharacterButtonList[self.SelectSlot].Down()
 			self.layoutSize = size
+			if getattr(self, "r1", None) is not None:
+				import uir1pregame
+				self._RefreshR1("Destroy")
+				self.r1 = uir1pregame.AttachSelect(self)
 		# The renderer must follow the actual widget, not its opening rectangle.
 		renderX, renderY = self.renderArea.GetGlobalPosition()
 		self.chrRenderer.Configure(renderX, renderY, self.renderArea.GetWidth(), self.renderArea.GetHeight())
 
+	def AutoCreateOnOpen(self):
+		# An account without characters opens creation by itself only on the way in. Coming back from
+		# creation (Zpět / Esc) it stays here - with the empty rows and Vytvořit - instead of bouncing
+		# straight back into creation (in-game 9. 10.: "z tvorby nejde odejít").
+		back = getattr(self.stream, "backFromCreate", False)
+		self.stream.backFromCreate = False
+		return not back
+
 	def OnUpdate(self):
+		try:
+			import pregamemusic
+			pregamemusic.UpdatePhase(self)
+		except Exception:
+			pass
 		# An account without characters goes straight to creation, but only
 		# once its family name is settled: the server refuses creation without
 		# one. While the status is unknown or the name is being chosen, stay
@@ -1016,6 +1080,11 @@ class SelectCharacterWindow(ui.Window):
 			#print "chrSlot = %s" % chrSlot
 			if musicInfo.selectMusic != "":
 				snd.FadeLimitOutMusic("BGM/" + musicInfo.selectMusic, systemSetting.GetMusicVolume() * 0.05)
+			try:
+				import pregamemusic
+				pregamemusic.Leave()  # the game's music code (with working engine fades) takes over
+			except Exception:
+				pass
 
 			net.DirectEnter(chrSlot)
 			playTime = net.GetAccountCharacterSlotDataInteger(chrSlot, net.ACCOUNT_CHARACTER_SLOT_PLAYTIME)
@@ -1096,6 +1165,18 @@ class SelectCharacterWindow(ui.Window):
 		if not self.mycharacters.GetMyCharacterCount():
 			return
 
+		r1 = getattr(self, "r1", None)
+		if r1 is not None and not getattr(r1, "failed", False):
+			board = self._RefreshR1("OpenDelete", not ENABLE_ENGNUM_DELETE_CODE, 7,
+				ui.__mem_func__(self.AcceptInputPrivateCode), ui.__mem_func__(self.CancelInputPrivateCode))
+			if board is not None:
+				self.privateInputBoard = board
+				self.DisableWindow()
+				if not self.Not_SelectMotion:
+					self.Not_SelectMotion = True
+					chr.PushOnceMotion(chr.MOTION_INTRO_NOT_SELECTED, 0.1)
+				return
+
 		import uiCommon
 		privateInputBoard = uiCommon.InputDialogWithDescription()
 		privateInputBoard.SetTitle(localeInfo.INPUT_PRIVATE_CODE_DIALOG_TITLE)
@@ -1139,6 +1220,7 @@ class SelectCharacterWindow(ui.Window):
 		return True
 
 	def CancelInputPrivateCode(self):
+		self._RefreshR1("CloseDelete")
 		self.privateInputBoard = None
 		self.Not_SelectMotion = False
 		chr.SetLoopMotion(chr.MOTION_INTRO_WAIT)
@@ -1160,6 +1242,7 @@ class SelectCharacterWindow(ui.Window):
 			self.stream.popupWindow.Close()
 			self.stream.SetCharacterSlot(self.mycharacters.GetEmptySlot())
 			self.OpenCreate = True
+		self._RefreshR1()
 
 	def OnDeleteFailure(self):
 		self.PopupMessage(localeInfo.SELECT_CAN_NOT_DELETE)
@@ -1317,6 +1400,24 @@ class SelectCharacterWindow(ui.Window):
 			self.SelectButton(4)
 		elif 200 == key or 208 == key:
 			self.KeyInputUpDown(key)
+		elif (203 == key or 205 == key) and self._Hall() is not None:
+			# the hall (uipregamehall): left / right walk the arc
+			self._RefreshR1("Step", -1 if 203 == key else 1)
+		elif 211 == key and self._Hall() is not None and not self.Disable:
+			self.InputPrivateCode()
+		elif HALL_MUSIC_KEY == key and self._Hall() is not None:
+			self._RefreshR1("CycleMusic")
+		elif key in HALL_DEV_KEYS and self._HallDev() is not None:
+			# the hall's tuning keys - only with devkeys=1 in pregame-hall.cfg (off in the distributed client):
+			# H / F10 the scene alone, F4 the unselected light, F5 rebuild from the cfg, F6 the row under the rig,
+			# F7 the button layout, F9 the character detail, F11 a lightning now (F8 = the music, above)
+			method = HALL_DEV_KEYS[key]
+			if method == "Rebuild":
+				import uir1pregame
+				self._RefreshR1("Destroy")
+				self.r1 = uir1pregame.AttachSelect(self)
+			else:
+				self._RefreshR1(method)
 		else:
 			return True
 
@@ -1373,6 +1474,7 @@ class SelectCharacterWindow(ui.Window):
 		if self.EmptyRowList:
 			for button in self.EmptyRowList:
 				button.Disable()
+		self._RefreshR1("SetEnabled", False)
 
 	def EnableWindow(self):
 		if self.btnStart:
@@ -1398,6 +1500,7 @@ class SelectCharacterWindow(ui.Window):
 		if self.CharacterButtonList:
 			for button in self.CharacterButtonList:
 				button.Enable()
+		self._RefreshR1("SetEnabled", True)
 
 	def OnFamilyNameStatus(self, status, name):
 		self.familyNameStatus = status

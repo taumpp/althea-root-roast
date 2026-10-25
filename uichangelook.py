@@ -27,6 +27,8 @@ class ChangeLookWindow(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.isloded = 0
 		self.toolTipItem = None
 		self.xChangeLookWindowStart = 0
@@ -105,6 +107,14 @@ class ChangeLookWindow(ui.ScriptWindow):
 
 		self.ChangeLookToolTipButton = self.GetChild("ChangeLookToolTIpButton")
 
+		# R1 look (root/uir1theowahdan.py, inside the shared R1 frame of root/uir1frame.py); "Starý vzhled" or a
+		# failure keeps the original window
+		try:
+			import uir1theowahdan
+			uir1theowahdan.Dress(self, "changelook")
+		except Exception:
+			pass
+
 	def __CreateGameTypeToolTip(self, title, descList):
 		toolTip = uiToolTip.ToolTip()
 		toolTip.SetTitle(title)
@@ -151,7 +161,16 @@ class ChangeLookWindow(ui.ScriptWindow):
 
 	def SetChangeLookType(self, type):
 		self.RefreshGameTypeToolTip(type)
-		self.ChangeLookCost.SetText(localeInfo.CHANGE_LOOK_COST % (localeInfo.NumberToMoneyString(player.GetChangeChangeLookPrice())))
+		self.SetChangeLookCost(player.GetChangeChangeLookPrice())
+
+	def SetChangeLookCost(self, price):
+		"""The price line; in R1 also the R1 yang price (root/uir1theowahdan.py)."""
+		self.ChangeLookCost.SetText(localeInfo.CHANGE_LOOK_COST % (localeInfo.NumberToMoneyString(price)))
+		try:
+			import uir1theowahdan
+			uir1theowahdan.SetCost(self, price)
+		except Exception:
+			pass
 
 	def RefreshGameTypeToolTip(self, type):
 		if int(type) == player.CHANGE_LOOK_TYPE_MOUNT:
@@ -233,7 +252,7 @@ class ChangeLookWindow(ui.ScriptWindow):
 	def UseItemSlotFreepass(self, slotIndex):
 		mouseModule.mouseController.DeattachObject()
 		net.SendChangeLookCheckOutFreeYangItem()
-		self.ChangeLookCost.SetText(localeInfo.CHANGE_LOOK_COST % (localeInfo.NumberToMoneyString(player.GetChangeChangeLookPrice())))
+		self.SetChangeLookCost(player.GetChangeChangeLookPrice())
 
 	## 인벤 -> 외형변경 (양 패스 아이템)
 	def SelectEmptySlotFreepass(self, selectedSlotPos):
@@ -251,7 +270,7 @@ class ChangeLookWindow(ui.ScriptWindow):
 
 			net.SendChangeLookCheckInFreeYangItem(attachedInvenType, attachedSlotPos)
 			mouseModule.mouseController.DeattachObject()
-			self.ChangeLookCost.SetText(localeInfo.CHANGE_LOOK_COST % (localeInfo.NumberToMoneyString(0)))
+			self.SetChangeLookCost(0)
 
 	## 인벤 -> 외형변경 창.
 	def SelectEmptySlot(self, selectedSlotPos):
@@ -381,7 +400,7 @@ class ChangeLookWindow(ui.ScriptWindow):
 		if not ChangeLookFreeItemVnum == 0:
 			self.wndPassItem.SetItemSlot(0, ChangeLookFreeItemVnum, 1)
 		else:
-			self.ChangeLookCost.SetText(localeInfo.CHANGE_LOOK_COST % (localeInfo.NumberToMoneyString(player.GetChangeChangeLookPrice())))
+			self.SetChangeLookCost(player.GetChangeChangeLookPrice())
 			self.wndPassItem.SetItemSlot(0, 0, 1)
 
 	def OnCloseEvent(self):

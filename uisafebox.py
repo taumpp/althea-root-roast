@@ -17,6 +17,8 @@ import storagepresentation
 LEGACY_PAGE_START_POS = (8, 32)
 EXPANDED_PAGE_START_POS = (8, 63)
 MAX_EXPANDED_PAGE_COUNT = 3
+# Checkout cell marker: the server routes the item to its tab (SafeboxCheckoutCore).
+AUTO_DESTINATION_CELL = 0xFFFF
 
 
 def GetSafeboxLayout():
@@ -27,9 +29,17 @@ def UseParentPageTabs():
 	return GetSafeboxLayout()[0] == 2
 
 
+def StorageSlotBase(wndSpecialInv):
+	"""The slot art of the storage window's look: R1 (root/uispecialinventoryr1.py) or the original slot."""
+	r1 = getattr(wndSpecialInv, "r1", None)
+	return r1.SlotBase() if r1 else "d:/ymir work/ui/public/Slot_Base.sub"
+
+
 class PasswordDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__LoadDialog()
 
 		self.sendMessage = "/safebox_password "
@@ -102,6 +112,8 @@ class PasswordDialog(ui.ScriptWindow):
 class ChangePasswordDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accept_button', child=True)
 		self.__LoadDialog()
 
 	def __del__(self):
@@ -109,6 +121,8 @@ class ChangePasswordDialog(ui.ScriptWindow):
 
 	def __LoadDialog(self):
 		self.dlgMessage = ui.ScriptWindow()
+		import uiconfirm
+		uiconfirm.Bind(self.dlgMessage, "accept", child=True)
 		try:
 			pyScrLoader = ui.PythonScriptLoader()
 			pyScrLoader.LoadScriptFile(self.dlgMessage, "uiscript/popupdialog.py")
@@ -427,7 +441,7 @@ class SafeboxWindow(ui.ScriptWindow):
 			self.__MakePageButton(pageCount)
 		self.wndItem.ArrangeSlot(0, self.slotXCount, self.slotYCount, 32, 32, 0, 0)
 		self.wndItem.RefreshSlot()
-		self.wndItem.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		self.wndItem.SetSlotBaseImage(StorageSlotBase(self.wndSpecialInv), 1.0, 1.0, 1.0, 1.0)
 
 		self.SetSize(self.pageWidth, self.pageHeight)
 		self.UpdateRect()
@@ -606,6 +620,8 @@ class SafeboxWindow(ui.ScriptWindow):
 
 	def UseGlobalItemSlot(self, slotIndex):
 		mouseModule.mouseController.DeattachObject()
+		if safebox.GetItemID(slotIndex):
+			net.SendSafeboxCheckoutPacket(slotIndex, player.INVENTORY, AUTO_DESTINATION_CELL)
 
 	def __ShowToolTip(self, slotIndex):
 		if self.tooltipItem:
@@ -808,7 +824,7 @@ class MallWindow(ui.ScriptWindow):
 			self.__MakePageButton(pageCount)
 		self.wndItem.ArrangeSlot(0, self.slotXCount, self.slotYCount, 32, 32, 0, 0)
 		self.wndItem.RefreshSlot()
-		self.wndItem.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		self.wndItem.SetSlotBaseImage(StorageSlotBase(self.wndSpecialInv), 1.0, 1.0, 1.0, 1.0)
 		self.SetSize(self.pageWidth, self.pageHeight)
 		self.UpdateRect()
 

@@ -10,6 +10,7 @@ import grp
 import uiScriptLocale
 import uiToolTip
 import app
+import ownedcount
 
 class CubeResultWindow(ui.ScriptWindow):
 	def __init__(self):
@@ -90,6 +91,11 @@ class CubeWindow(ui.ScriptWindow):
 		self.xShopStart = 0
 		self.yShopStart = 0
 		self.isUsable = False
+		self.bClosed = True
+		self.contentScrollbar = None
+		self.needMoney = None
+		self.cubeItemInfo = {}
+		self.tooltipItem = None
 		self.inven = None
 		if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 			self.invenSpecial = None
@@ -353,10 +359,9 @@ class CubeWindow(ui.ScriptWindow):
 
 		for itemVnum, count in materialInfo[col]:
 			item.SelectItem(itemVnum)
-			if player.GetItemCountByVnum(itemVnum) >= count:
-				self.tooltipItem.AppendTextLine("%s" % (item.GetItemName()), grp.GenerateColor(0.5411, 0.7254, 0.5568, 1.0)).SetFeather()
-			else:
-				self.tooltipItem.AppendTextLine("%s" % (item.GetItemName()), grp.GenerateColor(0.9, 0.4745, 0.4627, 1.0)).SetFeather()
+			# "Name  12 / 25", the count green / red (root/ownedcount.py)
+			self.tooltipItem.AppendTextLine("%s  %s" % (item.GetItemName(),
+				ownedcount.Tagged(ownedcount.Owned(itemVnum), count))).SetFeather()
 
 			if i < materialCount - 1:
 				self.tooltipItem.AppendTextLine(uiScriptLocale.CUBE_REQUIRE_MATERIAL_OR)
@@ -411,7 +416,8 @@ class CubeWindow(ui.ScriptWindow):
 		self.cubeMaterialInfos = {}
 		self.cubeResultInfos = {}
 		self.firstSlotIndex = 0
-		self.contentScrollbar.SetPos(0)
+		if self.contentScrollbar:
+			self.contentScrollbar.SetPos(0)
 
 		if self.needMoney:
 			self.needMoney.SetText("0")

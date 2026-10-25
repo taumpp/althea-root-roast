@@ -21,6 +21,7 @@ import os
 import osfInfo
 import fontconfig
 import uicrimsoncontrols
+import uiwheel
 
 if app.ENABLE_WIKI:
 	import WikiRenderTarget
@@ -560,8 +561,9 @@ class Window(object):
 
 	def OnRunMouseWheel(self, nLen):
 		if self.onRunMouseWheelEvent:
-			self.onRunMouseWheelEvent(*(bool(nLen < 0), ))
-			return True
+			# A callback that returns False did not use the notch: it goes on to OnMouseWheel of the window under the
+			# mouse and its parents (uiwheel: the panel's scroll bar). None keeps the old "taken".
+			return self.onRunMouseWheelEvent(*(bool(nLen < 0), )) is not False
 
 		return False
 
@@ -1103,9 +1105,14 @@ class ListBoxEx(Window):
 	def SetScrollBar(self, scrollBar):
 		scrollBar.SetScrollEvent(__mem_func__(self.__OnScroll))
 		self.scrollBar = scrollBar
+		uiwheel.Attach(scrollBar, self, self.__WheelRow)		# the wheel over the rows: one row per notch
+
+	def __WheelRow(self):
+		scrollLen = self.__GetScrollLen()
+		return 1.0 / scrollLen if scrollLen else 0.0
 
 	def __OnScroll(self):
-		self.SetBasePos(int(self.scrollBar.GetPos() * self.__GetScrollLen()))
+		self.SetBasePos(int(self.scrollBar.GetPos() * self.__GetScrollLen() + 0.5))
 
 	def __GetScrollLen(self):
 		scrollLen = self.__GetItemCount() - self.__GetViewItemCount()
@@ -1176,6 +1183,19 @@ class CandidateListBox(ListBoxEx):
 			return ((pos-self.basePos)*self.itemStep, 0)
 		elif self.mode == self.VERTICAL_MODE:
 			return (0, (pos-self.basePos)*self.itemStep)
+
+def PackedFontColor(color):
+	"""The colour TextLine.SetPackedFontColor hands to wndMgr.SetFontColor. The x64 binding parses a C int and drops a
+	packed 0xAARRGGBB above 0x7FFFFFFF silently (Py_BuildException() without a message), so every opaque colour
+	written as a hex literal (the R1 tokens T.IVORY / T.INK / T.INK_DIM ..., the original 0xff... colours) left the
+	text white or in its previous colour. With uir1.R1_SIGNED_COLORS (owner 10. 10. 2026, one switch) such a colour is
+	passed as the same 32 bits signed; off: as before. Signed values and grp.GenerateColor results pass unchanged."""
+	if type(color) is int and 0x7FFFFFFF < color <= 0xFFFFFFFF:
+		import sys
+		r1 = sys.modules.get('uir1')
+		if r1 is not None and getattr(r1, 'R1_SIGNED_COLORS', False):
+			return color - 0x100000000
+	return color
 
 class TextLine(Window):
 	def __init__(self):
@@ -1248,7 +1268,7 @@ class TextLine(Window):
 		self.SetPackedFontColor(color)
 
 	def SetPackedFontColor(self, color):
-		wndMgr.SetFontColor(self.hWnd, color)
+		wndMgr.SetFontColor(self.hWnd, PackedFontColor(color))
 
 	def SetText(self, text):
 		wndMgr.SetText(self.hWnd, text)
@@ -1631,6 +1651,11 @@ class EditLine(TextLine):
 		return True
 
 	def OnKeyDown(self, key):
+		# Native traversal visits visible fields even without keyboard focus.
+		# Let game shortcuts pass unless this field owns text input.
+		if not self.IsFocus():
+			return False
+
 		if app.DIK_F1 == key:
 			return False
 		if app.DIK_F2 == key:
@@ -2294,32 +2319,39 @@ class Button(Window):
 		self.hWnd = wndMgr.RegisterButton(self, layer)
 
 	def SetUpVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "normal")
+		resolved = self._ResolveVisual(filename, "normal")
 		self._SetUnifiedCrimsonVisual(resolved)
 		if not self.usesUnifiedCrimson:
 			resolved = ResolveV31ActionVisual(filename)
 		wndMgr.SetUpVisual(self.hWnd, resolved)
 		if self.usesUnifiedCrimson:
-			wndMgr.SetDisableVisual(self.hWnd, uicrimsoncontrols.Visual(self._UnifiedCrimsonFamily(resolved), "disabled"))
+			wndMgr.SetDisableVisual(self.hWnd, uicrimsoncontrols.StateVisual(resolved, "disabled"))
 			return
 		disabledVisual = V31_ACTION_DISABLED_VISUALS.get(_V31VisualBasename(filename))
 		if disabledVisual:
 			wndMgr.SetDisableVisual(self.hWnd, disabledVisual)
 
 	def SetOverVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "hover")
+		resolved = self._ResolveVisual(filename, "hover")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetOverVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ActionVisual(filename))
 
 	def SetDownVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "pressed")
+		resolved = self._ResolveVisual(filename, "pressed")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDownVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ActionVisual(filename))
 
 	def SetDisableVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "disabled")
+		resolved = self._ResolveVisual(filename, "disabled")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDisableVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31DisabledActionVisual(filename))
+
+	def _ResolveVisual(self, filename, state):
+		resolved = uicrimsoncontrols.ResolveVisual(filename, state)
+		if uicrimsoncontrols.IsR1PlateVisual(resolved):
+			# An R1 plate of the shared R1 frame (uir1frame): the original name, so its fallback can set it again.
+			self.__dict__.setdefault("r1PlateSources", {})[state] = filename
+		return resolved
 
 	def _UnifiedCrimsonFamily(self, filename):
 		basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
@@ -2630,22 +2662,22 @@ class RadioButton(Button):
 		self.hWnd = wndMgr.RegisterRadioButton(self, layer)
 
 	def SetUpVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "normal")
+		resolved = self._ResolveVisual(filename, "normal")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetUpVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetOverVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "hover")
+		resolved = self._ResolveVisual(filename, "hover")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetOverVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetDownVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "pressed")
+		resolved = self._ResolveVisual(filename, "pressed")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDownVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetDisableVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "disabled")
+		resolved = self._ResolveVisual(filename, "disabled")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDisableVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
@@ -2799,22 +2831,22 @@ class ToggleButton(Button):
 		self.hWnd = wndMgr.RegisterToggleButton(self, layer)
 
 	def SetUpVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "normal")
+		resolved = self._ResolveVisual(filename, "normal")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetUpVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetOverVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "hover")
+		resolved = self._ResolveVisual(filename, "hover")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetOverVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetDownVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "pressed")
+		resolved = self._ResolveVisual(filename, "pressed")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDownVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
 	def SetDisableVisual(self, filename):
-		resolved = uicrimsoncontrols.ResolveVisual(filename, "disabled")
+		resolved = self._ResolveVisual(filename, "disabled")
 		self._SetUnifiedCrimsonVisual(resolved)
 		wndMgr.SetDisableVisual(self.hWnd, resolved if self.usesUnifiedCrimson else ResolveV31ChoiceVisual(filename))
 
@@ -2831,6 +2863,99 @@ class ToggleButton(Button):
 				self.eventDown(*self.eventDownArgs)
 			else:
 				self.eventDown()
+
+class CrimsonSlicedButton(Button):
+	"""Generic crimson text button of ANY width (3-slice, button style B 2026-10-04).
+
+	The 4 px middle strip of every state is constant along x, so the native button scale stretches
+	all four state visuals horizontally at once without blurring the frame. The 4 px end caps are
+	not_pick image children that follow the native visual through the OnSet*Visual callbacks."""
+
+	def __init__(self, layer = "UI"):
+		Button.__init__(self, layer)
+		self.sliceWidth = 0
+		self.sliceHeight = 0
+		self.sliceSelected = False
+		self.sliceEnabled = True
+		self.sliceState = None
+		self.sliceCaps = []
+
+	def __del__(self):
+		Button.__del__(self)
+
+	def SetSlicedSize(self, width, height):
+		height = int(height)
+		if not uicrimsoncontrols.HasSlices(height):
+			raise ValueError("unsupported crimson slice height")
+		self.sliceWidth = max(int(width), 2 * uicrimsoncontrols.SLICE_CAP + 1)
+		self.sliceHeight = height
+		if not self.sliceCaps:
+			for part in ("l", "r"):
+				cap = ExpandedImageBox()
+				cap.SetParent(self)
+				cap.AddFlag("not_pick")
+				cap.SetPosition(0, 0)
+				cap.Show()
+				self.sliceCaps.append(cap)
+		self._ApplySliceVisuals()
+
+	def SetSelected(self, selected):
+		self.sliceSelected = bool(selected)
+		if self.sliceHeight:
+			self._ApplySliceVisuals()
+
+	def _ApplySliceVisuals(self):
+		height = self.sliceHeight
+		up = "selected" if self.sliceSelected else "normal"
+		over = "selected" if self.sliceSelected else "hover"
+		# The engine keeps a visual's scale across Set*Visual and sizes the window by the SCALED visual, and
+		# CButton::SetScale multiplies the current window size: unscale first, or a second layout (SetSelected)
+		# grows the window to width * width / 4 and puts the label far right of the plate.
+		wndMgr.SetScale(self.hWnd, 1.0, 1.0)
+		wndMgr.SetUpVisual(self.hWnd, uicrimsoncontrols.SliceVisual(height, "m", up))
+		wndMgr.SetOverVisual(self.hWnd, uicrimsoncontrols.SliceVisual(height, "m", over))
+		wndMgr.SetDownVisual(self.hWnd, uicrimsoncontrols.SliceVisual(height, "m", "pressed"))
+		wndMgr.SetDisableVisual(self.hWnd, uicrimsoncontrols.SliceVisual(height, "m", "disabled"))
+		# Every Set*Visual resets the window to the 4 px strip; one absolute scale restores the width.
+		wndMgr.SetScale(self.hWnd, float(self.sliceWidth) / uicrimsoncontrols.SLICE_MID, 1.0)
+		self.sliceCaps[1].SetPosition(self.sliceWidth - uicrimsoncontrols.SLICE_CAP, 0)
+		self._SetSliceState(up if self.sliceEnabled else "disabled")
+		self.usesUnifiedCrimson = True
+		if self.ButtonText:
+			self.ButtonText.SetPosition(self.sliceWidth // 2, height // 2)
+			self._ApplyUnifiedCrimsonTextStyle()
+
+	def _SetSliceState(self, state):
+		if state == self.sliceState or not self.sliceCaps or not self.sliceHeight:
+			return
+		self.sliceState = state
+		for cap, part in zip(self.sliceCaps, ("l", "r")):
+			cap.LoadImage(uicrimsoncontrols.SliceVisual(self.sliceHeight, part, state))
+
+	def Enable(self):
+		self.sliceEnabled = True
+		Button.Enable(self)
+		self._SetSliceState("selected" if self.sliceSelected else "normal")
+
+	def Disable(self):
+		self.sliceEnabled = False
+		Button.Disable(self)
+		self._SetSliceState("disabled")
+
+	def OnSetUpVisual(self):
+		if self.sliceEnabled:
+			self._SetSliceState("selected" if self.sliceSelected else "normal")
+
+	def OnSetOverVisual(self):
+		if self.sliceEnabled:
+			self._SetSliceState("selected" if self.sliceSelected else "hover")
+
+	def OnSetDownVisual(self):
+		if self.sliceEnabled:
+			self._SetSliceState("pressed")
+
+	def OnSetDisableVisual(self):
+		self._SetSliceState("disabled")
 
 class DragButton(Button):
 	def __init__(self):
@@ -4655,6 +4780,30 @@ if "ScrollbarDyn" not in globals():
 				wPos = (1, pos) if not self.horizontal_scroll else (pos, 1)
 				self.middleBar.SetPosition(*wPos)
 
+# A pressed drag button reports OnMove from C++ for every SetPosition
+# (CDragButton::OnChangePosition), so a scroll handler that repositions the
+# thumb while it is dragged re-entered itself until the client's stack
+# overflowed (0xC00000FD, report D-20261005-3VJE8R). The handler never runs
+# nested: a move made during the handler only updates curPos and, if the
+# position ended up different, the handler runs again afterwards (bounded).
+SCROLL_EVENT_MAX_PASSES = 3
+
+def DispatchScrollEvent(scrollBar, call):
+	if getattr(scrollBar, "scrollEventActive", False):
+		scrollBar.scrollEventPending = True
+		return
+	scrollBar.scrollEventActive = True
+	try:
+		for _ in range(SCROLL_EVENT_MAX_PASSES):
+			scrollBar.scrollEventPending = False
+			position = scrollBar.curPos
+			call()
+			if not scrollBar.scrollEventPending or scrollBar.curPos == position:
+				break
+	finally:
+		scrollBar.scrollEventActive = False
+		scrollBar.scrollEventPending = False
+
 class ScrollBar(Window):
 	SCROLLBAR_WIDTH = 17
 	SCROLLBAR_MIDDLE_HEIGHT = 9
@@ -4761,14 +4910,12 @@ class ScrollBar(Window):
 		self.SCROLLBAR_BUTTON_WIDTH = self.upButton.GetWidth()
 		self.SCROLLBAR_BUTTON_HEIGHT = self.upButton.GetHeight()
 
+	def SetParent(self, parent):
+		Window.SetParent(self, parent)
+		uiwheel.Follow(self, parent)		# the window it stands in scrolls it with the wheel
+
 	def OnMouseWheel(self, delta):
-		if delta > 0:
-			self.SetPos(self.curPos - (self.scrollStep/4))
-			return True
-		elif delta < 0:
-			self.SetPos(self.curPos + (self.scrollStep/4))
-			return True
-		return False
+		return uiwheel.Scroll(self, delta)	# one step, the same as over its panel
 
 	def OnMouseWheel2(self, delta):
 		if delta > 0:
@@ -4859,7 +5006,7 @@ class ScrollBar(Window):
 		self.curPos = float(yLocal - self.SCROLLBAR_BUTTON_HEIGHT - self.MIDDLE_BAR_UPPER_PLACE) / float(self.pageSize)
 
 		if event_callable:
-			self.eventScroll()
+			DispatchScrollEvent(self, lambda: self.eventScroll())
 
 	def OnMouseLeftButtonDown(self):
 		(xMouseLocalPosition, yMouseLocalPosition) = self.GetMouseLocalPosition()
@@ -5068,6 +5215,10 @@ class ScrollBarFlat(Window):
 
 		self.SCROLLBAR_MIDDLE_HEIGHT = self.middleBar.GetHeight()
 
+	def SetParent(self, parent):
+		Window.SetParent(self, parent)
+		uiwheel.Follow(self, parent)		# the window it stands in scrolls it with the wheel
+
 	def Destroy(self):
 		self.middleBar = None
 		#self.upButton = None
@@ -5135,7 +5286,7 @@ class ScrollBarFlat(Window):
 		(xLocal, yLocal) = self.middleBar.GetLocalPosition()
 		self.curPos = float(yLocal - self.MIDDLE_BAR_UPPER_PLACE) / float(self.pageSize)
 
-		self.eventScroll()
+		DispatchScrollEvent(self, lambda: self.eventScroll())
 
 	def OnMouseLeftButtonDown(self):
 		(xMouseLocalPosition, yMouseLocalPosition) = self.GetMouseLocalPosition()
@@ -6919,14 +7070,12 @@ class ScrollBarTemplate(Window):
 	def GetPos(self):
 		return self.curPos
 
+	def SetParent(self, parent):
+		Window.SetParent(self, parent)
+		uiwheel.Follow(self, parent)		# the window it stands in scrolls it with the wheel
+
 	def OnMouseWheel(self, nLen):
-		if nLen > 0:
-			self.OnUp()
-			return True
-		elif nLen < 0:
-			self.OnDown()
-			return True
-		return False
+		return uiwheel.Scroll(self, nLen)
 
 	def SetPos(self, pos):
 		pos = max(0.0, pos)
@@ -6955,6 +7104,9 @@ class ScrollBarTemplate(Window):
 
 		self.curPos = float(yLocal - self.SCROLLBAR_BUTTON_HEIGHT - self.MIDDLE_BAR_UPPER_PLACE) / float(self.pageSize)
 
+		DispatchScrollEvent(self, self.__CallScrollEvent)
+
+	def __CallScrollEvent(self):
 		if self.eventScroll:
 			self.eventScroll(*self.eventArgs)
 
@@ -6971,6 +7123,38 @@ class ScrollBarTemplate(Window):
 
 	def UnlockScroll(self):
 		self.lockFlag = False
+
+def DressR1Frame(window):
+	# The shared R1 frame of an original window listed in uir1frame.REGISTRY (one dict lookup for every other window).
+	# Never raises: an exception inside PythonScriptLoader.LoadScriptFile aborts the client.
+	try:
+		import uir1frame
+		uir1frame.Loaded(window)
+	except:
+		try:
+			import dbg
+			dbg.TraceError("uir1frame: the window keeps its original look")
+		except:
+			pass
+
+def BeginR1FramePlates(window):
+	# While a window of uir1frame.REGISTRY loads in the R1 look, its original buttons get the R1 plates
+	# (uicrimsoncontrols.ResolveVisual), and the explicit button paths of its ``plate_paths``. Never raises.
+	try:
+		import uir1frame
+		if uir1frame.UsesPlates(window):
+			uicrimsoncontrols.BeginR1Plates(uir1frame.PlatePaths(window))
+			return True
+	except:
+		pass
+	return False
+
+def EndR1FramePlates(begun):
+	if begun:
+		try:
+			uicrimsoncontrols.EndR1Plates()
+		except:
+			pass
 
 class PythonScriptLoader(object):
 
@@ -7104,7 +7288,12 @@ class PythonScriptLoader(object):
 			resizeDic = ExtractWindowScaling(Body)
 			window.SetResizeDic(resizeDic)
 
-		self.LoadChildren(window, Body)
+		plates = BeginR1FramePlates(window)
+		try:
+			self.LoadChildren(window, Body)
+		finally:
+			EndR1FramePlates(plates)
+		DressR1Frame(window)
 		return True
 
 	def LoadChildren(self, parent, dicChildren):

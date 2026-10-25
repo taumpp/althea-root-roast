@@ -24,6 +24,36 @@ class EquipmentDialog(ui.ScriptWindow):
 		if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 			self.refineElementDict = {}
 		self.tooltipItem = None
+		self.cellSource = {}
+		self.r1Skin = None
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""the R1 look (root/uiequipmentdialogr1.py: the inventory's boards and tabs, the player card)
+		when the shared R1 frame dressed the dialog; a build failure keeps the original look (traced there)."""
+		try:
+			import uiequipmentdialogr1
+			self.r1Skin = uiequipmentdialogr1.Apply(self, self.__DropR1Skin)
+		except Exception:
+			self.r1Skin = None
+
+	def __DropR1Skin(self):
+		skin, self.r1Skin = self.r1Skin, None
+		if skin:
+			skin.Undo()
+
+	def __Cell(self, slotIndex):
+		"""The cell that shows the packet's ``slotIndex``: in the R1 look ring 1 (18) takes the inventory's ring cell
+		(25) and the pendant (25), which the inventory board has no cell for, is not shown (None)."""
+		if not self.r1Skin:
+			return slotIndex
+		import uiequipmentdialogr1
+		if slotIndex == uiequipmentdialogr1.PENDANT_PACKET:
+			return None
+		if slotIndex == uiequipmentdialogr1.RING_PACKET:
+			self.cellSource[uiequipmentdialogr1.RING_CELL] = slotIndex
+			return uiequipmentdialogr1.RING_CELL
+		return slotIndex
 
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
@@ -77,6 +107,11 @@ class EquipmentDialog(ui.ScriptWindow):
 			self.imageTab[1].Show()
 			self.equipmentTab[1].Down()
 
+		if self.r1Skin:
+			for image in self.imageTab:
+				image.Hide()			# R1: the inventory's tab row instead of the old icon tabs
+			self.r1Skin.SyncPage(page)
+
 	def __GetSlotWindow(self, slotIndex):
 		if slotIndex in VIEW_EQUIP_COSTUME_PAGE_SLOTS:
 			return self.costumeSlotWindow
@@ -90,6 +125,9 @@ class EquipmentDialog(ui.ScriptWindow):
 
 		name = chr.GetNameByVID(vid)
 		self.board.SetTitleName(name)
+		self.cellSource = {}
+		if self.r1Skin:
+			self.r1Skin.Open(vid)		# R1: title "Vyzbroj", the player card, the empty slots' type outlines
 
 		self.SetCenterPosition()
 		self.SetTop()
@@ -111,6 +149,9 @@ class EquipmentDialog(ui.ScriptWindow):
 		self.Close()
 		self.ClearDictionary()
 
+		if self.r1Skin:
+			self.r1Skin.Destroy()
+		self.r1Skin = None
 		self.board = None
 		self.slotWindow = None
 		self.costumeSlotWindow = None
@@ -122,8 +163,13 @@ class EquipmentDialog(ui.ScriptWindow):
 			if count <= 1:
 				count = 0
 
+			slotIndex = self.__Cell(slotIndex)
+			if slotIndex is None:
+				return
 			slotWindow = self.__GetSlotWindow(slotIndex)
 			slotWindow.SetItemSlot(slotIndex, vnum, count)
+			if self.r1Skin and vnum:
+				self.r1Skin.Filled(slotIndex)
 
 			emptySocketList = []
 			emptyAttrList = []
@@ -151,8 +197,13 @@ class EquipmentDialog(ui.ScriptWindow):
 			if count <= 1:
 				count = 0
 
+			slotIndex = self.__Cell(slotIndex)
+			if slotIndex is None:
+				return
 			slotWindow = self.__GetSlotWindow(slotIndex)
 			slotWindow.SetItemSlot(slotIndex, vnum, count)
+			if self.r1Skin and vnum:
+				self.r1Skin.Filled(slotIndex)
 
 			emptySocketList = []
 			emptyAttrList = []
@@ -163,6 +214,7 @@ class EquipmentDialog(ui.ScriptWindow):
 			self.itemDataDict[slotIndex] = (vnum, count, emptySocketList, emptyAttrList)
 
 	def SetEquipmentDialogSocket(self, slotIndex, socketIndex, value):
+		slotIndex = self.__Cell(slotIndex)
 		if not slotIndex in self.itemDataDict:
 			return
 		if socketIndex < 0 or socketIndex > player.METIN_SOCKET_MAX_NUM:
@@ -170,6 +222,7 @@ class EquipmentDialog(ui.ScriptWindow):
 		self.itemDataDict[slotIndex][2][socketIndex] = value
 
 	def SetEquipmentDialogAttr(self, slotIndex, attrIndex, type, value):
+		slotIndex = self.__Cell(slotIndex)
 		if not slotIndex in self.itemDataDict:
 			return
 		if attrIndex < 0 or attrIndex > player.ATTRIBUTE_SLOT_MAX_NUM:
@@ -178,6 +231,7 @@ class EquipmentDialog(ui.ScriptWindow):
 
 	if app.ENABLE_APPLY_RANDOM:
 		def SetEquipmentDialogApplyRandom(self, slotIndex, ApplyRandomIndex, type, value):
+			slotIndex = self.__Cell(slotIndex)
 			if not slotIndex in self.itemDataDict:
 				return
 			if ApplyRandomIndex < 0 or ApplyRandomIndex > player.APPLY_RANDOM_SLOT_MAX_NUM:
@@ -186,9 +240,16 @@ class EquipmentDialog(ui.ScriptWindow):
 
 	if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 		def SetEquipmentDialogRefineElement(self, slotIndex, applyType, grade, values, bonusValues):
+			slotIndex = self.__Cell(slotIndex)
 			if not slotIndex in self.itemDataDict:
 				return
 			self.refineElementDict[slotIndex] = (applyType, grade, values, bonusValues)
+
+	def SetViewInfo(self, level, race, special3, special4):
+		"""game command ViewEquipInfoV1: the level and the race of the viewed player and the
+		vnums of the special items 3 and 4 (not in the view packet). Shown in the R1 look only."""
+		if self.r1Skin:
+			self.r1Skin.SetInfoSafe(level, race, (special3, special4))
 
 	def SetItemToolTip(self, tooltipItem):
 		self.tooltipItem = tooltipItem
@@ -198,6 +259,15 @@ class EquipmentDialog(ui.ScriptWindow):
 
 	def OverInItem(self, slotIndex):
 		if None == self.tooltipItem:
+			return
+
+		special = self.r1Skin.SpecialItem(slotIndex) if self.r1Skin else 0
+		if special:
+			# special items 3 / 4 (ViewEquipInfoV1): the vnum only, no sockets or bonuses
+			self.tooltipItem.ClearToolTip()
+			self.tooltipItem.AddItemData(special, [0] * player.METIN_SOCKET_MAX_NUM,
+				[(0, 0)] * player.ATTRIBUTE_SLOT_MAX_NUM)
+			self.tooltipItem.ShowToolTip()
 			return
 
 		if not slotIndex in self.itemDataDict:
@@ -214,10 +284,10 @@ class EquipmentDialog(ui.ScriptWindow):
 		if app.ENABLE_APPLY_RANDOM:
 			aApplyRandom = self.itemDataDict[slotIndex][4]
 			self.tooltipItem.AddItemData(itemVnum, metinSlot, attrSlot, refine_element=refine_element, apply_random_list=aApplyRandom,
-				rarity_key=(getattr(net, "RARITY_CONTEXT_EQUIPMENT", 4), 0, slotIndex, self.vid, 0))
+				rarity_key=(getattr(net, "RARITY_CONTEXT_EQUIPMENT", 4), 0, self.cellSource.get(slotIndex, slotIndex), self.vid, 0))
 		else:
 			self.tooltipItem.AddItemData(itemVnum, metinSlot, attrSlot, refine_element=refine_element,
-				rarity_key=(getattr(net, "RARITY_CONTEXT_EQUIPMENT", 4), 0, slotIndex, self.vid, 0))
+				rarity_key=(getattr(net, "RARITY_CONTEXT_EQUIPMENT", 4), 0, self.cellSource.get(slotIndex, slotIndex), self.vid, 0))
 
 		if app.ENABLE_CHANGE_LOOK_SYSTEM:
 			if app.ENABLE_APPLY_RANDOM:

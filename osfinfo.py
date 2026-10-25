@@ -78,55 +78,9 @@ AUTOPICKUP_ENABLED = False
 PICKUP_MODE = 1
 
 def LoadPickupConfig():
-	PICKUP_FOLDER = "UserData/pickup"
-	CheckDirectory(PICKUP_FOLDER)
-	PICKUP_CFG_FILE = PICKUP_FOLDER + "/" + player.GetName() + ".cfg"
-	if CheckFile(PICKUP_CFG_FILE):	
-
-		for xx in range(4):
-			player.PickupBlockClassType(False, xx)
-			
-		for xx in range(6):
-			player.PickupBlockWeaponType(False, xx)
-			
-		for xx in range(6):
-			player.PickupBlockArmorType(False, xx)
-	
-		lines = open(PICKUP_CFG_FILE, "r").readlines()
-		if len(lines) > 0:
-			for line in lines:
-				if len(line) <= 2:
-					continue
-					
-				line = line.replace("\n", "")
-				lineSplit = line.split(":")
-				
-				if lineSplit[0] == "pick_mode":
-					PICKUP_MODE = int(lineSplit[1])
-					
-				elif lineSplit[0] == "block_class":
-					if len(lineSplit[1]) >= 1:
-						splitClass = lineSplit[1].split(",")
-						for blockClass in splitClass:
-							player.PickupBlockClassType(True, int(blockClass))
-							
-				elif lineSplit[0] == "min_lvl":
-					player.PickupBlockMinLvl(int(lineSplit[1]))
-					
-				elif lineSplit[0] == "max_lvl":
-					player.PickupBlockMaxLvl(int(lineSplit[1]))
-					
-				elif lineSplit[0] == "block_weapon":
-					if len(lineSplit[1]) >= 1:
-						splitClass = lineSplit[1].split(",")
-						for blockClass in splitClass:
-							player.PickupBlockWeaponType(True, int(blockClass))
-							
-				elif lineSplit[0] == "block_armor":
-					if len(lineSplit[1]) >= 1:
-						splitClass = lineSplit[1].split(",")
-						for blockClass in splitClass:
-							player.PickupBlockArmorType(True, int(blockClass))
+	# Import lazily: settingsbackend also references this initialized module.
+	import settingsbackend
+	settingsbackend.load_pickup()
 ##################################################################################
 
 SUPPORT_SKILL_VNUMS = (196, 194, 195, 197, 198)

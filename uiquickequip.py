@@ -1,3 +1,4 @@
+import dungeonequipmentbinding
 """Quick equipment presets. The server owns item identities and all mutations."""
 
 import chat
@@ -33,6 +34,27 @@ def _text(parent, x, y, value, color=0xffe1d4c4, font=style.BODY_FONT):
     line.SetText(value)
     line.Show()
     return line
+
+
+def _SyncR1(owner, skin, failed, kind, what):
+    """(skin, failed) after matching the look: builds the R1 skin ``kind`` when R1 is wanted, restores the original
+    look when "Starý vzhled" is chosen; a failure traces to syserr, keeps the original look and is not retried."""
+    try:
+        import uir1
+        wanted = uir1.UseR1() and not failed
+    except Exception:
+        return skin, failed
+    if wanted and not skin:
+        try:
+            import uiquickequipr1
+            return getattr(uiquickequipr1, kind)(owner), False
+        except Exception:
+            uir1.TraceFailure(what)
+            return None, True
+    if not wanted and skin:
+        skin.Restore()
+        return None, failed
+    return skin, failed
 
 
 class _SetRow(ui.Window):
@@ -86,6 +108,8 @@ class _SetRow(ui.Window):
             return
         # Page zero is the permanent, usable first storage page.
         self.number.SetText("%02d" % (index + 1))
+        # Native font changes retain cached glyphs when SetText sees the same name.
+        self.name.SetText("")
         self.name.SetFontName(style.BOLD_FONT if selected else style.BODY_FONT)
         self.name.SetText(name)
         # Fit real Czech names by pixel width instead of clipping mid-glyph.
@@ -131,8 +155,12 @@ class _SetRow(ui.Window):
 class _NameDialog(ui.ScriptWindow):
     def __init__(self, owner):
         ui.ScriptWindow.__init__(self)
+        import uiconfirm
+        uiconfirm.Bind(self, 'SaveButton', child=True)
         self.owner = proxy(owner)
         self.index = 0
+        self.r1 = None
+        self.r1Failed = False
         self.__Load()
 
     def __Load(self):
@@ -147,7 +175,13 @@ class _NameDialog(ui.ScriptWindow):
         self.input.SetEscapeEvent(ui.__mem_func__(self.Close))
         self.Hide()
 
+    def SyncLook(self):
+        """R1 (root/uiquickequipr1.py) unless Settings -> "Starý vzhled"; the switch applies on the next opening."""
+        self.r1, self.r1Failed = _SyncR1(self, self.r1, self.r1Failed, "NameDialogSkin",
+                                         "the quick equipment name dialog")
+
     def Open(self, index, previous=""):
+        self.SyncLook()
         self.index = index
         self.board.SetTitleName("Přejmenovat sadu" if previous else "Nová sada výbavy")
         self.input.SetText(previous)
@@ -160,7 +194,7 @@ class _NameDialog(ui.ScriptWindow):
         name = self.input.GetText().strip()
         encoded = name.encode("utf-8")
         if not name or len(encoded) > 48 or any(ord(ch) < 32 for ch in name):
-            chat.AppendChat(chat.CHAT_TYPE_INFO, "Zadej název sady (maximálně 48 bajtů).")
+            chat.AppendChat(chat.CHAT_TYPE_INFO, "Zadej název sady. Nesmí být moc dlouhý.")
             return
         self.owner.SaveName(self.index, encoded.hex())
         self.Close()
@@ -169,11 +203,16 @@ class _NameDialog(ui.ScriptWindow):
         self.Hide()
         self.input.KillFocus()
 
+    def OnPressEscapeKey(self):
+        self.Close()
+        return True
+
 
 class QuickEquipWindow(ui.ScriptWindow):
     def __init__(self):
         ui.ScriptWindow.__init__(self)
         self.sets = {}
+        self.dungeonLockOverlays = {}
         self.emptyItems = {}
         self.selected = 0
         self.scroll = 0
@@ -182,6 +221,8 @@ class QuickEquipWindow(ui.ScriptWindow):
         self.tooltip = uiToolTip.ItemToolTip()
         self.deleteDialog = None
         self.closeEvent = None
+        self.r1 = None
+        self.r1Failed = False
         self.__Load()
 
     def SetCloseEvent(self, event):
@@ -219,7 +260,12 @@ class QuickEquipWindow(ui.ScriptWindow):
         self.Refresh()
         self.Hide()
 
+    def SyncLook(self):
+        """R1 (root/uiquickequipr1.py) unless Settings -> "Starý vzhled"; the switch applies on the next opening."""
+        self.r1, self.r1Failed = _SyncR1(self, self.r1, self.r1Failed, "QuickEquipSkin", "the quick equipment window")
+
     def Open(self):
+        self.SyncLook()
         self.SetCenterPosition()
         self.Show()
         self.SetTop()
@@ -244,15 +290,31 @@ class QuickEquipWindow(ui.ScriptWindow):
         if self.closeEvent:
             self.closeEvent()
 
+    def OnPressEscapeKey(self):
+        # Esc closes an open name / delete dialog first, then the window, like the other windows.
+        if self.nameDialog and self.nameDialog.IsShow():
+            self.nameDialog.Close()
+        elif self.deleteDialog:
+            self._CancelDelete()
+        else:
+            self.Close()
+        return True
+
     def Destroy(self):
+        dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
         self.closeEvent = None
         self.Close()
+        for owner in (self, self.nameDialog):
+            if owner is not None and getattr(owner, "r1", None):
+                r1, owner.r1 = owner.r1, None
+                r1.Destroy()
         self.ClearDictionary()
         self.rows = []
         self.nameDialog = None
         self.tooltip = None
 
     def Reset(self):
+        dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
         self.sets = {}
         self.emptyItems = {}
         self.ready = False
@@ -292,21 +354,21 @@ class QuickEquipWindow(ui.ScriptWindow):
             self.Refresh()
         messages = {
             "OK": "Výbava byla přepnuta.",
-            "DB_ERROR": "Sady výbavy nyní nejsou dostupné.",
+            "DB_ERROR": "Sady výbavy teď nejsou dostupné.",
             "MIGRATION_PENDING": "Rychlá výměna se připravuje. Zkus to později.",
             "RECOVERY_WAITING": "Některé předměty čekají na volné místo v inventáři. Uvolni místo a otevři sady znovu.",
             "BUSY": "Výbavu teď nelze měnit.",
             "BAD_NAME": "Neplatný název sady.",
             "MISSING_ITEM": "Některý uložený předmět už nemáš u sebe.",
-            "MOVE_MANUALLY": "Předmět je nasazen v jiném slotu; nejprve jej přesuň.",
+            "MOVE_MANUALLY": "Předmět je nasazený v jiném slotu. Nejdřív ho přesuň.",
             "NO_SPACE": "V inventáři není místo pro výměnu.",
             # Belt cells are retired; an older server may still refuse the swap.
-            "BELT_NOT_EMPTY": "Opasek nelze přepnout sadou; vyměň ho ručně.",
-            "CANNOT_EQUIP": "Některý předmět nyní nelze nasadit.",
+            "BELT_NOT_EMPTY": "Opasek nejde přepnout sadou. Vyměň ho ručně.",
+            "CANNOT_EQUIP": "Některý předmět teď nejde nasadit.",
             "LINKED_COSTUME": "Nejprve sundej navázaný kostým nebo efekt.",
             "DISMOUNT_FIRST": "Před výměnou mounta sesedni.",
             "PARTIAL": "Výměna se nepodařila úplně. Zkontroluj výbavu.",
-            "FAILED": "Výměna selhala; původní výbava byla obnovena.",
+            "FAILED": "Výměna selhala. Původní výbava je zpět.",
             "INVALID_ITEM": "Tento předmět do vybraného slotu nepatří.",
             "NOT_EMPTY": "Nejdříve vyprázdni sloty této sady.",
         }
@@ -335,11 +397,15 @@ class QuickEquipWindow(ui.ScriptWindow):
             self.selectedHint.SetText(uiScriptLocale.QUICK_EQUIP_TRY_LATER)
         items = self.emptyItems if self.selected == 0 else self.sets.get(self.selected, {}).get("items", {})
         for slotWindow, allowed in ((self.equipment, EQUIPMENT_SLOTS), (self.costume, COSTUME_SLOTS)):
+            dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, slotWindow)
             for wear in allowed:
                 cell = self.selected * player.QUICK_EQUIP_PAGE_SIZE + wear
                 vnum = player.GetItemIndex(player.QUICK_EQUIP, cell) if hasattr(player, "QUICK_EQUIP") else items.get(wear, 0)
                 if vnum:
                     slotWindow.SetItemSlot(wear, vnum, 0)
+                    if hasattr(player, "QUICK_EQUIP"):
+                        dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, slotWindow,
+                            wear, cell, vnum, player.QUICK_EQUIP)
                 else:
                     slotWindow.ClearSlot(wear)
             slotWindow.RefreshSlot()

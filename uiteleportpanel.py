@@ -14,6 +14,7 @@ import time
 import grp
 import chr
 import event
+import ownedcount
 
 IMG_PATH = "d:/ymir work/ui/public/teleportpanel/"
 MAP_IMG_PATH = "d:/ymir work/ui/public/teleportpanel/map_img/"
@@ -354,10 +355,9 @@ class TeleportPanel(ui.ScriptWindow):
 			self.GetChild("text_info_cost").SetText(uiScriptLocale.TELEPORT_PANEL_INFO_COST_EMPTY)
 		if selected["item_cost"] != 0:
 			item.SelectItem(selected["item_cost"])
-			if player.GetItemCountByVnum(selected["item_cost"]) >= selected["item_cost_count"]:
-				self.GetChild("text_info_required_item_text").SetText((uiScriptLocale.TELEPORT_PANEL_INFO_ITEM_COST_TEXT + " |cff5af053 ["+str(player.GetItemCountByVnum(selected["item_cost"]))+"]") % (selected["item_cost_count"], item.GetItemName()))
-			else:
-				self.GetChild("text_info_required_item_text").SetText((uiScriptLocale.TELEPORT_PANEL_INFO_ITEM_COST_TEXT + " |cffd74949 ["+str(player.GetItemCountByVnum(selected["item_cost"]))+"]") % (selected["item_cost_count"], item.GetItemName()))
+			# "Vstupenka  12 / 25", the count green / red (root/ownedcount.py)
+			self.GetChild("text_info_required_item_text").SetText("%s  %s" % (item.GetItemName(),
+				ownedcount.Tagged(ownedcount.Owned(selected["item_cost"]), selected["item_cost_count"])))
 			self.GetChild("item_icon").LoadImage(item.GetIconImageFileName())
 			self.GetChild("item_icon").Show()
 		else:
@@ -381,7 +381,7 @@ class TeleportPanel(ui.ScriptWindow):
 			else:
 				self.SelectButton.SetTextColor(0xFFFEE3AE)
 			self.SelectButton.SetOutline()
-			if player.GetStatus(player.LEVEL) < selected["min_lv"] or player.GetStatus(player.LEVEL) > selected["max_lv"] or player.GetMoney() < selected["money_cost"] or player.GetItemCountByVnum(selected["item_cost"]) < selected["item_cost_count"]:
+			if player.GetStatus(player.LEVEL) < selected["min_lv"] or player.GetStatus(player.LEVEL) > selected["max_lv"] or player.GetMoney() < selected["money_cost"] or (selected["item_cost"] != 0 and not ownedcount.IsEnough(ownedcount.Owned(selected["item_cost"]), selected["item_cost_count"])):
 				self.SelectButton.Disable()
 				if selected["BUTTONS"][button]["button_disable_text_color"] != 0:
 					self.SelectButton.SetTextColor(selected["BUTTONS"][button]["button_disable_text_color"])

@@ -1,4 +1,5 @@
 import ui
+import uiwheel
 
 
 class CrimsonWindowChrome(ui.Window):
@@ -159,6 +160,7 @@ class CrimsonScrollBar(ui.Window):
 	TRACK_SOURCE_HEIGHT = 340.0
 	THUMB_HEIGHT = 72
 	WIDTH = 12
+	SCROLL_EVENT_MAX_PASSES = 3
 
 	def __init__(self):
 		ui.Window.__init__(self)
@@ -192,6 +194,10 @@ class CrimsonScrollBar(ui.Window):
 		self.thumb.SetRestrictMovementArea(2, 0, 2, self.barHeight)
 		self.SetPos(self.curPos, False)
 
+	def SetParent(self, parent):
+		ui.Window.SetParent(self, parent)
+		uiwheel.Follow(self, parent)		# the window it stands in scrolls it with the wheel
+
 	def SetScrollEvent(self, event):
 		self.eventScroll = event if event else (lambda *args: None)
 
@@ -212,12 +218,40 @@ class CrimsonScrollBar(ui.Window):
 		self.curPos = max(0.0, min(1.0, float(pos)))
 		self.thumb.SetPosition(2, int(round(self.travel * self.curPos)))
 		if callEvent:
-			self.eventScroll()
+			self._DispatchScrollEvent(lambda: self.eventScroll())
+
+	# A pressed drag button reports OnMove from C++ for every SetPosition
+	# (CDragButton::OnChangePosition), so a scroll handler that repositions the
+	# thumb while it is dragged re-entered itself until the client's stack
+	# overflowed (0xC00000FD, report D-20261005-3VJE8R). The handler never runs
+	# nested: a move made during the handler only updates curPos and, if the
+	# position ended up different, the handler runs again afterwards (bounded).
+	def _DispatchScrollEvent(self, call):
+		if getattr(self, "scrollEventActive", False):
+			self.scrollEventPending = True
+			return
+		self.scrollEventActive = True
+		try:
+			for _ in range(self.SCROLL_EVENT_MAX_PASSES):
+				self.scrollEventPending = False
+				position = self.curPos
+				call()
+				if not self.scrollEventPending or self.curPos == position:
+					break
+		finally:
+			self.scrollEventActive = False
+			self.scrollEventPending = False
 
 	def OnMove(self):
 		_x, y = self.thumb.GetLocalPosition()
 		self.curPos = max(0.0, min(1.0, float(y) / float(self.travel)))
-		self.eventScroll()
+		self._DispatchScrollEvent(lambda: self.eventScroll())
+
+	def OnUp(self):
+		self.SetPos(self.curPos - self.scrollStep)
+
+	def OnDown(self):
+		self.SetPos(self.curPos + self.scrollStep)
 
 	def OnMouseWheel(self, delta):
 		if delta > 0:
@@ -335,6 +369,10 @@ class SettingsScrollBar(ui.Window):
 		self.eventScroll = None
 		self.eventArgs = None
 
+	def SetParent(self, parent):
+		ui.Window.SetParent(self, parent)
+		uiwheel.Follow(self, parent)		# the window it stands in scrolls it with the wheel
+
 	def SetScrollEvent(self, event, *args):
 		self.eventScroll = event
 		self.eventArgs = args
@@ -384,8 +422,24 @@ class SettingsScrollBar(ui.Window):
 			return
 		_x, y = self.middleBar.GetLocalPosition()
 		self.curPos = float(y - self.SCROLL_BTN_YDIST) / float(self.pageSize)
-		if self.eventScroll:
-			self.eventScroll(*self.eventArgs)
+		# Same guard as CrimsonScrollBar._DispatchScrollEvent, kept inline: a
+		# handler that repositions the dragged thumb only updates curPos here
+		# and runs again afterwards if the position ended up different.
+		if getattr(self, "scrollEventActive", False):
+			self.scrollEventPending = True
+			return
+		self.scrollEventActive = True
+		try:
+			for _ in range(3):
+				self.scrollEventPending = False
+				position = self.curPos
+				if self.eventScroll:
+					self.eventScroll(*self.eventArgs)
+				if not self.scrollEventPending or self.curPos == position:
+					break
+		finally:
+			self.scrollEventActive = False
+			self.scrollEventPending = False
 
 	def OnMouseLeftButtonDown(self):
 		_x, y = self.GetMouseLocalPosition()

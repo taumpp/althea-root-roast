@@ -5,7 +5,8 @@ import net
 import app
 import snd
 import item
-import mountcorebonus
+import itemrefineoverlay
+import bonuscatalog
 import player
 import chat
 import grp
@@ -24,9 +25,14 @@ import wndMgr
 import uiToolTip
 import itemsplitplanner
 import inventoryshortcutpolicy
+import npcsellprice
+import craftingquickadd
 import exchangequickadd
+import virtualmarketquickadd
 import safebox
 import storagepresentation
+import uir1
+import uiwheel
 if app.ENABLE_ACCE_COSTUME_SYSTEM:
 	import acce
 
@@ -40,6 +46,14 @@ RETIRED_COSTUME_BUTTON_NUM = 5
 CONSUMABLE_BUTTON_NUM = 8
 SAFEBOX_BUTTON_NUM = 6
 MALL_BUTTON_NUM = 7
+
+
+def HoldsPlayerItems(inventoryType):
+	# Tabs that show the player's own items: the special pages 0-5 and the
+	# consumables (fish, dew, elixirs); not the warehouse or Item Shop storage.
+	return 0 <= inventoryType <= 5 or inventoryType == CONSUMABLE_BUTTON_NUM
+
+
 SPECIAL_INVENTORY_WINDOW_WIDTH = 272
 SPECIAL_INVENTORY_STORAGE_WIDTH = 176
 SPECIAL_INVENTORY_GRID_WIDTH = player.SPECIAL_INVENTORY_PAGE_WIDTH
@@ -57,8 +71,6 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 	USE_TYPE_TUPLE = (
 		"USE_CLEAN_SOCKET",
 		"USE_CHANGE_ATTRIBUTE",
-		"USE_ADD_ATTRIBUTE",
-		"USE_ADD_ATTRIBUTE2",
 		"USE_ADD_ACCESSORY_SOCKET",
 		"USE_PUT_INTO_ACCESSORY_SOCKET",
 		"USE_PUT_INTO_BELT_SOCKET",
@@ -81,6 +93,8 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 	toolTip = None
 	inventoryPageIndex = 0
 	inventoryType = 0
+	r1 = None
+	r1Failed = False
 
 	if app.ENABLE_ACCE_COSTUME_SYSTEM:
 		listAttachedAcceSlot = []
@@ -91,6 +105,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 	def __init__(self, wndInventory):
 		ui.ScriptWindow.__init__(self)
 		self.wndInventory = wndInventory
+		self.refineLevelOverlays = {}
 		self.__LoadWindow()
 		self.wndInventory.SetSpecialWnd(self)
 
@@ -99,6 +114,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 
 	def Show(self, category = 0):
 		self.__LoadWindow()
+		self.__SyncLook()
 
 		ui.ScriptWindow.Show(self)
 
@@ -281,9 +297,54 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		self.SetInventoryType(0)
 		self.SetInventoryPage(0)
 
+		self.__LoadR1()
 		self.RefreshItemSlot()
+		uiwheel.Pages(self, self.WheelPreviousPage, self.WheelNextPage)		# the wheel pages I-III like the inventory
+
+	def __LoadR1(self):
+		"""The R1 look (root/uispecialinventoryr1.py) drawn into this window unless Settings -> "Starý vzhled" chose the
+		original look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uispecialinventoryr1
+			pages = [lambda arg=index: self.SetInventoryPage(arg) for index in range(len(self.inventoryTab))]
+			stack = sort = None
+			if app.ENABLE_SORT_INVENTORY:
+				stack, sort = self.StackInventoryButton, self.SortInventoryButton
+			self.r1 = uispecialinventoryr1.StorageSkin(self, pages, stack, sort,
+				ui.__mem_func__(self.__OnValueUpdateSpecialSearchField) if app.ENABLE_SEARCH_FIELD else None)
+			self.__SyncR1Category()
+		except Exception:
+			uir1.TraceFailure("the storage window")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
+	def __SyncR1Category(self):
+		if not self.r1:
+			return
+		buttons = {0: self.SkillBookButton, 1: self.UpgradeItemsButton, 2: self.stoneButton, 3: self.GiftBoxButton,
+			4: self.SwitchButton, CONSUMABLE_BUTTON_NUM: self.ConsumableButton, SAFEBOX_BUTTON_NUM: self.SafeboxButton,
+			MALL_BUTTON_NUM: self.MallButton}
+		self.r1.SetTitle(self.titleName.GetText())
+		button = buttons.get(self.inventoryType)
+		if button:
+			self.r1.SetCategory(button)
 
 	def Destroy(self):
+		itemrefineoverlay.Clear(self.refineLevelOverlays)
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.ClearDictionary()
 
 		self.dlgPickMoney.Destroy()
@@ -356,10 +417,24 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		elif self.GetInventoryType() == MALL_BUTTON_NUM:
 			self.__CloseMall()
 			self.SetInventoryType(0)
+		self.__ResetSpecialInventorySearch()
 		self.Hide()
 
 	def GetMallButtonIDX(self):
 		return MALL_BUTTON_NUM
+
+	def __WheelPage(self, step):
+		provider = self.__GetActiveStorageProvider()
+		if provider and not self.IsExpandedStorageProvider():
+			provider.SelectPage(provider.curPageIndex + step)		# the storage's own page buttons
+		else:
+			self.SetInventoryPage(self.inventoryPageIndex + step)
+
+	def WheelPreviousPage(self):
+		self.__WheelPage(-1)
+
+	def WheelNextPage(self):
+		self.__WheelPage(1)
 
 	def SetInventoryPage(self, page):
 		if page < 0 or page >= len(self.inventoryTab):
@@ -412,6 +487,8 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 			_, search_y = self.wndSearchBarBase.GetLocalPosition()
 			self.wndSearchBarBase.SetPosition(search_x, search_y)
 
+		if self.r1:
+			self.r1.Resize(target_width)
 		self.UpdateRect()
 
 	def SetInventoryType(self, type, canPassSafeBoxAndMallEvent = False):
@@ -454,6 +531,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		obj, title = m_buttons[type]
 		obj.Down()
 		self.titleName.SetText(title)
+		self.__SyncR1Category()
 	
 		if not canPassSafeBoxAndMallEvent:
 			if type == SAFEBOX_BUTTON_NUM:
@@ -555,7 +633,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		return item.GetItemSize()
 
 	def __SplitAllItems(self, itemSlotIndex, splitCount):
-		if self.inventoryType > 5:
+		if not (0 <= self.inventoryType <= 5 or self.inventoryType == CONSUMABLE_BUTTON_NUM):
 			return
 
 		sourceCount = player.GetItemCount(itemSlotIndex)
@@ -644,7 +722,28 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		self.wndSearchBarBase.Show()
 		self.__RefreshSpecialInventorySearchGrid()
 
+	def __ResetSpecialInventorySearch(self):
+		# Closing the window drops the search: empty field, no filter, all slots visible on reopen.
+		if not app.ENABLE_SEARCH_FIELD or not self.wndSearchEdit:
+			return
+		self.wndSearchEdit.KillFocus()
+		self.wndSearchEdit.SetText("")
+		if not self.wndItemSRC:
+			return
+		self.wndItemSRC.dictItems = {}
+		self.__ClearSpecialInventorySearchGrid()
+		self.wndItemSRC.Hide()
+		self.wndItemSRC.RefreshSlot()
+		provider = self.__GetActiveStorageProvider()
+		if self.IsExpandedStorageProvider() and provider:
+			if self.wndItem:
+				self.wndItem.Hide()
+			provider.Show()
+		elif self.wndItem:
+			self.wndItem.Show()
+
 	def __ClearSpecialInventorySearchGrid(self):
+		itemrefineoverlay.HideGroup(self.refineLevelOverlays, "search")
 		if not self.wndItemSRC:
 			return
 		for x in range(player.SPECIAL_INVENTORY_PAGE_SIZE):
@@ -753,6 +852,8 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 				break
 			self.__SpecialInvSearchMarkArea(dest, w, h, used_cells, dest)
 			self.wndItemSRC.SetItemSlot(dest, itemVNum, itemCount)
+			itemrefineoverlay.SetOverlay(self.refineLevelOverlays,
+				("search", dest), self.wndItemSRC, itemVNum, (item.ITEM_TYPE_METIN,))
 			if not self.IsExpandedStorageProvider() and app.ENABLE_EXTENDED_BLEND_AFFECT and osfInfo.IS_DEW_POTION(itemVNum):
 				if player.GetItemMetinSocket(slotNumber, 3):
 					self.wndItemSRC.ActivateSlotOld(dest)
@@ -833,6 +934,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		if self.CanRefreshSpecialInventoryPage() is False:
 			return
 
+		itemrefineoverlay.HideGroup(self.refineLevelOverlays, "bag")
 		getItemVNum = player.GetItemIndex
 		getItemCount = player.GetItemCount
 		setItemVNum = self.wndItem.SetItemSlot
@@ -866,6 +968,8 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 
 			itemVnum = getItemVNum(slotNumber)
 			setItemVNum(i, itemVnum, itemCount)
+			itemrefineoverlay.SetOverlay(self.refineLevelOverlays,
+				("bag", i), self.wndItem, itemVnum, (item.ITEM_TYPE_METIN,))
 
 			if app.ENABLE_EXTENDED_BLEND_AFFECT and osfInfo.IS_DEW_POTION(itemVnum):
 				if player.GetItemMetinSocket(slotNumber, 3):
@@ -931,7 +1035,17 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 	def RefreshItemSlot(self):
 		if self.CanRefreshSpecialInventoryPage() is False:
 			return
-		self.RefreshBagSlotWindow()
+		# Native RefreshSlot emits hover-out/in even for an unrelated update
+		# (every pickup while farming). Keep the hovered tooltip alive, then
+		# refresh its actual item once, as the main inventory does.
+		self.refreshingItemSlots = True
+		try:
+			self.RefreshBagSlotWindow()
+		finally:
+			self.refreshingItemSlots = False
+		slot = getattr(self, "hoveredItemSlot", None)
+		if self.tooltipItem and slot is not None:
+			self.tooltipItem.RefreshInventoryItem(slot)
 
 	def SetItemToolTip(self, tooltipItem):
 		self.tooltipItem = tooltipItem
@@ -1045,6 +1159,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 			attachedSlotType = mouseModule.mouseController.GetAttachedType()
 			attachedSlotPos = mouseModule.mouseController.GetAttachedSlotNumber()
 			attachedItemVID = mouseModule.mouseController.GetAttachedItemIndex()
+			attachedItemCount = mouseModule.mouseController.GetAttachedItemCount()
 
 			if player.SLOT_TYPE_INVENTORY == attachedSlotType or\
 				player.SLOT_TYPE_SKILL_BOOK_INVENTORY == attachedSlotType or\
@@ -1055,7 +1170,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 				player.SLOT_TYPE_COSTUME_INVENTORY == attachedSlotType or\
 				player.SLOT_TYPE_CONSUMABLE_INVENTORY == attachedSlotType:
 
-				self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex)
+				self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex, attachedItemCount)
 
 			mouseModule.mouseController.DeattachObject()
 		else:
@@ -1082,14 +1197,14 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 			elif leftClickAction == inventoryshortcutpolicy.ACTION_SPLIT:
 				itemCount = player.GetItemCount(itemSlotIndex)
 
-				if itemCount > 1 and self.inventoryType <= 5:
+				if itemCount > 1 and (0 <= self.inventoryType <= 5 or self.inventoryType == CONSUMABLE_BUTTON_NUM):
 					self.dlgSplitItem.SetTitleName(localeInfo.PICK_ITEM_TITLE)
 					self.dlgSplitItem.SetAcceptEvent(ui.__mem_func__(self.OnPickItem))
 					self.dlgSplitItem.Open(itemCount)
 					self.dlgSplitItem.itemGlobalSlotIndex = itemSlotIndex
 
 			elif leftClickAction == inventoryshortcutpolicy.ACTION_MARKET:
-				if 0 <= self.inventoryType <= 5:
+				if HoldsPlayerItems(self.inventoryType):
 					itemVnum = player.GetItemIndex(itemSlotIndex)
 					if itemVnum > 0 and getattr(app, "ENABLE_VIRTUAL_MARKET", 0):
 						self.interface.SearchVirtualMarketInventoryItem(itemVnum)
@@ -1108,7 +1223,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 
 				snd.PlaySound("sound/ui/pick.wav")
 
-	def __DropSrcItemToDestItemInInventory(self, srcItemVID, srcItemSlotPos, dstItemSlotPos):
+	def __DropSrcItemToDestItemInInventory(self, srcItemVID, srcItemSlotPos, dstItemSlotPos, srcItemCount=0):
 		if srcItemSlotPos == dstItemSlotPos:
 			return
 
@@ -1127,7 +1242,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		if player.GetItemIndex(srcItemSlotPos) == player.GetItemIndex(dstItemSlotPos) \
 			and (player.GetItemFlags(srcItemSlotPos) & item.ITEM_FLAG_STACKABLE) \
 			and player.IsEquipmentSlot(dstItemSlotPos) == False:
-			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, 0)
+			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, srcItemCount)
 			return
 
 		if app.ENABLE_SOUL_BIND_SYSTEM:
@@ -1159,7 +1274,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
 
 		else:
-			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, 0)
+			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, srcItemCount)
 
 	def __SellItem(self, itemSlotPos):
 		self.sellingSlotNumber = itemSlotPos
@@ -1180,12 +1295,7 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 			self.popup = popup
 			return
 
-		itemPrice = item.GetISellItemPrice()
-
-		if item.Is1GoldItem():
-			itemPrice = itemCount // itemPrice // 5
-		else:
-			itemPrice = itemPrice * itemCount // 5
+		itemPrice = npcsellprice.SellPrice(item.GetISellItemPrice(), itemCount, item.Is1GoldItem())
 
 		item.GetItemName(itemIndex)
 		itemName = item.GetItemName()
@@ -1196,6 +1306,8 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		self.questionDialog.SetCancelEvent(ui.__mem_func__(self.OnCloseQuestionDialog))
 		self.questionDialog.Open()
 		self.questionDialog.count = itemCount
+		# The shown price is void once the server changes the sale terms.
+		npcsellprice.Watch(self.questionDialog, ui.__mem_func__(self.OnCloseQuestionDialog))
 
 		constInfo.SET_ITEM_QUESTION_DIALOG_STATUS(1)
 
@@ -1245,6 +1357,9 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		self.attachMetinDialog.Open(metinSlotPos, targetSlotPos)
 
 	def OverOutItem(self):
+		if getattr(self, "refreshingItemSlots", False):
+			return
+		self.hoveredItemSlot = None
 		self.wndItem.SetUsableItem(False)
 		if app.ENABLE_SEARCH_FIELD and self.wndItemSRC:
 			self.wndItemSRC.SetUsableItem(False)
@@ -1333,14 +1448,6 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		return False
 
 	def __CanUseSrcItemToDstItem(self, srcItemVNum, srcSlotPos, dstSlotPos):
-		if srcItemVNum == 79850:
-			return (not player.IsEquipmentSlot(dstSlotPos)
-				and 10750 <= player.GetItemIndex(dstSlotPos) <= 10754)
-		if 10750 <= player.GetItemIndex(dstSlotPos) <= 10754 and item.GetUseType(srcItemVNum) in (
-			"USE_CHANGE_ATTRIBUTE", "USE_CHANGE_ATTRIBUTE2", "USE_ADD_ATTRIBUTE", "USE_ADD_ATTRIBUTE2"):
-			return False
-		if srcItemVNum == mountcorebonus.SEAL_VNUM:
-			return mountcorebonus.CanUseSeal(srcItemVNum, player.GetItemIndex(dstSlotPos))
 		if srcSlotPos == dstSlotPos:
 			return False
 
@@ -1369,13 +1476,10 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 				if self.__CanCleanBrokenMetinStone(dstSlotPos):
 					return True
 			elif "USE_CHANGE_ATTRIBUTE" == useType:
-				if self.__CanChangeItemAttrList(dstSlotPos):
-					return True
-			elif "USE_ADD_ATTRIBUTE" == useType:
-				if self.__CanAddItemAttr(dstSlotPos):
-					return True
-			elif "USE_ADD_ATTRIBUTE2" == useType:
-				if self.__CanAddItemAttr(dstSlotPos):
+				# The same rule as the main inventory: the server bonus catalog
+				# names the item family of every changer.
+				if bonuscatalog.CanUseChanger(srcItemVNum, player.GetItemIndex(dstSlotPos),
+						player.IsEquipmentSlot(dstSlotPos), self.__HasItemBonus(dstSlotPos)):
 					return True
 			elif "USE_ADD_ACCESSORY_SOCKET" == useType:
 				if self.__CanAddAccessorySocket(dstSlotPos):
@@ -1401,23 +1505,10 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 
 		return False
 
-	def __CanChangeItemAttrList(self, dstSlotPos):
-		dstItemVNum = player.GetItemIndex(dstSlotPos)
-		if dstItemVNum == 0:
-			return False
-
-		item.SelectItem(dstItemVNum)
-
-		if not item.GetItemType() in (item.ITEM_TYPE_WEAPON, item.ITEM_TYPE_ARMOR):
-			return False
-
-		attrCount = 0
+	def __HasItemBonus(self, dstSlotPos):
 		for i in range(player.METIN_SOCKET_MAX_NUM):
 			if player.GetItemAttribute(dstSlotPos, i)[0] != 0:
-				attrCount += 1
-
-		if attrCount > 0:
-			return True
+				return True
 
 		return False
 
@@ -1442,28 +1533,10 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 	def __CanResetCostumeAttr(self, dstSlotPos):
 		return self.__CanChangeCostumeAttrList(dstSlotPos)
 		
-	def __CanAddItemAttr(self, dstSlotPos):
-		dstItemVNum = player.GetItemIndex(dstSlotPos)
-		if dstItemVNum == 0:
-			return False
-
-		item.SelectItem(dstItemVNum)
-
-		if not item.GetItemType() in (item.ITEM_TYPE_WEAPON, item.ITEM_TYPE_ARMOR):
-			return False
-
-		attrCount = 0
-		for i in range(player.METIN_SOCKET_MAX_NUM):
-			# 2020.02.13.Owsap - Fix Attribute Count
-			if player.GetItemAttribute(dstSlotPos, i)[0] != 0:
-				attrCount += 1
-
-		if attrCount < 4:
-			return True
-
-		return False
-
 	def ShowToolTip(self, slotIndex):
+		if getattr(self, "refreshingItemSlots", False):
+			return
+		self.hoveredItemSlot = slotIndex
 		if None != self.tooltipItem:
 			self.tooltipItem.SetInventoryItem(
 				slotIndex, specialInventoryType=self.inventoryType
@@ -1519,6 +1592,11 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 					if player.GetItemSealDate(player.INVENTORY, slotIndex) == -1 or player.GetItemSealDate(player.INVENTORY, slotIndex) > 0:
 						chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.ACCE_NOT_SEALITEM)
 						return
+
+				# the absorb window takes only a sash and a weapon (armour stays, with a message)
+				if self.wndAcceAbsorption and self.wndAcceAbsorption.IsShow() and \
+						self.wndAcceAbsorption.RefuseMaterial(player.INVENTORY, slotIndex, 255):
+					return
 
 				acce.Add(player.INVENTORY, slotIndex, 255)
 				return
@@ -1581,6 +1659,13 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		if exchangequickadd.TryAddInventoryItem(self.interface, slotIndex):
 			return
 
+		if craftingquickadd.TryAddInventoryItem(self.interface, slotIndex):
+			return
+
+		# With "Můj obchod" open the item goes to the first free shop slot.
+		if virtualmarketquickadd.TryAddInventoryItem(self.interface, slotIndex):
+			return
+
 		if app.WJ_ENABLE_TRADABLE_ICON:
 			if self.interface:
 				if self.interface.AttachInvenItemToOtherWindowSlot(slotIndex):
@@ -1604,6 +1689,11 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 					self.interface.dlgChestDrop.RequestPreview(slotIndex)
 				return
 
+		# Exorcism Scroll and Concentrated Reading are used only in
+		# the skill reading windows; a right click does nothing and sends nothing.
+		if inventoryshortcutpolicy.IsReadingSupportItem(ItemVNum):
+			return
+
 		if item.IsFlag(item.ITEM_FLAG_CONFIRM_WHEN_USE):
 			self.questionDialog = uiCommon.QuestionDialog()
 			self.questionDialog.SetText(localeInfo.INVENTORY_REALLY_USE_ITEM2)
@@ -1625,6 +1715,9 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		self.OnCloseQuestionDialog()
 
 	def __SendUseItemToItemPacket(self, srcSlotPos, dstSlotPos):
+		if inventoryshortcutpolicy.IsReadingSupportItem(player.GetItemIndex(srcSlotPos)):
+			return
+
 		if uiPrivateShopBuilder.IsBuildingPrivateShop():
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.USE_ITEM_FAILURE_PRIVATE_SHOP)
 			return
@@ -1636,6 +1729,9 @@ class SpecialInventoryWindow(ui.ScriptWindow):
 		net.SendItemUseToItemPacket(srcSlotPos, dstSlotPos)
 
 	def __SendUseItemPacket(self, slotPos):
+		if inventoryshortcutpolicy.IsReadingSupportItem(player.GetItemIndex(slotPos)):
+			return
+
 		if uiPrivateShopBuilder.IsBuildingPrivateShop():
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.USE_ITEM_FAILURE_PRIVATE_SHOP)
 			return

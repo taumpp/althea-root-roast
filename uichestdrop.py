@@ -1,3 +1,4 @@
+import chestpreview
 import uiCommon
 import snd
 import wndMgr
@@ -13,6 +14,8 @@ import item
 import app
 import net
 import stonecrafting
+import uir1frame
+import uiwheel
 
 MAX_CHEST_OPEN_COUNT = 100
 PREVIEW_CHEST_TYPES = (
@@ -62,6 +65,8 @@ class ChestDropWindow(ui.ScriptWindow):
 		ui.ScriptWindow.__init__(self)
 
 		self.tooltipItem = None
+		self.previewRequest = None
+		self.previewCancel = None
 
 		self.currentChest = 0
 		self.requestedChestVnum = 0
@@ -113,6 +118,7 @@ class ChestDropWindow(ui.ScriptWindow):
 
 		self.prevButton.SetEvent(ui.__mem_func__(self.OnClickPrevPage))
 		self.nextButton.SetEvent(ui.__mem_func__(self.OnClickNextPage))
+		uiwheel.Pages(self, self.OnClickPrevPage, self.OnClickNextPage)		# the wheel pages the chest contents
 
 		self.currentPageText.SetText(str(self.currentPage))
 
@@ -124,12 +130,14 @@ class ChestDropWindow(ui.ScriptWindow):
 		wndItem.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
 		wndItem.ArrangeSlot(0, 5, 8, 32, 32, 0, 0)
 		wndItem.RefreshSlot()
-		wndItem.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		uir1frame.SetSlotBase(self, wndItem, "d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
 		wndItem.Show()
 
 		self.wndItem = wndItem
 
 	def Close(self):
+		if self.previewCancel:
+			self.previewCancel("inventory")
 		self.OverOutItem()
 		self.currentChest = 0
 		self.requestedChestVnum = 0
@@ -140,9 +148,12 @@ class ChestDropWindow(ui.ScriptWindow):
 		self.Hide()
 
 	def Destroy(self):
+		self.Close()
 		self.ClearDictionary()
 
 		self.tooltipItem = None
+		self.previewRequest = None
+		self.previewCancel = None
 		self.wndItem = None
 		self.chestDrop = { }
 		self.chestDropReply = {}
@@ -168,23 +179,43 @@ class ChestDropWindow(ui.ScriptWindow):
 		self.currentPageText.SetText(str(self.currentPage))
 		self.Hide()
 
+	def SetPreviewService(self, request, cancel):
+		self.previewRequest = request
+		self.previewCancel = cancel
+
+	def __RequestContent(self, chestVnum):
+		if self.previewRequest:
+			if not self.previewRequest(chestVnum, "inventory", ui.__mem_func__(self.OnChestPreview)):
+				self.OnChestPreview(chestVnum, {})
+		else:
+			net.SendChestDropInfoByVnum(chestVnum)
+
+	def OnChestPreview(self, chestVnum, pages):
+		if chestVnum != self.requestedChestVnum:
+			return
+		self.chestDropReply = {}
+		for page, rows in pages.items():
+			for slot, entry in rows.items():
+				self.AddChestDropItem(chestVnum, page, slot, entry[0], entry[1])
+		self.RefreshItems(chestVnum)
+
 	def RequestPreview(self, invItemPos):
 		chestVnum = player.GetItemIndex(invItemPos)
-		if chestVnum <= 0 or not IsPreviewChestType(
+		if not chestpreview.CanPreview(chestVnum) or not IsPreviewChestType(
 				player.GetItemTypeBySlot(invItemPos)):
 			return False
 		self.__PrepareRequest(chestVnum, invItemPos)
-		net.SendChestDropInfoByVnum(chestVnum)
+		self.__RequestContent(chestVnum)
 		return True
 
 	def RequestPreviewByVnum(self, chestVnum):
-		if chestVnum <= 0:
+		if not chestpreview.CanPreview(chestVnum):
 			return False
 		item.SelectItem(chestVnum)
 		if not IsPreviewChestType(item.GetItemType()):
 			return False
 		self.__PrepareRequest(chestVnum, -1)
-		net.SendChestDropInfoByVnum(chestVnum)
+		self.__RequestContent(chestVnum)
 		return True
 
 	def Open(self, invItemPos = -1):

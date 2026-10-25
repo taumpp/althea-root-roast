@@ -5,6 +5,7 @@ import player
 import app
 import uiToolTip
 import uicrimsoncontrols
+import ownedcount
 
 # This client predates the optional community cleanup decorator.
 WindowDestroy = getattr(ui, "WindowDestroy", lambda function: function)
@@ -16,10 +17,15 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 	AVAILABLE_COLOR = 0xff75d98c
 	MISSING_COLOR = 0xffe86e6e
 	TEXT_COLOR = 0xffede1d3
+	STAGE_COLOR = 0xffb9b0a4
+	PRICE_COLOR = 0xfff1d7a4
+	DISABLED_TEXT_COLOR = 0xff8f8580
 
 	def __init__(self, state):
 		self.Initialize()
 		ui.BoardWithTitleBar.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.AddFlag("float")
 		self.state = state
 		self.SetTitleName(localeInfo.LUCK_KNOT_NAME)
@@ -37,7 +43,7 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 		width = 224
 		for index, cost in enumerate(state["costs"]):
 			item.SelectItem(cost["vnum"])
-			name = "%s x%d" % (item.GetItemName(), cost["amount"])
+			name = item.GetItemName()		# the amount is in "owned / need" (root/ownedcount.py)
 			slot = ui.SlotWindow()
 			slot.SetParent(self)
 			slot.SetPosition(16, 52 + index * 38)
@@ -51,15 +57,23 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 			slot.Show()
 			label = self.__Text(name, 58, 68 + index * 38)
 			count = self.__Text("", 0, 68 + index * 38, "right")
-			width = max(width, 58 + label.GetTextSize()[0] + 64)
+			width = max(width, 58 + label.GetTextSize()[0] + 84)
 			self.materialRows.append((slot, label, count))
 
+		# The dialog stays open after an upgrade; at the highest stage the server quote has no costs and
+		# the same dialog shows "Max" (no price, Vylepsit off) until the player closes it.
+		self.maxed = not state["costs"]
+		if self.maxed:
+			width = max(width, len(localeInfo.LUCK_KNOT_MAXIMUM) * 6 + 80)
 		footerY = 56 + len(self.materialRows) * 38
 		levelHeight = 20 if state["minimum_level"] else 0
 		self.SetSize(width, footerY + 80 + levelHeight)
 		self.surface.SetSize(width - 12, self.GetHeight() - 37)
-		transition = localeInfo.LUCK_KNOT_LEVEL_TRANSITION % (state["level"], state["level"] + 1)
-		self.stageText = self.__Text(transition, width // 2, 38, "center", 0xffb9b0a4)
+		if self.maxed:
+			transition = getattr(localeInfo, "LUCK_KNOT_LEVEL_MAX", "%d (Max)") % state["level"]
+		else:
+			transition = localeInfo.LUCK_KNOT_LEVEL_TRANSITION % (state["level"], state["level"] + 1)
+		self.stageText = self.__Text(transition, width // 2, 38, "center", self.STAGE_COLOR)
 		for slot, label, count in self.materialRows:
 			count.SetPosition(width - 17, slot.GetLocalPosition()[1] + 16)
 
@@ -70,11 +84,16 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 		self.yangIcon.SetPosition(17, footerY)
 		self.yangIcon.Show()
 		price = "%s %s" % (localeInfo.NumberToString(state["yang"]), localeInfo.CHEQUE_SYSTEM_UNIT_YANG)
-		self.priceText = self.__Text(price, 42, footerY + 8, color=0xfff1d7a4)
+		self.priceText = self.__Text(price, 42, footerY + 8, color=self.PRICE_COLOR)
 		self.chanceText = self.__Text(localeInfo.LUCK_KNOT_CHANCE, 17, footerY + 35)
 		# The server transaction has no RNG/failure branch; this is its guarantee,
 		# not a configurable probability copied out of the gameplay catalog.
 		self.chanceValue = self.__Text("100 %", width - 17, footerY + 35, "right", self.AVAILABLE_COLOR, "Tahoma:13b")
+		if self.maxed:
+			self.yangIcon.Hide()
+			self.priceText.Hide()
+			self.chanceText.SetText(localeInfo.LUCK_KNOT_MAXIMUM)
+			self.chanceValue.SetText("Max")
 		if levelHeight:
 			self.minimumLevelText = self.__Text(localeInfo.LUCK_KNOT_REQUIRE_LEVEL % state["minimum_level"],
 				17, footerY + 55)
@@ -83,6 +102,12 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 		self.acceptButton = self.__Button(localeInfo.LUCK_KNOT_IMPROVE, width // 2 - 88, buttonY, self.__Accept)
 		self.cancelButton = self.__Button(localeInfo.UI_CANCEL, width // 2 + 8, buttonY, self.__Cancel)
 		self.RefreshAvailability()
+		# R1 look (root/uir1luckknot.py); "Starý vzhled" or a failure keeps this window as it is
+		try:
+			import uir1luckknot
+			self.r1 = uir1luckknot.Dress(self)
+		except Exception:
+			self.r1 = None
 
 	def Initialize(self):
 		self.state = None
@@ -100,7 +125,10 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 		self.cancelEvent = None
 		self.toolTip = None
 		self.canUpgrade = False
+		self.maxed = False
+		self.pending = False
 		self.nextRefresh = 0.0
+		self.r1 = None
 
 	def __Text(self, text, x, y, align="left", color=TEXT_COLOR, font="Tahoma:12"):
 		line = ui.TextLine()
@@ -134,22 +162,22 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 			return
 		canUpgrade = True
 		for cost, row in zip(self.state["costs"], self.materialRows):
-			owned = player.GetItemCountByVnum(cost["vnum"])
-			enough = owned >= cost["amount"]
-			color = self.AVAILABLE_COLOR if enough else self.MISSING_COLOR
-			row[1].SetPackedFontColor(color)
-			row[2].SetPackedFontColor(color)
-			row[2].SetText("[%d]" % owned)
+			# the name stays neutral, "owned / need" green / red (root/ownedcount.py)
+			owned = ownedcount.Owned(cost["vnum"])
+			enough = ownedcount.IsEnough(owned, cost["amount"])
+			row[1].SetPackedFontColor(self.TEXT_COLOR)
+			ownedcount.Paint(row[2], owned, cost["amount"])
 			canUpgrade = canUpgrade and enough
 		enoughYang = player.GetMoney() >= self.state["yang"]
-		self.priceText.SetPackedFontColor(0xfff1d7a4 if enoughYang else self.MISSING_COLOR)
+		self.priceText.SetPackedFontColor(self.PRICE_COLOR if enoughYang else self.MISSING_COLOR)
 		canUpgrade = canUpgrade and enoughYang
 		if self.minimumLevelText:
 			enoughLevel = player.GetStatus(player.LEVEL) >= self.state["minimum_level"]
 			self.minimumLevelText.SetPackedFontColor(self.TEXT_COLOR if enoughLevel else self.MISSING_COLOR)
 			canUpgrade = canUpgrade and enoughLevel
+		canUpgrade = canUpgrade and not self.maxed and not self.pending
 		self.canUpgrade = canUpgrade
-		self.acceptButton.SetTextColor(self.TEXT_COLOR if canUpgrade else 0xff8f8580)
+		self.acceptButton.SetTextColor(self.TEXT_COLOR if canUpgrade else self.DISABLED_TEXT_COLOR)
 		if canUpgrade:
 			self.acceptButton.Enable()
 		else:
@@ -171,6 +199,11 @@ class UpgradeDialog(ui.BoardWithTitleBar):
 			self.cancelEvent()
 		else:
 			self.Close()
+
+	def SetPending(self, pending):
+		"""Vylepsit stays off while the server answers the confirmed upgrade (the dialog itself stays open)."""
+		self.pending = bool(pending)
+		self.RefreshAvailability()
 
 	def SetAcceptEvent(self, event):
 		self.acceptEvent = event

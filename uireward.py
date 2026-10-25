@@ -1,6 +1,7 @@
 import net
 import player
 import ui, grp, wndMgr, item, localeInfo, osfInfo, app
+import uiwheel
 
 IMG_DIR = "d:/ymir work/ui/game/reward_info/"
 IMG_ICON_DIR = "d:/ymir work/ui/game/reward_info/icons/"
@@ -351,10 +352,7 @@ class RewardWindow(ui.BoardWithTitleBar):
 		
 	def OnMouseWheel(self, nLen):
 		if self.IsInPosition():
-			if nLen > 0:
-				self.scrollBar.OnUp()
-			else:
-				self.scrollBar.OnDown()
+			uiwheel.Scroll(self.scrollBar, nLen)	# one reward per notch (the list's row step)
 			return True
 			
 		return False

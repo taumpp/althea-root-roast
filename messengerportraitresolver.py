@@ -46,6 +46,10 @@ class PortraitResolver(object):
 		self.inflight = None
 		self.inflightSince = 0.0
 		self.nextAttemptAt = 0.0
+		# name.lower() -> pid answered by the server in this session. The local
+		# profile cache (UserData/messenger/<pid>.sqlite3) is not tied to a
+		# server or a session and may keep a row of another server's character.
+		self.confirmed = {}
 
 	def SetCapability(self, enabled):
 		try:
@@ -57,6 +61,7 @@ class PortraitResolver(object):
 		self.nextAttemptAt = 0.0
 		self.terminalMisses.clear()
 		self.deferredUntil.clear()
+		self.confirmed.clear()
 		if not self.available:
 			self.queue = []
 			self.queued.clear()
@@ -96,6 +101,8 @@ class PortraitResolver(object):
 		request = self.inflight[1]
 		self.inflight = None
 		status = int(status)
+		if status == STATUS_OK and int(pid) > 0 and name:
+			self.confirmed[str(name).strip().lower()] = int(pid)
 		if status in (STATUS_NOT_FOUND, STATUS_INVALID_REQUEST):
 			self.terminalMisses.add(request[3])
 		elif status == STATUS_UNAVAILABLE:
@@ -148,10 +155,34 @@ class PortraitResolver(object):
 				if profile:
 					return profile
 			if name:
-				return self.network.GetUnifiedMessengerPlayerProfileByName(name)
-		except (AttributeError, RuntimeError, TypeError, ValueError):
+				profile = self.network.GetUnifiedMessengerPlayerProfileByName(name)
+				# A cached row of the name for ANOTHER pid is not this player: ask
+				# the server by pid, whose answer also replaces the stale row.
+				if profile and pid > 0 and int(profile[0]) != pid:
+					return None
+				return profile
+		except (AttributeError, RuntimeError, TypeError, ValueError, IndexError):
 			return None
 		return None
+
+	def ConfirmedOwner(self, name):
+		"""The pid the server named for ``name`` in this session, or 0."""
+		return self.confirmed.get(str(name or "").strip().lower(), 0)
+
+	def Verify(self, pid, name):
+		"""Asks the server for ``pid`` and ``name`` even when the local cache knows them (a stale cached owner)."""
+		if not self.available:
+			return False
+		pid = int(pid or 0)
+		name = str(name or "").strip()
+		if pid > 0:
+			self.terminalMisses.discard((LOOKUP_BY_PID, pid))
+			self.__Enqueue(pid, "")
+		if name:
+			self.terminalMisses.discard((LOOKUP_BY_EXACT_NAME, name.lower()))
+			self.__Enqueue(0, name)
+		self.Pump()
+		return True
 
 	def __Deferred(self, key):
 		until = self.deferredUntil.get(key)
@@ -193,6 +224,14 @@ def ResolvePortrait(pid=0, name=""):
 
 def SetCapability(enabled):
 	resolver.SetCapability(enabled)
+
+
+def ConfirmedOwner(name):
+	return resolver.ConfirmedOwner(name)
+
+
+def Verify(pid, name):
+	return resolver.Verify(pid, name)
 
 
 def OnResponse(token, status, pid, name, race):

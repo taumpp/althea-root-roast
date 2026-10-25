@@ -5,8 +5,8 @@
       "bonus": "S\u00edla proti p\u0159\u00ed\u0161er\u00e1m"
     },
     {
-      "name": "D\u011bti metin\u016f",
-      "bonus": "S\u00edla proti metin\u016fm"
+      "name": "D\u011bti meteor\u016f",
+      "bonus": "S\u00edla proti meteor\u016fm"
     },
     {
       "name": "Potomci vl\u00e1dc\u016f",

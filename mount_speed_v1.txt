@@ -1,0 +1,15 @@
+MOUNT_SPEED_V1
+# Rychlost jezdce na mountu (soubor cte EXE klienta).
+# Jezdce posouva root motion animace behu mountu (run.gr2, LoopTranslation za cyklus).
+# EXE prehrava animace mountu rychlosti  stat/100 * reference / rychlost_animace_mountu,
+# takze kazdy mount jede po zemi  stat/100 * reference  jednotek/s a nohy neklouzou.
+# Bez tohoto souboru se nic nemeni (faktor 1.0). Postavy bez mountu se nemeni nikdy.
+#
+# reference = jednotky mapy za sekundu pri statu 100 (Bily lev 20114: 589.63 / 0.6667 s)
+reference 884.44
+# meze faktoru prehravani (prasatko 20934 potrebuje 2.36, Zlaty drak Loong 20298 0.45)
+min_factor 0.25
+max_factor 4.0
+#
+# Vyjimky: override <mob vnum> <pevny faktor prehravani>, napr.
+# override 20298 1.0

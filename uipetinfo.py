@@ -37,13 +37,49 @@ def _LocalePetHeart(key, fallback):
 
 def unsigned32(n):
 	return n & 0xFFFFFFFF
+
+class _PetR1Look(object):
+	"""The R1 look of a small pet window (root/uipetr1.py) unless Settings -> "Starý vzhled" chose the original look;
+	a failure traces to syserr and keeps the original look (not retried on every opening). The window sets
+	self.r1 = None and self.r1Failed = False before it loads and defines _MakeR1 (the skin) and R1_WHAT."""
+
+	R1_WHAT = "a pet window"
+
+	def _MakeR1(self):
+		raise NotImplementedError
+
+	def LoadR1(self):
+		import uir1
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			self.r1 = self._MakeR1()
+		except Exception:
+			uir1.TraceFailure(self.R1_WHAT)
+			self.r1Failed = True
+			self.r1 = None
+
+	def SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening of the window."""
+		import uir1
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
+	def DestroyR1(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Destroy()
 	
 
 """
 		PetHatchingWindow will appear when hatching an egg.
 		It can be closed manually or after successful egg hatch.
 """
-class PetHatchingWindow(ui.ScriptWindow):
+class PetHatchingWindow(ui.ScriptWindow, _PetR1Look):
 	def __init__(self, wndPetInformation):
 		import exception
 
@@ -52,6 +88,8 @@ class PetHatchingWindow(ui.ScriptWindow):
 			return						
 			 	 
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'hatchingButton')
 
 		self.isLoaded = 0
 		self.hatchingSlot = 0
@@ -64,6 +102,8 @@ class PetHatchingWindow(ui.ScriptWindow):
 		self.questionDialog = 0
 		self.popupDialog = 0
 		self.hatchingMoneyText = None
+		self.r1 = None
+		self.r1Failed = False
 			
 		self.__LoadWindow()
 	
@@ -72,6 +112,7 @@ class PetHatchingWindow(ui.ScriptWindow):
 		
 	def Show(self):
 		self.__LoadWindow()
+		self.SyncLook()
 		ui.ScriptWindow.Show(self)		
 		self.SetTop()
 		
@@ -95,6 +136,7 @@ class PetHatchingWindow(ui.ScriptWindow):
 			self.petNameEdit.KillFocus()
 		
 	def Destroy(self):
+		self.DestroyR1()
 		self.isLoaded = 0
 		self.hatchingSlot = 0
 		self.wndPetInformation = 0
@@ -151,6 +193,14 @@ class PetHatchingWindow(ui.ScriptWindow):
 		except:
 			import exception
 			exception.Abort("petHatchingWindow.LoadWindow.BindObject")
+
+		self.LoadR1()
+
+	R1_WHAT = "the pet hatching window"
+
+	def _MakeR1(self):
+		import uipetr1
+		return uipetr1.IncubatorSkin(self, "hatching")
 			
 	def __LoadScript(self, fileName):
 		pyScrLoader = ui.PythonScriptLoader()
@@ -365,7 +415,7 @@ class PetHatchingWindow(ui.ScriptWindow):
 		dragged to upbringing item. It can be closed manually or 
 		after successful name change.
 """
-class PetNameChangeWindow(ui.ScriptWindow):
+class PetNameChangeWindow(ui.ScriptWindow, _PetR1Look):
 	def __init__(self, wndPetInformation):
 		import exception
 
@@ -374,6 +424,8 @@ class PetNameChangeWindow(ui.ScriptWindow):
 			return						
 			 	 
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'nameChangeButton')
 
 		self.isLoaded					= 0
 		self.wndPetInformation			= wndPetInformation
@@ -387,6 +439,8 @@ class PetNameChangeWindow(ui.ScriptWindow):
 		self.petName			= None
 		self.questionDialog		= None
 		self.popupDialog		= None
+		self.r1					= None
+		self.r1Failed			= False
 		
 		self.__LoadWindow()
 	
@@ -395,6 +449,7 @@ class PetNameChangeWindow(ui.ScriptWindow):
 		
 	def Show(self):
 		self.__LoadWindow()
+		self.SyncLook()
 		ui.ScriptWindow.Show(self)		
 		self.SetTop()
 		
@@ -422,6 +477,7 @@ class PetNameChangeWindow(ui.ScriptWindow):
 			
 		
 	def Destroy(self):
+		self.DestroyR1()
 		self.isLoaded			= 0
 		self.wndPetInformation	= None
 		self.petItemSlot		= None
@@ -475,6 +531,14 @@ class PetNameChangeWindow(ui.ScriptWindow):
 		except:
 			import exception
 			exception.Abort("petNameChangeWindow.LoadWindow.BindObject")
+
+		self.LoadR1()
+
+	R1_WHAT = "the pet name change window"
+
+	def _MakeR1(self):
+		import uipetr1
+		return uipetr1.IncubatorSkin(self, "name_change")
 			
 	def __LoadScript(self, fileName):
 		pyScrLoader = ui.PythonScriptLoader()
@@ -681,7 +745,7 @@ class PetNameChangeWindow(ui.ScriptWindow):
 		It consists of item slot grid on which player can
 		drag items. Used for pet lifetime, evolve & item exp.
 """
-class PetFeedWindow(ui.ScriptWindow):
+class PetFeedWindow(ui.ScriptWindow, _PetR1Look):
 	def __init__(self, wndPetInformation):
 		import exception
 
@@ -698,6 +762,8 @@ class PetFeedWindow(ui.ScriptWindow):
 		self.wndPetInformation = wndPetInformation
 		self.feedHint = None
 		self.board = None
+		self.r1 = None
+		self.r1Failed = False
 		
 		self.questionDialogEmptyPos = -1
 		self.questionDialogItemPos = -1
@@ -709,6 +775,7 @@ class PetFeedWindow(ui.ScriptWindow):
 		
 	def Show(self):
 		self.__LoadWindow()
+		self.SyncLook()
 		ui.ScriptWindow.Show(self)
 		player.SetOpenPetFeedWindow(True)
 		
@@ -748,6 +815,7 @@ class PetFeedWindow(ui.ScriptWindow):
 		player.SetOpenPetFeedWindow(False)
 		
 	def Destroy(self):
+		self.DestroyR1()
 		del self.FeedItems[:]
 		del	self.FeedItemsCount[:]
 		del self.FeedItemDummy[:]
@@ -812,6 +880,14 @@ class PetFeedWindow(ui.ScriptWindow):
 			import exception
 			exception.Abort("petFeedWindow.LoadWindow.BindObject")
 
+		self.LoadR1()
+
+	R1_WHAT = "the pet feed window"
+
+	def _MakeR1(self):
+		import uipetr1
+		return uipetr1.FeedSkin(self)
+
 	def SetFeedMode(self, index):
 		isEvolution = index == player.FEED_EVOL_EVENT
 		if self.board:
@@ -820,7 +896,7 @@ class PetFeedWindow(ui.ScriptWindow):
 					_LocalePetHeart("PET_FEED_EVOLUTION_TITLE", u"Evoluce peta"))
 			else:
 				self.board.SetTitleName(
-					_LocalePetHeart("PET_FEED_TITLE", u"Nakrmít mazlíčka"))
+					_LocalePetHeart("PET_FEED_TITLE", u"Nakrmit"))
 		if self.feedHint:
 			if isEvolution:
 				self.feedHint.SetText(_LocalePetHeart(
@@ -1303,6 +1379,8 @@ class PetInformationWindow(ui.ScriptWindow):
 		
 	def Show(self):		
 		self.__LoadWindow()
+		if self.compact:
+			self.compact.SyncLook()
 		ui.ScriptWindow.Show(self)
 		self.SetTop()
 		if self.activeView == "heart" and self.heartPage:
@@ -1361,7 +1439,7 @@ class PetInformationWindow(ui.ScriptWindow):
 			self.feedMainButton = self.GetChild("FeedMainButton")
 			self.evolutionMainButton = self.GetChild("EvolutionMainButton")
 			self.feedMainButton.SetText(
-				_LocalePetHeart("PET_FEED_MAIN_ACTION", u"Nakrmít"))
+				_LocalePetHeart("PET_FEED_MAIN_ACTION", u"Nakrmit"))
 			self.evolutionMainButton.SetText(
 				_LocalePetHeart("PET_EVOLUTION_MAIN_ACTION", u"Evoluce"))
 			self.feedMainButton.SetEvent(ui.__mem_func__(self.OpenFeedMenu))
@@ -1737,7 +1815,7 @@ class PetInformationWindow(ui.ScriptWindow):
 		self.pageDict[stateKey].Show()
 		if self.windowTitle:
 			if stateKey == player.PET_WINDOW_PRIMIUM_FEEDSTUFF:
-				self.windowTitle.SetText(_LocalePetHeart("PET_HEART_REVIVE_TITLE", u"Oživení peta"))
+				self.windowTitle.SetText(_LocalePetHeart("PET_HEART_REVIVE_TITLE", u"Oživení mazlíka"))
 			else:
 				self.windowTitle.SetText(uiScriptLocale.PET_INFORMATION_TITLE)
 		
@@ -2199,7 +2277,7 @@ class PetInformationWindow(ui.ScriptWindow):
 		self.GetChild("DefValue").SetText("+" + str("%0.1f" % pet_def) + "%")
 		petType = player.GetItemMetinSocket(player.INVENTORY, petSlot, 3) if petSlot >= 0 else 1
 		self.GetChild("SpTitle").SetText(growthpetpresentation.ThirdBonusLabel(petType))
-		self.GetChild("SpValue").SetText("+" + str("%0.1f" % growthpetpresentation.ThirdAppliedPercent(pet_sp)) + "%")
+		self.GetChild("SpValue").SetText("+" + str("%0.1f" % pet_sp) + "%")
 		
 		# EXP
 		(curEXP, nextEXP, itemEXP, itemMaxEXP) = player.GetPetExpPoints(pet_id)
@@ -2365,7 +2443,7 @@ class PetInformationWindow(ui.ScriptWindow):
 				
 	def PetFeedFlashEventCheck(self, lifeTime, curEXP, nextEXP, itemEXP, itemMaxEXP):
 		needsLifeTime = lifeTime < player.LIFE_TIME_FLASH_MIN_TIME
-		# No artificial 90% item-EXP barrier: combat and crystals both complete XP.
+		# The shared EXP pool is filled by companion-crystal feeding.
 		if needsLifeTime:
 			self.EnableFlashButtonEvent(player.FEED_EXP_EVENT)
 			return True
@@ -2476,7 +2554,14 @@ class PetInformationWindow(ui.ScriptWindow):
 			return True
 		
 	def __CantExpFeedItem(self, InvenSlot):
-		return player.GetItemIndex(InvenSlot) not in mountfeedmodel.REGULAR_FEED_VNUMS
+		ItemVNum = player.GetItemIndex(InvenSlot)
+		if ItemVNum in mountfeedmodel.CRYSTAL_VNUMS:
+			return False
+		if ItemVNum == 0:
+			return True
+		# Protein Snack: any pet feedstuff of the item table, as the server tests it.
+		item.SelectItem(ItemVNum)
+		return item.GetItemType() != item.ITEM_TYPE_PET or item.GetItemSubType() != item.PET_FEEDSTUFF
 
 	def CantAttrChangeItem(self, InvenSlot):
 		ItemVNum = player.GetItemIndex(InvenSlot)
@@ -2809,22 +2894,7 @@ class PetInformationWindow(ui.ScriptWindow):
 						itemDesc = item.GetItemDescription()
 						self.tooltipItem.AppendDescription(itemDesc, 26)
 						
-						## Pet Type
-						PET_TYPES = [
-							0,
-							localeInfo.PET_ATTR_DETERMINE_TYPE1_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE2_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE3_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE4_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE5_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE6_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE7_TOOLTIP,
-							localeInfo.PET_ATTR_DETERMINE_TYPE8_TOOLTIP,
-						]
-						
 						pet_type = metinSlot[3]
-						self.tooltipItem.AppendSpace(5)
-						self.tooltipItem.AppendTextLine(PET_TYPES[pet_type], self.tooltipItem.SPECIAL_POSITIVE_COLOR2)
 						
 						# Pet Level/Age
 						self.tooltipItem.AppendSpace(5)
@@ -2842,7 +2912,7 @@ class PetInformationWindow(ui.ScriptWindow):
 						self.tooltipItem.AppendSpace(5)
 						self.tooltipItem.AppendTextLine(localeInfo.PET_TOOLTIP_HP + " +" + str("%0.1f" % pet_hp) + "%", self.tooltipItem.SPECIAL_POSITIVE_COLOR)
 						self.tooltipItem.AppendTextLine(localeInfo.PET_TOOLTIP_DEF + " +" + str("%0.1f" % pet_def) + "%", self.tooltipItem.SPECIAL_POSITIVE_COLOR)
-						self.tooltipItem.AppendTextLine(growthpetpresentation.ThirdBonusLabel(pet_type) + " +" + str("%0.1f" % growthpetpresentation.ThirdAppliedPercent(pet_sp)) + "%", self.tooltipItem.SPECIAL_POSITIVE_COLOR)
+						self.tooltipItem.AppendTextLine(growthpetpresentation.ThirdBonusLabel(pet_type) + " +" + str("%0.1f" % pet_sp) + "%", self.tooltipItem.SPECIAL_POSITIVE_COLOR)
 						# Pet Skills
 						for (skillLocked, skillVnum, skillLevel, cooltime, skillDetails) in skillStates:
 							if skillLocked or not skillVnum:
@@ -3147,9 +3217,7 @@ class PetInformationWindow(ui.ScriptWindow):
 		
 	def PetReviveResult(self, result):
 		if not result:
-			message = getattr(localeInfo, "PET_REVIVE_NEEDS_PROTEIN_BAR",
-				u"K oživení potřebuješ Proteinovou tyčinku.")
-			chat.AppendChat(chat.CHAT_TYPE_INFO, message)
+			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.PET_REVIVE_NEEDS_PROTEIN_BAR)
 		self.RefreshStatus()
 			
 			

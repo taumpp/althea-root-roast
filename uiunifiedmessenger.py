@@ -40,6 +40,10 @@ PUBLIC = "d:/ymir work/ui/public/"
 WINDOWS = "d:/ymir work/ui/game/windows/"
 
 
+# The divider above the first unread message (not the badge setting's label).
+UNREAD_DIVIDER_TEXT = u"— Nepřečtené —"
+
+
 def _Text(key):
 	# New locale keys are optional so a root pack never aborts on an older
 	# locale pack; an empty text simply suppresses the notice.
@@ -288,7 +292,7 @@ class MessageRow(ui.Window):
 			self.COLOR_INCOMING if incoming else self.COLOR_OUTGOING)
 		self.senderLine.SetText(str(message[4]) + ":")
 		self.bodyLine.SetText(str(message[5]))
-		timestamp = int(message[7] or message[6])
+		timestamp = model.message_time_ms(message)
 		self.timeLine.SetText(time.strftime(
 			"%H:%M", time.localtime(timestamp / 1000.0)))
 		stateKey = "" if incoming else model.message_state_key(message[9])
@@ -315,6 +319,8 @@ class MessageRow(ui.Window):
 class PlayerLookupDialog(ui.ScriptWindow):
 	def __init__(self, owner):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.owner = owner
 		self.pendingPrefixToken = 0
 		self.pendingExactToken = 0
@@ -372,6 +378,13 @@ class PlayerLookupDialog(ui.ScriptWindow):
 			190, localeInfo.UNIFIED_MESSENGER_CONFIRM, self.Accept)
 		self.cancelButton = self.__CreateButton(
 			254, localeInfo.UNIFIED_MESSENGER_CANCEL, self.Close)
+		self.r1Skin = None
+		try:
+			import uir1messenger
+			uir1messenger.DressLookup(self)
+		except Exception:
+			import uir1
+			uir1.TraceFailure("messenger recipient")
 		self.Hide()
 
 	def __del__(self):
@@ -407,6 +420,7 @@ class PlayerLookupDialog(ui.ScriptWindow):
 	def Close(self):
 		self.pendingPrefixToken = 0
 		self.pendingExactToken = 0
+		self.edit.KillFocus()
 		self.Hide()
 		if self.owner and self.owner.targetDialog is self:
 			self.owner.targetDialog = None
@@ -449,6 +463,10 @@ class PlayerLookupDialog(ui.ScriptWindow):
 
 	def SelectSuggestion(self, index, name):
 		self.edit.SetText(str(name))
+		# Selecting with arrows must not clear the list on the next frame.
+		self.lastText = str(name).strip()
+		self.requestedPrefix = self.lastText
+		self.pendingPrefixToken = 0
 		self.edit.SetEndPosition()
 		self.edit.SetFocus()
 
@@ -504,8 +522,8 @@ class PlayerLookupDialog(ui.ScriptWindow):
 		if int(status) == LOOKUP_STATUS_OK and len(rows) == 1:
 			pid, canonicalName = rows[0]
 			self.Close()
+			# The closed dialog released targetDialog: the composer takes the focus.
 			self.owner.OpenConversation(canonicalName, model.stable_key(pid))
-			self.owner.composer.SetFocus()
 		elif int(status) == LOOKUP_STATUS_NOT_FOUND:
 			self.status.SetText(localeInfo.UNIFIED_MESSENGER_PLAYER_NOT_FOUND)
 		else:
@@ -516,6 +534,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 	# Immutable defaults for state that is always reassigned, never mutated.
 	aliases = None
 	allConversations = ()
+	r1Skin = None
 	newerMessages = ()
 	historyDirty = False
 	historyScrollable = False
@@ -528,6 +547,12 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 	linkTarget = ""
 	typingText = ""
 	typingChangedAt = 0
+	duelRevision = None
+	unreadAnchorPending = False
+	unreadAnchorRowID = None
+	lastMessageTimes = None
+	minimized = False
+	minimizeButton = None
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
@@ -535,6 +560,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.loaded = False
 		self.selectedKey = ""
 		self.selectedName = ""
+		self.drafts = {}
 		self.selectedUnread = 0
 		self.conversationRows = []
 		self.messageRows = []
@@ -648,11 +674,11 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.conversationPane.SetTop()
 		self.board.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.search.SetReturnEvent(ui.__mem_func__(self.RefreshConversations))
-		self.search.SetEscapeEvent(ui.__mem_func__(self.Close))
+		self.search.SetEscapeEvent(ui.__mem_func__(self.OnPressEscapeKey))
 		self.searchClearButton.SetEvent(ui.__mem_func__(self.ClearSearch))
 		self.searchButton.SetEvent(ui.__mem_func__(self.RefreshConversations))
 		self.composer.SetReturnEvent(ui.__mem_func__(self.SendMessage))
-		self.composer.SetEscapeEvent(ui.__mem_func__(self.Close))
+		self.composer.SetEscapeEvent(ui.__mem_func__(self.OnPressEscapeKey))
 		self.sendButton.SetEvent(ui.__mem_func__(self.SendMessage))
 		self.newMessageButton.SetEvent(ui.__mem_func__(self.OpenNewMessage))
 		self.addFriendButton.SetEvent(ui.__mem_func__(self.AddSelectedFriend))
@@ -675,6 +701,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		# interface is destroyed during character selection. Clear local typing
 		# state without emitting another game-phase packet on that socket.
 		self.StopTyping(False)
+		self.__ReleaseInputFocus()
 		self.__DestroyRows(self.conversationRows)
 		self.__DestroyRows(self.messageRows)
 		self.loadedMessages = []
@@ -683,6 +710,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.newerMessages = []
 		self.pendingNewRows = False
 		self.allConversations = []
+		self.drafts = {}
 		self.filteredConversations = []
 		self.rowHeightCache = {}
 		self.__DestroyRows(self.settingsButtons)
@@ -690,7 +718,13 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			self.questionDialog.Close()
 		self.questionDialog = None
 		self.__CloseLinkDialog()
-		self.__CloseTargetDialog()
+		if self.r1Skin:
+			self.r1Skin.Destroy()
+		self.r1Skin = None
+		if getattr(self, "minimized", False) and self.interface:
+			self.interface.HideUnifiedMessengerMinimized()
+		self.minimized = False
+		self.minimizeButton = None
 		self.interface = None
 		self.loaded = False
 		self.ClearDictionary()
@@ -700,10 +734,79 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			row.Hide()
 		del rows[:]
 
+	def SyncPresenceWatch(self, shown=None):
+		available = getattr(net, "IsUnifiedMessengerPresenceAvailable", None)
+		watch = getattr(net, "WatchUnifiedMessengerPresence", None)
+		if not available or not watch or not available():
+			return
+		if shown is None:
+			shown = self.IsShow()
+		name = self.selectedName if shown and not str(self.selectedKey).startswith("guild:") else ""
+		watch(name or "")
+
+	def OnPresenceChanged(self):
+		if self.loaded and self.IsShow():
+			self.RenderConversations()
+
+	def Hide(self):
+		if getattr(self, "loaded", False):
+			self.SyncPresenceWatch(False)
+		ui.ScriptWindow.Hide(self)
+
 	def Show(self):
+		restored = getattr(self, "minimized", False)
+		self.minimized = False
 		ui.ScriptWindow.Show(self)
+		self.SyncPresenceWatch(True)
+		self.OnPresenceChanged()
 		if self.interface:
+			# Also removes the minimized "Messenger" letter.
 			self.interface.ClearUnifiedMessengerNotifications()
+		if restored:
+			self.SetTop()
+			# The draft is still in the composer: let the player go on typing.
+			if self.composer.GetText():
+				self.FocusComposer()
+
+	def IsMinimized(self):
+		return bool(getattr(self, "minimized", False) and self.loaded and not self.IsShow())
+
+	def Minimize(self):
+		# The title bar's "_": hides the window and leaves one "Messenger"
+		# letter among the whisper letters. Hide keeps everything a restore
+		# needs (the open conversation, the composer draft, the position);
+		# the letter, the Messenger shortcut or the friends button bring it
+		# back through Open() without a name.
+		if not self.loaded or not self.IsShow():
+			return True
+		self.StopTyping()
+		self.HideSettings()
+		self.__ReleaseInputFocus()
+		self.minimized = True
+		self.Hide()
+		if self.interface:
+			self.interface.ShowUnifiedMessengerMinimized(self.MinimizedUnread())
+		return True
+
+	def MinimizedUnread(self):
+		# Private unread messages (with duel rows), like the in-window badge.
+		if not self.loaded:
+			return 0
+		self.RefreshConversations()
+		return model.unread_total(self.allConversations)
+
+	def RestoreMinimized(self, name, key):
+		# Warp reconstruction must not read a hidden thread or steal focus.
+		if not self.LoadWindow():
+			return False
+		if name and not self.OpenConversation(name, key, markRead=False):
+			return False
+		self.historyDirty = True
+		self.minimized = True
+		self.Hide()
+		if self.interface:
+			self.interface.ShowUnifiedMessengerMinimized(self.MinimizedUnread())
+		return True
 
 	def Open(self, name=None, key=None):
 		if not self.LoadWindow():
@@ -718,6 +821,27 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			self.LoadMessages()
 			self.__MarkConversationRead()
 		self.Show()
+		# every opening (a friend's double click, a letter, the
+		# envelope, the friends button, a restore) lands in the message line.
+		self.FocusComposer()
+		return True
+
+	def CanCompose(self):
+		# A former guild's history stays readable, but guild chat would go to
+		# the current guild, so its composer is hidden.
+		if not self.selectedKey or not self.selectedName:
+			return False
+		return (not self.selectedKey.startswith("guild:") or
+			self.selectedKey == self.__CurrentGuildKey())
+
+	def FocusComposer(self):
+		# The player can type at once, without clicking the message line.
+		# The "Nová zpráva" name dialog keeps its own focus.
+		if not self.loaded or not self.IsShow() or not self.CanCompose():
+			return False
+		if getattr(self, "targetDialog", None):
+			return False
+		self.composer.SetFocus()
 		return True
 
 	def OpenWithoutTarget(self):
@@ -726,17 +850,45 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.OpenNewMessage()
 		return True
 
+	def OpenLatestUnread(self):
+		# Opens Messages on the newest unread private thread, or as it was.
+		if not self.Open():
+			return False
+		row = model.latest_unread_conversation(self.allConversations)
+		if row:
+			self.OpenConversation(row["name"], row["key"])
+		return True
+
 	def Toggle(self):
 		if not self.loaded or not self.IsShow():
 			return self.Open()
 		self.Close()
 		return True
 
+	def __ReleaseInputFocus(self):
+		self.__CloseTargetDialog()
+		if self.loaded:
+			self.search.KillFocus()
+			self.composer.KillFocus()
+
 	def Close(self):
 		self.StopTyping()
 		self.HideSettings()
-		self.__CloseTargetDialog()
+		self.__ReleaseInputFocus()
+		if getattr(self, "minimized", False) and self.interface:
+			self.interface.HideUnifiedMessengerMinimized()
+		self.minimized = False
 		self.Hide()
+		return True
+
+	def OnPressEscapeKey(self):
+		if not self.loaded or not self.IsShow():
+			return True
+		self.Close()
+		if self.interface and self.selectedName:
+			# A minimized read conversation is a shortcut, not a new message.
+			self.interface.ShowUnifiedMessengerNotification(
+				self.selectedKey, self.selectedName, False)
 		return True
 
 	def IsConversationOpen(self, name, key=""):
@@ -753,6 +905,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 	def OpenNewMessage(self):
 		if self.targetDialog:
 			self.targetDialog.SetTop()
+			self.targetDialog.edit.SetFocus()
 			return
 		dialog = PlayerLookupDialog(self)
 		dialog.Open()
@@ -834,10 +987,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			return
 		hasSelection = bool(self.selectedKey and self.selectedName)
 		isGuild = hasSelection and self.selectedKey.startswith("guild:")
-		# A former guild's history stays readable, but guild chat would go to
-		# the current guild, so its composer is hidden.
-		canCompose = hasSelection and (not isGuild or
-			self.selectedKey == self.__CurrentGuildKey())
+		canCompose = self.CanCompose()
 		if hasSelection:
 			self.conversationTitle.SetText(self.selectedName)
 			self.emptyState.Hide()
@@ -913,16 +1063,31 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		return model.conversation_aliases(rows, self.__ProfilePid)
 
 	def __RecipientReassigned(self):
-		# Protocol v1 submits by name. When the authoritative profile cache
-		# already maps this name to another PID, the message would reach the
+		# Protocol v1 submits by name. When the server confirmed in this session
+		# that the name belongs to another PID, the message would reach the
 		# other character, so it is not sent into this conversation.
 		pid = model.pid_from_key(self.selectedKey)
 		if not pid:
 			return False
 		owner = self.__ProfilePid(self.selectedName)
-		return bool(owner and owner != pid)
+		return bool(owner and owner != pid and
+			messengerportraitresolver.ConfirmedOwner(self.selectedName) == owner)
 
-	def OpenConversation(self, name, key=None):
+	def __RecipientUnverified(self):
+		# The local profile cache is not tied to a server or a session (a row of
+		# a DEV / test server character, DanStřela 19. 10.): a different cached
+		# owner that this session did not confirm is asked again by pid and
+		# name; the answer replaces the stale row and the next send goes out.
+		pid = model.pid_from_key(self.selectedKey)
+		if not pid:
+			return False
+		owner = self.__ProfilePid(self.selectedName)
+		if not owner or owner == pid or \
+				messengerportraitresolver.ConfirmedOwner(self.selectedName) == owner:
+			return False
+		return bool(messengerportraitresolver.Verify(pid, self.selectedName))
+
+	def OpenConversation(self, name, key=None, markRead=True):
 		name = str(name)
 		if not self.LoadWindow():
 			return False
@@ -930,18 +1095,40 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		rows = self.__StoredConversations()
 		aliases = self.__Aliases(rows)
 		self.aliases = aliases
+		self.drafts = {aliases.get(oldKey, oldKey): text
+			for oldKey, text in self.drafts.items()}
+		oldKey = aliases.get(self.selectedKey, self.selectedKey)
+		if oldKey:
+			body = self.composer.GetText()
+			if body:
+				self.drafts[oldKey] = body
+			else:
+				self.drafts.pop(oldKey, None)
 		key = aliases.get(str(key), key)
 		self.selectedKey, self.selectedName, self.selectedUnread = \
 			model.resolve_open_conversation(name, key,
 				model.conversation_summaries(rows, aliases))
+		self.composer.SetText(self.drafts.get(self.selectedKey, ""))
+		# The unread divider is placed once, on the rows loaded below.
+		self.unreadAnchorPending = True
+		self.unreadAnchorRowID = None
 		if self.selectedKey.startswith("guild:"):
 			self.selectedName = self.__GuildName(self.selectedKey, self.selectedName)
 		self.conversationTitle.SetText(self.selectedName)
 		self.typingIndicator.SetText("")
 		self.RefreshSelectionState()
 		self.LoadMessages()
-		self.__MarkConversationRead()
+		if markRead:
+			self.__MarkConversationRead()
 		self.RefreshConversations()
+		interface = getattr(self, "interface", None)
+		if interface and self.IsShow():
+			# A thread read inside Messages no longer needs its letter.
+			interface.DismissUnifiedMessengerNotification(
+				self.selectedKey, self.selectedName)
+		# Switching threads in an open window (a letter, a guild member's
+		# whisper, the newest unread) also goes straight to typing.
+		self.FocusComposer()
 		return True
 
 	def __GuildName(self, key, storedName):
@@ -963,14 +1150,40 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			model.guild_key(guildID))
 
 	def __LoadConversationMessages(self, key, before, limit, rows=None):
+		local = self.__LocalMessages(key)
 		if not messengerHistory:
-			return []
+			return model.merge_local_messages([], local, before, limit)
 		aliases = self.__CurrentAliases(rows)
 		messages = []
 		for storageKey in model.storage_keys_for(key, aliases):
-			messages.extend(messengerHistory.LoadMessages(storageKey, int(before), limit))
+			messages.extend(messengerHistory.LoadMessages(storageKey,
+				model.stored_page_boundary(before), limit))
 		# row_id is global to this character's database, including pending sends.
-		return sorted(messages, key=lambda row: row[0])[-limit:]
+		return model.merge_local_messages(messages, local, before, limit)
+
+	def __LocalMessages(self, key):
+		# Session-only system whispers (duel invitations...) of the open thread.
+		router = getattr(getattr(self, "interface", None), "unifiedMessengerRouter", None)
+		if (not router or not key or key != self.selectedKey or
+				str(key).startswith("guild:")):
+			return ()
+		return router.LocalMessages(self.selectedName)
+
+	def OnLocalMessage(self):
+		if self.loaded and self.IsShow():
+			self.__RefreshSelectedMessages()
+
+	def OnLocalDuel(self, name):
+		# A duel challenge row arrived or replaced a pending one: the list shows
+		# the thread with its unread badge, an open thread shows the row.
+		if not self.loaded:
+			return
+		if not self.IsShow():
+			self.historyDirty = True
+			return
+		self.RefreshConversations()
+		if self.IsConversationOpen(name):
+			self.__RefreshSelectedMessages()
 
 	def __CurrentAliases(self, rows=None):
 		# Aliases are computed once per refresh and reused by page loads.
@@ -981,6 +1194,9 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		return self.aliases
 
 	def __MarkConversationRead(self):
+		router = getattr(getattr(self, "interface", None), "unifiedMessengerRouter", None)
+		if router and self.selectedName and not str(self.selectedKey).startswith("guild:"):
+			router.MarkLocalRead(self.selectedName)  # duel challenge rows
 		if messengerHistory and self.selectedKey:
 			for key in model.storage_keys_for(self.selectedKey, self.__CurrentAliases()):
 				messengerHistory.MarkRead(key)
@@ -1011,6 +1227,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.aliases = aliases
 		previews = model.conversation_previews(storedRows, aliases)
 		summaryApi = bool(storedRows) and len(storedRows[0]) >= 7
+		lastRows = model.conversation_last_rows(storedRows, aliases) if summaryApi else {}
 		rows = []
 		guildKey = self.__CurrentGuildKey()
 		if guildKey:
@@ -1021,6 +1238,8 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		for key, name, kind, lastActivity, unread in model.conversation_summaries(
 				storedRows, aliases):
 			rawPreview = previews.get(key, "") if summaryApi else self.__LoadPreview(key)
+			if key in lastRows:
+				lastActivity = self.__LastMessageTime(lastRows[key][1], lastRows[key][0]) or lastActivity
 			preview, displayTime = self.__ConversationPresentation(rawPreview, lastActivity)
 			row = {"key": key, "name": name,
 				"last_activity": lastActivity, "unread": unread,
@@ -1033,7 +1252,34 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 				row["name"] = model.guild_display_name(
 					name, localeInfo.UNIFIED_MESSENGER_GUILD)
 			rows.append(row)
+		router = getattr(getattr(self, "interface", None), "unifiedMessengerRouter", None)
+		if router:
+			# Duel challenge rows list the challenger's thread with its badge.
+			rows = model.merge_local_conversations(rows, router.LocalConversations(),
+				self.__ConversationPresentation)
 		self.allConversations = model.sort_conversations(rows)
+
+	def __LastMessageTime(self, storageKey, rowID):
+		# The list shows the newest message's local time, like its bubble. The
+		# stored last_activity_ms takes a delivery's SERVER time and keeps the
+		# maximum, so with the server clock behind it stayed at the time of an
+		# older own message. One row read per new last message (cached).
+		if self.lastMessageTimes is None:
+			self.lastMessageTimes = {}
+		cache = self.lastMessageTimes
+		cacheKey = (storageKey, int(rowID))
+		if cacheKey not in cache:
+			if len(cache) >= 256:
+				cache.clear()
+			value = 0
+			try:
+				rows = messengerHistory.LoadMessages(storageKey, int(rowID) + 1, 1)
+				if rows and int(rows[-1][0]) == int(rowID):
+					value = model.message_time_ms(rows[-1])
+			except Exception:
+				value = 0
+			cache[cacheKey] = value
+		return cache[cacheKey]
 
 	def __ApplyConversationFilter(self):
 		self.searchDirty = False
@@ -1063,7 +1309,6 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 
 	def __SelectConversation(self, name, key):
 		self.OpenConversation(name, key)
-		self.composer.SetFocus()
 
 	def LoadMessages(self, before=0):
 		if before:
@@ -1149,7 +1394,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		yIndex = 0
 		for index, message in enumerate(messages):
 			absoluteIndex = start + index
-			timestamp = int(message[7] or message[6])
+			timestamp = model.message_time_ms(message)
 			day = time.strftime("%Y-%m-%d", time.localtime(timestamp / 1000.0))
 			if day != previousDay and yIndex < visibleCount:
 				separator = ui.TextLine()
@@ -1167,7 +1412,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 				separator.SetParent(self.historyPane)
 				separator.SetPosition(235, 8 + yIndex * 30)
 				separator.SetHorizontalAlignCenter()
-				separator.SetText("--- %s ---" % localeInfo.UNIFIED_MESSENGER_BADGE)
+				separator.SetText(UNREAD_DIVIDER_TEXT)
 				separator.SetPackedFontColor(0xFFCDB58C)
 				separator.Show()
 				self.messageRows.append(separator)
@@ -1216,6 +1461,9 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			if self.__RecipientReassigned():
 				_Notice("UNIFIED_MESSENGER_NAME_REASSIGNED")
 				return
+			if self.__RecipientUnverified():
+				_Notice("UNIFIED_MESSENGER_RECIPIENT_CHECKING")
+				return
 			if self.selectedKey.startswith("pid:"):
 				# Newer executables store the row in this open conversation at
 				# once; older ones ignore the optional key.
@@ -1227,6 +1475,7 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 				_Notice("UNIFIED_MESSENGER_SEND_FAILED")
 				return
 		self.composer.SetText("")
+		self.drafts.pop(self.selectedKey, None)
 		self.StopTyping()
 		self.LoadMessages()
 		self.RefreshConversations()
@@ -1237,6 +1486,8 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			return
 		if self.__RecipientReassigned():
 			_Notice("UNIFIED_MESSENGER_NAME_REASSIGNED")
+		elif self.__RecipientUnverified():
+			_Notice("UNIFIED_MESSENGER_RECIPIENT_CHECKING")
 		else:
 			_Notice("UNIFIED_MESSENGER_RETRY_UNAVAILABLE")
 		self.__RefreshSelectedMessages()
@@ -1319,9 +1570,12 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		aliases = self.__Aliases(rows)
 		self.aliases = aliases
 		if self.selectedKey or self.selectedName:
+			oldKey = self.selectedKey
 			self.selectedKey, self.selectedName = model.resolve_selection(
 				self.selectedKey, self.selectedName,
 				model.conversation_summaries(rows, aliases), key)
+			if oldKey != self.selectedKey:
+				self.drafts.pop(oldKey, None)
 			if self.selectedKey.startswith("guild:"):
 				self.selectedName = self.__GuildName(self.selectedKey, self.selectedName)
 			self.conversationTitle.SetText(self.selectedName)
@@ -1355,6 +1609,10 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		return settings
 
 	def ToggleSettings(self):
+		if self.r1Skin:
+			# R1 (uir1messenger): check boxes instead of the ON / OFF buttons, the same preferences.
+			self.r1Skin.ToggleSettings()
+			return
 		if self.settingsButtons:
 			self.HideSettings()
 			return
@@ -1394,6 +1652,8 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 		self.settingsButtons.append(clearButton)
 
 	def HideSettings(self):
+		if self.r1Skin:
+			self.r1Skin.HideSettings()
 		self.__DestroyRows(self.settingsButtons)
 
 	def __ToggleSetting(self, key):
@@ -1424,6 +1684,9 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 			for key in model.conversation_storage_keys(
 					self.selectedKey, messengerHistory.ListConversations()):
 				messengerHistory.DeleteConversation(key)
+				self.drafts.pop(key, None)
+		self.drafts.pop(self.selectedKey, None)
+		self.composer.SetText("")
 		self.__CloseQuestion()
 		self.selectedKey = ""
 		self.selectedName = ""
@@ -1441,6 +1704,8 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 	def __ClearHistory(self):
 		if messengerHistory:
 			messengerHistory.ClearHistory()
+		self.drafts.clear()
+		self.composer.SetText("")
 		self.__CloseQuestion()
 		self.selectedKey = ""
 		self.selectedName = ""
@@ -1453,6 +1718,10 @@ class UnifiedMessengerWindow(ui.ScriptWindow):
 # CRIMSON_EMBER_MESSENGER_V16_BEGIN
 import messengerportraitresolver
 import uicrimsonember
+try:
+	import uir1messenger
+except Exception:
+	uir1messenger = None
 
 CRIMSON_MESSENGER_IMG_DIR = "d:/ymir work/ui/game/crimson_ember/messenger/"
 CRIMSON_ERROR_LINE_HEIGHT = 16
@@ -1470,11 +1739,26 @@ def _CrimsonResolvePortrait(key, name):
 
 
 def _CrimsonGetPresence(self, name):
+	available = getattr(net, "IsUnifiedMessengerPresenceAvailable", None)
+	getPresence = getattr(net, "GetUnifiedMessengerPresence", None)
+	if name == self.selectedName and available and getPresence and available():
+		# Unknown is deliberately hidden; stale roster state must not override it.
+		state = getPresence(name)
+		return True if state == 2 else False if state == 1 else None
 	interface = getattr(self, "interface", None)
 	roster = getattr(interface, "wndMessenger", None) if interface else None
 	if roster and hasattr(roster, "GetCrimsonPresence"):
 		return roster.GetCrimsonPresence(name)
 	return None
+
+
+def _CrimsonRowPresence(self, name):
+	"""the dot of a conversation row shows only a KNOWN state: green online, red offline. Only the selected
+	conversation is watched natively and the friends roster knows only the friends, so a stranger that is not selected
+	has an unknown state; it gets no dot (None) instead of a red one, because the person may be online. The header dot
+	of the selected conversation hides an unknown state the same way."""
+	online = _CrimsonGetPresence(self, name)
+	return online if online in (True, False) else None
 
 
 def _CrimsonApplyPresence(self):
@@ -1659,7 +1943,8 @@ def _CrimsonMessengerMessageInit(self, copyEvent):
 	self.body = ""
 	self.copyEvent = copyEvent
 	self.hyperlinkEvent = None
-	self.background = _CrimsonMessageBubble()
+	# The R1 row class (uir1messenger) brings its own bubble; it is created first, under the texts.
+	self.background = (getattr(self, "BUBBLE_CLASS", None) or _CrimsonMessageBubble)()
 	self.background.SetParent(self)
 	self.background.AddFlag("not_pick")
 	self.background.Show()
@@ -1753,7 +2038,7 @@ def _CrimsonMessengerMessageSet(self, message, retryEvent):
 	self.SetSize(454, rowHeight)
 	self.background.SetBubbleHeight(rowHeight)
 	self.timeLine.SetPosition(x + 292, rowHeight - 17)
-	timestamp = int(message[7] or message[6])
+	timestamp = model.message_time_ms(message)
 	self.timeLine.SetText(time.strftime("%H:%M", time.localtime(timestamp / 1000.0)))
 	stateKey = "" if incoming else model.message_state_key(message[9])
 	if model.message_error(message) == model.ERROR_OUTCOME_UNKNOWN:
@@ -1781,6 +2066,37 @@ def _CrimsonApplyHeaderPortrait(self):
 			_CrimsonResolvePortrait(self.selectedKey, self.selectedName))
 		self.headerPortrait.SetPosition(238, 44)
 	self.headerPortrait.Show()
+
+
+TITLE_MINIMIZE_IMAGES = tuple(PUBLIC + "crimson/controls/legacy/minimize_%02d.tga" % index
+	for index in (1, 2, 3))
+
+
+def _MakeTitleBarMinimizeButton(board, event):
+	# "_" left of the title bar's X, the same crimson control family (the
+	# whisper dialog's minimize). A child of the title bar: it hides with it
+	# when the R1 look draws its own header (uir1messenger adds its "_").
+	titleBar = getattr(board, "titleBar", None)
+	closeButton = getattr(titleBar, "btnClose", None)
+	if not titleBar or not closeButton:
+		return None
+	button = ui.Button()
+	button.SetParent(titleBar)
+	button.SetUpVisual(TITLE_MINIMIZE_IMAGES[0])
+	button.SetOverVisual(TITLE_MINIMIZE_IMAGES[1])
+	button.SetDownVisual(TITLE_MINIMIZE_IMAGES[2])
+	try:
+		import uiScriptLocale
+		tooltip = uiScriptLocale.MINIMIZE
+	except Exception:
+		tooltip = u"Minimalizovat"
+	button.SetToolTipText(tooltip, 0, -23)
+	x, y = closeButton.GetLocalPosition()
+	button.SetPosition(x - button.GetWidth() - 3,
+		y + max(0, (closeButton.GetHeight() - button.GetHeight()) // 2))
+	button.SetEvent(event)
+	button.Show()
+	return button
 
 
 def _CrimsonMessengerLoadWindow(self):
@@ -1840,13 +2156,15 @@ def _CrimsonMessengerLoadWindow(self):
 	self.conversationPane.AddFlag("float")
 	self.conversationPane.SetTop()
 	self.board.SetCloseEvent(ui.__mem_func__(self.Close))
+	self.minimizeButton = _MakeTitleBarMinimizeButton(
+		self.board, ui.__mem_func__(self.Minimize))
 	self.search.SetReturnEvent(ui.__mem_func__(self.RefreshConversations))
-	self.search.SetEscapeEvent(ui.__mem_func__(self.Close))
+	self.search.SetEscapeEvent(ui.__mem_func__(self.OnPressEscapeKey))
 	self.search.OnIMEUpdate = ui.__mem_func__(self._CrimsonSearchIMEUpdate)
 	self.search.SetOnFocusEvent(ui.__mem_func__(self._CrimsonSearchFocus))
 	self.search.SetKillFocusEvent(ui.__mem_func__(self._CrimsonSearchBlur))
 	self.composer.SetReturnEvent(ui.__mem_func__(self.SendMessage))
-	self.composer.SetEscapeEvent(ui.__mem_func__(self.Close))
+	self.composer.SetEscapeEvent(ui.__mem_func__(self.OnPressEscapeKey))
 	self.composer.SetOnFocusEvent(ui.__mem_func__(self._CrimsonComposerFocus))
 	self.composer.SetKillFocusEvent(ui.__mem_func__(self._CrimsonComposerBlur))
 	self.sendButton.SetEvent(ui.__mem_func__(self.SendMessage))
@@ -1859,6 +2177,8 @@ def _CrimsonMessengerLoadWindow(self):
 	self.blockButton.SetEvent(ui.__mem_func__(self.BlockSelectedPeer))
 	self.settingsButton.SetEvent(ui.__mem_func__(self.ToggleSettings))
 	self.deleteConversationButton.SetEvent(ui.__mem_func__(self.AskDeleteConversation))
+	# The R1 look (default) is drawn into the loaded window; "Starý vzhled" or a failure keeps this one.
+	self.r1Skin = uir1messenger.Build(self) if uir1messenger else None
 	self.loaded = True
 	self.RefreshConversations()
 	self.RefreshSelectionState()
@@ -1907,6 +2227,8 @@ def _CrimsonMessengerRootMouseWheel(self, isDown):
 		self.historyScrollBar.OnMouseWheel(delta)
 	elif _CrimsonMessengerMouseInWindow(self, self.conversationPane):
 		self.conversationScrollBar.OnMouseWheel(delta)
+	else:
+		return False	# outside both panes (the bars, the header): the panel wheel (uiwheel) picks the bar beside it
 	return True
 
 
@@ -1993,19 +2315,38 @@ def _CrimsonMessengerUnreadAt(messageCount, unreadCount):
 	return max(0, int(messageCount) - int(unreadCount))
 
 
+def _CrimsonMessengerUnreadIndex(self):
+	# The divider stays above the oldest message that was unread when the
+	# conversation was opened. It used to sit `unread` rows from the end, so
+	# the player's own messages (and rows added later) pushed it onto their
+	# own last message.
+	if getattr(self, "unreadAnchorPending", False):
+		self.unreadAnchorPending = False
+		self.unreadAnchorRowID = model.first_unread_row_id(
+			self.loadedMessages, self.selectedUnread)
+	anchor = getattr(self, "unreadAnchorRowID", None)
+	if anchor is None:
+		return -1
+	for index, message in enumerate(self.loadedMessages):
+		if message[0] == anchor:
+			return index
+	return -1
+
+
 def _CrimsonMessengerRenderMessages(self, anchorRowID=None, keepPosition=False):
 	self._UnifiedMessengerWindow__DestroyRows(self.messageRows)
+	skin = getattr(self, "r1Skin", None)
+	viewportHeight = getattr(self, "historyViewportHeight", 303)
 	dayKeys = []
 	heights = []
 	for message in self.loadedMessages:
-		timestamp = int(message[7] or message[6])
+		timestamp = model.message_time_ms(message)
 		dayKeys.append(time.strftime(
 			"%Y-%m-%d", time.localtime(timestamp / 1000.0)))
 		heights.append(_CrimsonMessengerMeasureRowHeight(self, message))
-	unreadAt = _CrimsonMessengerUnreadAt(
-		len(self.loadedMessages), self.selectedUnread)
+	unreadAt = _CrimsonMessengerUnreadIndex(self)
 	validStarts = _CrimsonMessengerValidStarts(
-		dayKeys, heights, unreadAt, 303)
+		dayKeys, heights, unreadAt, viewportHeight)
 	self.historyScrollable = len(validStarts) > 1
 	if len(validStarts) > 1:
 		self.historyScrollBar.SetScrollStep(
@@ -2034,7 +2375,7 @@ def _CrimsonMessengerRenderMessages(self, anchorRowID=None, keepPosition=False):
 		if absoluteIndex == unreadAt:
 			separatorHeight += 20
 		rowHeight = heights[absoluteIndex]
-		if yPos + separatorHeight + rowHeight > 303 and renderedRows:
+		if yPos + separatorHeight + rowHeight > viewportHeight and renderedRows:
 			break
 		if day != previousDay:
 			separator = ui.TextLine()
@@ -2052,12 +2393,12 @@ def _CrimsonMessengerRenderMessages(self, anchorRowID=None, keepPosition=False):
 			separator.SetParent(self.historyPane)
 			separator.SetPosition(235, yPos)
 			separator.SetHorizontalAlignCenter()
-			separator.SetText("--- %s ---" % localeInfo.UNIFIED_MESSENGER_BADGE)
+			separator.SetText(UNREAD_DIVIDER_TEXT)
 			separator.SetPackedFontColor(0xFFCDB58C)
 			separator.Show()
 			self.messageRows.append(separator)
 			yPos += 20
-		row = MessageRow(ui.__mem_func__(self.CopyMessage))
+		row = (skin.MessageRow if skin else MessageRow)(ui.__mem_func__(self.CopyMessage))
 		row.SetParent(self.historyPane)
 		row.SetHyperlinkEvent(ui.__mem_func__(self.OnClickMessageLink))
 		row.SetPosition(8, yPos)
@@ -2066,6 +2407,8 @@ def _CrimsonMessengerRenderMessages(self, anchorRowID=None, keepPosition=False):
 		self.messageRows.append(row)
 		yPos += row.GetHeight() + 4
 		renderedRows += 1
+	if skin:
+		skin.AfterMessages(len(validStarts))
 
 
 def _CrimsonMessengerRenderConversations(self):
@@ -2075,29 +2418,34 @@ def _CrimsonMessengerRenderConversations(self):
 	rows = self.filteredConversations
 	for row in rows:
 		if not str(row["key"]).startswith("guild:"):
-			row["online"] = _CrimsonGetPresence(self, row["name"])
-	maximumStart = max(0, len(rows) - CONVERSATION_ROWS)
+			row["online"] = _CrimsonRowPresence(self, row["name"])
+	skin = getattr(self, "r1Skin", None)
+	rowClass = skin.ConversationRow if skin else ConversationRow
+	rowCount = skin.CONVERSATION_ROWS if skin else CONVERSATION_ROWS
+	maximumStart = max(0, len(rows) - rowCount)
 	start = int(self.conversationScrollBar.GetPos() * maximumStart) if maximumStart else 0
 	# The badge counts all private conversations, independent of the filter.
 	unreadTotal = model.unread_total(self.allConversations)
-	for index, row in enumerate(rows[start:start + CONVERSATION_ROWS]):
-		item = ConversationRow()
+	for index, row in enumerate(rows[start:start + rowCount]):
+		item = rowClass()
 		item.SetParent(self.conversationPane)
-		item.SetPosition(0, index * ConversationRow.HEIGHT)
+		item.SetPosition(0, index * rowClass.HEIGHT)
 		item.SetConversation(row, row["key"] == self.selectedKey,
 			ui.__mem_func__(self._UnifiedMessengerWindow__SelectConversation))
 		item.Show()
 		self.conversationRows.append(item)
 	badgeEnabled = self._UnifiedMessengerWindow__LoadSettings()["badge"]
 	self.unreadBadge.SetText(str(unreadTotal) if unreadTotal and badgeEnabled else "")
+	if skin:
+		skin.AfterConversations(unreadTotal, badgeEnabled, len(rows))
 	_CrimsonApplyPresence(self)
 
 
 _CrimsonOriginalOpenConversation = UnifiedMessengerWindow.OpenConversation
 
 
-def _CrimsonMessengerOpenConversation(self, name, key=None):
-	result = _CrimsonOriginalOpenConversation(self, name, key)
+def _CrimsonMessengerOpenConversation(self, name, key=None, markRead=True):
+	result = _CrimsonOriginalOpenConversation(self, name, key, markRead)
 	_CrimsonApplyHeaderPortrait(self)
 	return result
 
@@ -2107,6 +2455,7 @@ _CrimsonOriginalRefreshSelectionState = UnifiedMessengerWindow.RefreshSelectionS
 
 def _CrimsonMessengerRefreshSelectionState(self):
 	_CrimsonOriginalRefreshSelectionState(self)
+	self.SyncPresenceWatch()
 	_CrimsonApplyHeaderPortrait(self)
 	_CrimsonApplyPresence(self)
 
@@ -2151,3 +2500,165 @@ UnifiedMessengerWindow.OnUpdate = _CrimsonMessengerOnUpdate
 UnifiedMessengerWindow._UnifiedMessengerWindow__RenderMessages = _CrimsonMessengerRenderMessages
 UnifiedMessengerWindow.RenderConversations = _CrimsonMessengerRenderConversations
 # CRIMSON_EMBER_MESSENGER_V16_END
+
+
+# DUEL_CHALLENGE_ROW_BEGIN
+# A duel challenge is also a session row of the challenger's thread (see
+# UnifiedMessengerRouter.ReceiveDuel): the bubble with the server's text gets
+# Přijmout (left, confirm) and Odmítnout (right, cancel) under it. Once the
+# challenge is answered here or in the chat line, expires, is ended by the
+# server or replaced, a grey state ("Přijato", "Odmítnuto", "Vypršelo", ...)
+# takes the buttons' place. The state lives in duelchallenge, shared with the
+# chat line, so an answer in one place shows in both.
+import duelchallenge
+
+DUEL_ACTIONS_HEIGHT = 28
+DUEL_FONT = "Tahoma:12"
+
+
+class DuelActions(ui.Window):
+	BUTTON_GAP = 6
+	STATUS_COLOR = 0xFF8E806D
+
+	def __init__(self):
+		ui.Window.__init__(self)
+		self.identifier = 0
+		self.answerEvent = None
+		self.buttons = []
+		x = 0
+		for action in (duelchallenge.ACCEPT, duelchallenge.DECLINE):
+			button = self.MakeButton(action, x)
+			x += button.GetWidth() + self.BUTTON_GAP
+			self.buttons.append(button)
+		self.SetSize(max(1, x - self.BUTTON_GAP), 22)
+		self.status = self.MakeStatus()
+
+	def MakeButton(self, action, x):
+		button = ui.Button()
+		button.SetParent(self)
+		button.SetPosition(x, 0)
+		button.SetUpVisual(CRIMSON_MESSENGER_IMG_DIR + "button/launcher_normal.png")
+		button.SetOverVisual(CRIMSON_MESSENGER_IMG_DIR + "button/launcher_hover.png")
+		button.SetDownVisual(CRIMSON_MESSENGER_IMG_DIR + "button/launcher_pressed.png")
+		button.SetText(duelchallenge.BUTTON_TEXTS[action])
+		button.SetEvent(ui.__mem_func__(self.Answer), action)
+		button.Show()
+		return button
+
+	def MakeStatus(self):
+		line = ui.TextLine()
+		line.SetParent(self)
+		line.SetFontName(DUEL_FONT)
+		line.SetPosition(0, 4)
+		color = int(self.STATUS_COLOR)
+		# Signed: the x64 binding silently ignores values >= 0x80000000.
+		line.SetPackedFontColor(color - 0x100000000 if color >= 0x80000000 else color)
+		line.AddFlag("not_pick")
+		line.Hide()
+		return line
+
+	def SetChallenge(self, identifier):
+		# The player's own request has no actions, only its state.
+		self.identifier = int(identifier)
+		challenges = duelchallenge.challenges
+		status = u""
+		if challenges.IsOutgoing(self.identifier) or not challenges.IsActive(self.identifier):
+			status = challenges.StatusText(self.identifier) or \
+				duelchallenge.STATE_TEXTS[duelchallenge.STATE_EXPIRED]
+		for button in self.buttons:
+			if status:
+				button.Hide()
+			else:
+				button.Show()
+		self.status.SetText(status)
+		if status:
+			self.status.Show()
+		else:
+			self.status.Hide()
+
+	def SetAnswerEvent(self, event):
+		self.answerEvent = event
+
+	def Answer(self, action):
+		challenges = duelchallenge.challenges
+		if self.answerEvent and challenges.IsActive(self.identifier) and \
+				not challenges.IsOutgoing(self.identifier):
+			self.answerEvent(action, self.identifier)
+
+
+_DuelOriginalMessageSet = MessageRow.SetMessage
+
+
+def _DuelMessageSet(self, message, retryEvent):
+	_DuelOriginalMessageSet(self, message, retryEvent)
+	identifier = model.duel_identifier(message)
+	actions = getattr(self, "duelActions", None)
+	if not identifier:
+		if actions:
+			actions.Hide()
+		return
+	if not actions:
+		actions = (getattr(self, "DUEL_ACTIONS_CLASS", None) or DuelActions)()
+		actions.SetParent(self)
+		self.duelActions = actions
+	x = 4 if int(message[3]) == 1 else 156
+	self.stateLine.SetText("")  # no "Doručeno": the actions show the state
+	height = self.GetHeight()
+	actions.SetPosition(x + 10, height - 2)
+	actions.SetChallenge(identifier)
+	actions.Show()
+	height += DUEL_ACTIONS_HEIGHT
+	self.SetSize(454, height)
+	self.background.SetBubbleHeight(height)
+	self.timeLine.SetPosition(x + 292, height - 17)
+
+
+_DuelOriginalMeasureRowHeight = _CrimsonMessengerMeasureRowHeight
+
+
+def _DuelMeasureRowHeight(self, message):
+	height = _DuelOriginalMeasureRowHeight(self, message)
+	return height + DUEL_ACTIONS_HEIGHT if model.duel_identifier(message) else height
+
+
+_DuelOriginalRenderMessages = UnifiedMessengerWindow._UnifiedMessengerWindow__RenderMessages
+
+
+def _DuelRenderMessages(self, anchorRowID=None, keepPosition=False):
+	_DuelOriginalRenderMessages(self, anchorRowID, keepPosition)
+	self.duelRevision = duelchallenge.challenges.Revision()
+	for row in self.messageRows:
+		actions = getattr(row, "duelActions", None)
+		if actions:
+			actions.SetAnswerEvent(ui.__mem_func__(self.AnswerDuel))
+
+
+def _DuelMessengerAnswer(self, action, identifier):
+	# The same answer as the chat line's link (Přijmout sends "/pvp <vid>").
+	if self.interface:
+		self.interface.AnswerDuelChallenge("duel:%s:%d" % (action, int(identifier)))
+	# The rows are rebuilt on the next update, not inside the button's click.
+	self.duelRevision = None
+
+
+_DuelOriginalOnUpdate = UnifiedMessengerWindow.OnUpdate
+
+
+def _DuelMessengerOnUpdate(self):
+	_DuelOriginalOnUpdate(self)
+	if not self.loaded or not self.IsShow():
+		return
+	# Answered in the chat, expired or ended by the server: re-render the rows.
+	revision = duelchallenge.challenges.Revision()
+	if revision != self.duelRevision:
+		self.duelRevision = revision
+		if any(model.duel_identifier(message) for message in self.loadedMessages):
+			self._UnifiedMessengerWindow__RenderMessages()
+
+
+MessageRow.SetMessage = _DuelMessageSet
+_CrimsonMessengerMeasureRowHeight = _DuelMeasureRowHeight
+UnifiedMessengerWindow._UnifiedMessengerWindow__RenderMessages = _DuelRenderMessages
+UnifiedMessengerWindow.AnswerDuel = _DuelMessengerAnswer
+UnifiedMessengerWindow.OnUpdate = _DuelMessengerOnUpdate
+# DUEL_CHALLENGE_ROW_END

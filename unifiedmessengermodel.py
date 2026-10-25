@@ -31,6 +31,8 @@ STALE_SENDING_MS = 60000
 
 MESSAGE_TYPE_CHAT = 0
 MESSAGE_TYPE_GAME_MASTER = 1
+# Session-only (never stored): a duel challenge row with Přijmout / Odmítnout.
+MESSAGE_TYPE_DUEL_CHALLENGE = 2
 
 
 def stable_key(pid):
@@ -132,6 +134,20 @@ def conversation_previews(rows, aliases):
 	return dict((key, value[1]) for key, value in previews.items())
 
 
+def conversation_last_rows(rows, aliases):
+	"""{canonical key: (newest row id, its storage key)} from the summary rows
+	(..., last_body, last_row_id)."""
+	last = {}
+	for row in rows:
+		if len(row) < 7:
+			continue
+		canonical = aliases.get(str(row[0]), str(row[0]))
+		rowID = int(row[6] or 0)
+		if rowID and rowID > last.get(canonical, (0, ""))[0]:
+			last[canonical] = (rowID, str(row[0]))
+	return last
+
+
 def unread_total(conversations):
 	# Guild lines are mirrored from the main chat the player already sees, so
 	# the global badge counts private conversations only and ignores filters.
@@ -140,6 +156,15 @@ def unread_total(conversations):
 		if not str(row.get("key", "")).startswith("guild:"):
 			total += int(row.get("unread", 0) or 0)
 	return total
+
+
+def latest_unread_conversation(conversations):
+	"""The newest private conversation with unread messages, or None."""
+	unread = [row for row in conversations
+		if not str(row.get("key", "")).startswith("guild:") and int(row.get("unread", 0) or 0) > 0]
+	if not unread:
+		return None
+	return max(unread, key=lambda row: int(row.get("last_activity", 0) or 0))
 
 
 def guild_display_name(stored_name, guild_label):
@@ -269,6 +294,10 @@ def typing_active(last_update_ms, now_ms):
 	return 0 <= int(now_ms) - int(last_update_ms) < 5000
 
 
+# messengerHistory.LoadMessages row field 3 (MessengerHistory.h Direction).
+DIRECTION_INCOMING, DIRECTION_OUTGOING = 1, 2
+
+
 def default_notification_settings():
 	return {"badge": True, "sound": False, "toast": True, "preview": False}
 
@@ -372,6 +401,42 @@ def message_state_key(state):
 	}.get(int(state), "")
 
 
+def message_time_ms(message):
+	"""The time a message shows: this client's own clock when it was sent or
+	received (client_timestamp_ms), like the conversation list. The server's
+	timestamp only when there is none: its clock may differ from the player's
+	(on the local VM it is hours off)."""
+	try:
+		return int(message[6] or message[7] or 0)
+	except (IndexError, TypeError, ValueError):
+		return 0
+
+
+def is_session_row(message):
+	"""A session-only row (system whisper, duel challenge or result): its row
+	id is fractional (next_local_row_id)."""
+	try:
+		value = float(message[0])
+	except (IndexError, TypeError, ValueError):
+		return False
+	return value != int(value)
+
+
+def first_unread_row_id(messages, unread_count):
+	"""The row id above which the unread divider stands: the oldest of the
+	last `unread_count` incoming stored messages. The player's own messages
+	and session rows are never unread, so they never move it."""
+	remaining = max(0, int(unread_count or 0))
+	found = None
+	for message in reversed(list(messages)):
+		if not remaining:
+			break
+		if int(message[3]) == 1 and not is_session_row(message):
+			found = message[0]
+			remaining -= 1
+	return found
+
+
 def with_unread_separator(messages, unread_count):
 	rows = list(messages)
 	unread_count = max(0, min(int(unread_count), len(rows)))
@@ -391,3 +456,103 @@ def with_date_separators(messages, date_key):
 			previous = current
 		result.append(message)
 	return result
+
+
+# Whispers kept only in the native whisper buffer (system notices,
+# [SYSTEM]/[Dungeon Info], whisper errors and chat lines the executable could
+# not import) and duel challenges (see duelchallenge.py) have no history row.
+# Messages shows them as session-only incoming rows. A fractional row id places such a row after the
+# newest stored row known when it arrived, so pages and anchors keep working.
+LOCAL_MESSAGE_LIMIT = 50
+LOCAL_ROW_STEP = 0.0001
+
+
+def local_message_body(name, line):
+	name = str(name or "")
+	line = str(line or "")
+	prefix = "%s : " % name
+	if name and line.startswith(prefix):
+		return line[len(prefix):]
+	return line
+
+
+def next_local_row_id(latest_stored_row_id, local_row_ids):
+	base = max(0, int(latest_stored_row_id or 0))
+	same_base = [float(value) for value in local_row_ids
+		if base <= float(value) < base + 1]
+	return round(max([float(base)] + same_base) + LOCAL_ROW_STEP, 4)
+
+
+def local_message_row(row_id, name, body, timestamp_ms, game_master=False):
+	kind = MESSAGE_TYPE_GAME_MASTER if game_master else MESSAGE_TYPE_CHAT
+	return (row_id, 0, provisional_key(name), 1, str(name), str(body),
+		int(timestamp_ms), 0, kind, STATE_DELIVERED)
+
+
+def stored_page_boundary(before):
+	# Stored rows have whole ids; a local anchor (e.g. 105.0001) must still
+	# include stored row 105 in the older page.
+	value = float(before or 0)
+	whole = int(value)
+	return whole + 1 if value > whole else whole
+
+
+def merge_local_messages(stored, local_rows, before, limit):
+	rows = list(stored) + [row for row in local_rows
+		if not before or row[0] < before]
+	rows.sort(key=lambda row: row[0])
+	return rows[-int(limit):] if int(limit) > 0 else rows
+
+
+# A duel challenge row carries "duel:<challenge id>" in the message id field
+# (never retried, never sent) and the duel message type.
+DUEL_MESSAGE_ID = "duel:%d"
+
+
+def local_duel_row(row_id, name, body, timestamp_ms, identifier, own_name=""):
+	"""A duel row of the thread with `name`: incoming (the challenge), or with
+	`own_name` the player's own request (sent by the player, no actions)."""
+	row = local_message_row(row_id, name, body, timestamp_ms)
+	if own_name:
+		row = row[:3] + (0, str(own_name)) + row[5:]
+	return row[:1] + (DUEL_MESSAGE_ID % int(identifier),) + row[2:8] + \
+		(MESSAGE_TYPE_DUEL_CHALLENGE,) + row[9:]
+
+
+def duel_identifier(message):
+	"""The challenge id of a duel row, 0 for any other message."""
+	try:
+		if int(message[8] or 0) != MESSAGE_TYPE_DUEL_CHALLENGE:
+			return 0
+		prefix, value = str(message[1]).split(":", 1)
+		return int(value) if prefix == "duel" else 0
+	except (IndexError, TypeError, ValueError):
+		return 0
+
+
+def merge_local_conversations(rows, local, present):
+	"""Adds session rows (duel challenges) to the conversation list: the
+	challenger's existing thread gets the newer activity, preview and the
+	unread count; a player without a stored thread gets a provisional one.
+	`local` holds dicts (name, last_activity, unread, preview); `present`
+	turns (preview, last_activity) into the shown (preview, time)."""
+	rows = [dict(row) for row in rows]
+	for entry in local:
+		name = str(entry["name"])
+		activity = int(entry.get("last_activity", 0) or 0)
+		target = None
+		for row in rows:
+			key = str(row.get("key", ""))
+			if not key.startswith("guild:") and str(row.get("name", "")).lower() == name.lower():
+				target = row
+				break
+		if target is None:
+			target = {"key": provisional_key(name), "name": name,
+				"last_activity": 0, "unread": 0, "preview": "", "display_time": ""}
+			rows.append(target)
+		target["unread"] = int(target.get("unread", 0) or 0) + int(entry.get("unread", 0) or 0)
+		if activity >= int(target.get("last_activity", 0) or 0):
+			target["last_activity"] = activity
+			target["preview"], target["display_time"] = present(
+				entry.get("preview", ""), activity)
+	return rows

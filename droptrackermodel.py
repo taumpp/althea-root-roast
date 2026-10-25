@@ -25,11 +25,23 @@ SOURCE_METIN = 2
 SOURCE_BOSS = 3
 # Rewards of an opened chest; source_vnum is the chest item VNUM (ALTHEA-568).
 SOURCE_CHEST = 4
+# Gathering (server drop_tracker.h): picked-up ore and the rare finds of a vein
+# (source_vnum = the vein race), wood and a catch (source_vnum =
+# GATHER_SOURCE_VNUM, one source per craft).
+SOURCE_MINING = 5
+SOURCE_WOODCUT = 6
+SOURCE_FISHING = 7
+GATHER_SOURCES = (SOURCE_MINING, SOURCE_WOODCUT, SOURCE_FISHING)
+GATHER_SOURCE_VNUM = 1
 
 FLAG_PARTY_RECIPIENT = 1
 
 TIME_WINDOWS = (0, 5 * 60, 15 * 60, 30 * 60, 60 * 60)
-TRACKED_SOURCES = (SOURCE_MONSTER, SOURCE_METIN, SOURCE_BOSS, SOURCE_CHEST)
+TRACKED_SOURCES = (
+	SOURCE_MONSTER, SOURCE_METIN, SOURCE_BOSS, SOURCE_CHEST,
+) + GATHER_SOURCES
+# Sources that only give items, never a kill.
+PICKUP_ONLY_SOURCES = (SOURCE_CHEST,) + GATHER_SOURCES
 SOURCE_FILTERS = (SOURCE_UNKNOWN,) + TRACKED_SOURCES
 
 MAX_EVENTS = 2000
@@ -60,6 +72,33 @@ def _to_float(value, default=0.0):
 		return float(value)
 	except (TypeError, ValueError, OverflowError):
 		return default
+
+
+def GatheredPieces(rows):
+	"""(source_type, item_vnum, amount) of the gathering pickups of one batch.
+
+	The chat line of a gathering craft is printed from these, also while the
+	tracker is paused; pieces of one event and item are added up, in order.
+	"""
+	pieces = []
+	index = {}
+	for row in rows or ():
+		if not isinstance(row, (list, tuple)) or len(row) != 9:
+			continue
+		if _to_int(row[0]) != EVENT_PICKUP:
+			continue
+		source_type = _to_int(row[1])
+		item_vnum = _to_int(row[3])
+		amount = _to_int(row[5])
+		if source_type not in GATHER_SOURCES or item_vnum <= 1 or amount <= 0:
+			continue
+		key = (_to_int(row[6]), source_type, item_vnum)
+		if key in index:
+			pieces[index[key]][2] += amount
+		else:
+			index[key] = len(pieces)
+			pieces.append([source_type, item_vnum, amount])
+	return [tuple(piece) for piece in pieces]
 
 
 class DropTrackerLayoutConfig(object):
@@ -741,7 +780,7 @@ class DropTrackerModel(object):
 			return None
 		if source_type not in TRACKED_SOURCES:
 			return None
-		if source_type == SOURCE_CHEST and kind != EVENT_PICKUP:
+		if source_type in PICKUP_ONLY_SOURCES and kind != EVENT_PICKUP:
 			return None
 		if event_id <= 0 or source_vnum <= 0:
 			return None

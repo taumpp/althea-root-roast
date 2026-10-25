@@ -1,9 +1,16 @@
-import ui, app, item, os, osfInfo, localeInfo, uiScriptLocale
+import ui, app, item, os, osfInfo, localeInfo, uiScriptLocale, wndMgr
+import uiwheel
+import itemshopcategories as categoryData
 import net
 import player
 import iscostumevoucher
+import itempreview
 from marketfilters import folded
 from _weakref import proxy
+try:
+	import threading		# OpenLinkInBrowser: the browser starts off the main thread
+except ImportError:
+	threading = None
 
 itemshopData = {}
 playerLog = []
@@ -11,6 +18,9 @@ itemshopReactions = {}
 itemShopWndInstance = None
 
 UPDATE_TIME = -1
+# Most pieces of one purchase: the server's stack limit (CONFIG MAX_ITEM_COUNT),
+# sent as ItemShopMaxCount before the offers.
+MAX_BUY_COUNT = 1
 
 def ItemShopLogClear():
 	global playerLog
@@ -38,13 +48,17 @@ def ItemShopClear(time):
 		itemshopData.clear()
 		UPDATE_TIME = time
 
-def ItemShopAppendItem(categoryIndex, categorySubIndex, itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount):
+def ItemShopAppendItem(categoryIndex, categorySubIndex, itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount, itemCount=1):
 	if categoryIndex not in itemshopData:
 		subCategoryList=[]
 		for x in range(10):
 			subCategoryList.append([])
 		itemshopData[categoryIndex] = subCategoryList
-	itemshopData[categoryIndex][categorySubIndex].append([itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount])
+	itemshopData[categoryIndex][categorySubIndex].append([itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount, itemCount])
+
+def ItemShopSetMaxCount(maxCount):
+	global MAX_BUY_COUNT
+	MAX_BUY_COUNT = max(1, maxCount)
 
 def ItemShopSetReaction(itemID, likes, dislikes, myVote):
 	global itemshopReactions
@@ -70,27 +84,41 @@ def CurrentPlayerRace():
 	except (AttributeError, RuntimeError, TypeError, ValueError):
 		return None
 
-def CostumePreviewType(costumeVnum):
-	"""uirendertargetview item type of a previewable costume, else 0."""
-	item.SelectItem(costumeVnum)
-	if item.GetItemType() != item.ITEM_TYPE_COSTUME:
-		return 0
-	subType = item.GetItemSubType()
-	if subType == item.COSTUME_TYPE_BODY:
-		return 2
-	if subType == item.COSTUME_TYPE_HAIR:
-		return 3
-	if subType == getattr(item, "COSTUME_TYPE_WEAPON", -1):
-		return 1
-	if subType == getattr(item, "COSTUME_TYPE_EFFECT_WEAPON", -1):
-		return 5
-	if subType == getattr(item, "COSTUME_TYPE_EFFECT_ARMOR", -1):
-		return 6
-	return 0
-
 
 buyQuestionDialog = None
 
+# The R1 look (uiitemshopr1.Theme) while the shop is drawn in it, else None (the original look).
+_r1 = None
+
+
+def Img(name, r1name=None):
+	"""An Item Shop texture: its R1 copy while the R1 look is on, else the original file."""
+	if _r1 is not None:
+		path = _r1.Path(r1name or name)
+		if path:
+			return path
+	return IMG_DIR + name
+
+
+def R1(method, *args):
+	"""Runs a hook of the R1 look; a failure is traced to syserr and the shop goes back to the original look."""
+	global _r1
+	theme = _r1
+	if theme is None:
+		return None
+	try:
+		return getattr(theme, method)(*args)
+	except Exception:
+		import uir1
+		uir1.TraceFailure("Item Shop")
+		_r1 = None
+		try:
+			theme.Fail()
+		except Exception:
+			pass
+		return None
+
+LIST_ITEM_COUNT=8
 LIST_ITEM_ID=0
 LIST_ITEM_VNUM=1
 LIST_ITEM_PRICE=2
@@ -116,48 +144,72 @@ WARDROBE_CATEGORY_INDEX=-100
 
 #Config
 
-WEBSITE_LINK = "https://discord.gg/UAT52KAA6r"
+# The web addresses the shop opens are data: one "KEY<TAB>address" row per link in this file; the code only reads them.
+LINKS_FILE = "locale/common/itemshop_links.txt"
+
+
+def ItemShopLink(key):
+	"""The address of one Item Shop link from LINKS_FILE, or "" when the file or the row is missing."""
+	try:
+		with open(LINKS_FILE, "r") as stream:
+			lines = stream.readlines()
+	except IOError:
+		return ""
+	for line in lines:
+		line = line.strip()
+		if not line or line.startswith("#"):
+			continue
+		name, separator, address = line.partition("\t")
+		if separator and name.strip() == key:
+			return address.strip()
+	return ""
+
+
+def OpenLinkInBrowser(url):
+	"""Open a web page in the default browser without stopping the game (owner 15. 10.: "Koupit mince" froze the
+	game for a few seconds). The old os.system("start ...") started cmd.exe with its own console and waited for it
+	and for the browser hand-off on the main thread (about 1 s for the console alone, measured). os.startfile is the
+	same ShellExecute "open" without cmd.exe; it runs in a daemon thread and releases the GIL while Windows starts
+	the browser. Without threads the native app.ShellExecute (no console) is the fallback. True when started."""
+	if not url:
+		return False
+
+	def _Open():
+		try:
+			os.startfile(url)
+		except Exception:
+			pass
+
+	try:
+		worker = threading.Thread(target=_Open, name="itemshop-link")
+		worker.daemon = True
+		worker.start()
+		return True
+	except Exception:
+		pass
+	shell = getattr(app, "ShellExecute", None)
+	if shell:
+		shell(url)
+		return True
+	return False
+
 eventCategory = [
 	# [[FILENAMES],[CATEGORY, SUB_CATEGORY]]
 	[["costume_banner_0.tga","costume_banner_1.tga"],[0,0]],
 ]
 
 IMG_DIR ="d:/ymir work/ui/game/ishop/"
+# The toolbar of this look (RefreshAfkRewards): five 98 px buttons from TOOLBAR_X, then the costume exchange
+# (owner 18. 10. 2026) as a narrow icon button, then the search up to SEARCH_RIGHT. A sixth 98 px button would
+# cover the search, so the exchange shows an icon and its name as the tooltip.
+TOOLBAR_X, TOOLBAR_PITCH, SEARCH_RIGHT, ICON_BUTTON_W = 270, 102, 957, 40
+SEARCH_X = TOOLBAR_X + 5 * TOOLBAR_PITCH + ICON_BUTTON_W + 6
+COSTUME_EXCHANGE_ICON = "icon/key/cosmetics.tga"
 
-itemShopCategoryData = {
-	0:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_0_NAME,
-		"subCategory":[],
-		},
-	1:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_1_NAME,
-		"subCategory":[],
-		},
-	2:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_2_NAME,
-		"subCategory":[],
-		},
-	3:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_3_NAME,
-		"subCategory":[],
-		},
-	4:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_4_NAME,
-		"subCategory":[localeInfo.SHINING_ARMOR_CATEGORY, localeInfo.SHINING_WEAPON_CATEGORY],
-		},
-	5:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_5_NAME,
-		"subCategory":[],
-		},
-	6:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_6_NAME,
-		"subCategory":[],
-		},
-	7:{
-		"name":"|cfffffed " + localeInfo.CATEGORY_7_NAME,
-		"subCategory":[],
-		},
-}
+itemShopCategoryData = dict((key, {
+	"name": "|cfffffed " + getattr(localeInfo, name),
+	"subCategory": [getattr(localeInfo, sub) for sub in subs],
+}) for key, name, subs in categoryData.CATEGORIES)
 
 class ItemShopWindow(ui.BoardWithTitleBar):
 	def __del__(self):
@@ -173,7 +225,15 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		if getattr(self, "wardrobeWindow", None):
 			self.wardrobeWindow.Destroy()
 			self.wardrobeWindow = None
+		if getattr(self, "costumeExchangeWindow", None):
+			self.costumeExchangeWindow.Destroy()
+			self.costumeExchangeWindow = None
 		ItemShopLogClear()
+		skin = getattr(self, "r1skin", None)
+		if skin:
+			skin.Destroy()
+			skin.window = None
+			self.r1skin = None
 		if "categoryListBox" in self.children:
 			self.children["categoryListBox"].RemoveAllItems()
 		if "itemListBox" in self.children:
@@ -202,11 +262,40 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		ui.BoardWithTitleBar.__init__(self)
 		self.children = {}
 		self.wardrobeWindow = None
+		self.costumeExchangeWindow = None
 		self.afkShop = None
+		self.r1skin = None
 		self.Destroy()
 		global itemShopWndInstance
 		itemShopWndInstance = self
 		self.LoadWindow()
+		self.BuildR1()
+
+	def BuildR1(self):
+		"""The R1 look drawn into the window (uiitemshopr1) unless Settings -> "Stary vzhled" chose the original
+		one; a failure is traced and the original look stays."""
+		global _r1
+		try:
+			import uir1
+			if not uir1.UseR1():
+				return
+			import uiitemshopr1
+			self.r1skin = uiitemshopr1.ShopSkin(self, self.ForgetR1)
+			_r1 = self.r1skin.theme
+		except Exception:
+			import uir1
+			uir1.TraceFailure("Item Shop")
+			self.r1skin = None
+			_r1 = None
+
+	def ForgetR1(self, theme):
+		global _r1
+		if _r1 is theme:
+			_r1 = None
+		self.r1skin = None
+
+	def RefreshSearch(self):
+		self.__OnValueUpdate()
 
 	def LoadWindow(self):
 		self.AddFlag("movable")
@@ -338,11 +427,32 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		offersBtnText.Show()
 		offersBtn.multiText = offersBtnText
 
+		costumeExchangeBtn = ui.Button()
+		costumeExchangeBtn.SetParent(boardImage)
+		costumeExchangeBtn.SetUpVisual(IMG_DIR+"button2_0.tga")
+		costumeExchangeBtn.SetOverVisual(IMG_DIR+"button2_1.tga")
+		costumeExchangeBtn.SetDownVisual(IMG_DIR+"button2_2.tga")
+		wndMgr.SetScale(costumeExchangeBtn.hWnd, float(ICON_BUTTON_W) / costumeExchangeBtn.GetWidth(), 1.0)
+		costumeExchangeBtn.SetToolTipText(localeInfo.ITEMSHOP_COSTUME_EXCHANGE)
+		costumeExchangeBtn.SetEvent(self.OpenCostumeExchange)
+		costumeExchangeBtn.SetPosition(180+((buyCoinBtn.GetWidth()+7)*4),12)
+		costumeExchangeBtn.Show()
+		self.children["costumeExchangeBtn"] = costumeExchangeBtn
+
+		costumeExchangeIcon = ui.ImageBox()
+		costumeExchangeIcon.SetParent(costumeExchangeBtn)
+		costumeExchangeIcon.AddFlag("not_pick")
+		costumeExchangeIcon.LoadImage(COSTUME_EXCHANGE_ICON)
+		costumeExchangeIcon.SetPosition((ICON_BUTTON_W - costumeExchangeIcon.GetWidth())//2,
+			(costumeExchangeBtn.GetHeight() - costumeExchangeIcon.GetHeight())//2)
+		costumeExchangeIcon.Show()
+		costumeExchangeBtn.icon = costumeExchangeIcon
+
 		itemSearchBg = ui.ExpandedImageBox()
 		itemSearchBg.SetParent(boardImage)
 		itemSearchBg.LoadImage(IMG_DIR+"search_box.tga")
-		# Preserve the right edge while making room for the AFK header action.
-		searchWidth = int(round(itemSearchBg.GetWidth() * 0.7))
+		# Preserve the right edge while making room for the AFK and costume exchange header actions.
+		searchWidth = SEARCH_RIGHT - SEARCH_X
 		itemSearchBg.SetScale(float(searchWidth) / itemSearchBg.GetWidth(), 1.0)
 		itemSearchBg.SetSize(searchWidth, 36)
 		itemSearchBg.SetPosition(869-searchWidth,13)
@@ -375,19 +485,18 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 
 		categoryScrollBar = ScrollBar()
 		categoryScrollBar.SetParent(boardImage)
-		categoryScrollBar.SetPosition(169,76)
-		categoryScrollBar.SetScrollBarSize(435)
-		categoryScrollBar.SetScrollStep(0.07)
-		categoryScrollBar.Hide() # CATEGORY SCROLLBAR DISABLED
+		categoryScrollBar.SetPosition(*categoryData.SCROLL_POSITION)
+		categoryScrollBar.SetScrollBarSize(categoryData.SCROLL_HEIGHT)
+		categoryScrollBar.Hide()
 		self.children["categoryScrollBar"] = categoryScrollBar
 
-		categoryListBox = ListBox()
+		categoryListBox = CategoryListBox()
 		categoryListBox.SetParent(boardImage)
-		categoryListBox.SetPosition(10,76)
-		categoryListBox.SetSize(166,50*9)
+		categoryListBox.SetPosition(*categoryData.LIST_POSITION)
+		categoryListBox.SetSize(categoryData.LIST_WIDTH, categoryData.VIEWPORT_HEIGHT)
 		categoryListBox.SetItemStep(2)
-		categoryListBox.SetItemSize(166,50)
-		# categoryListBox.SetScrollBar(categoryScrollBar) # CATEGORY SCROLLBAR DISABLED
+		categoryListBox.SetItemSize(categoryData.LIST_WIDTH, categoryData.ROW_PITCH)
+		categoryListBox.SetScrollBar(categoryScrollBar)
 		categoryListBox.Show()
 		self.children["categoryListBox"] = categoryListBox
 
@@ -500,24 +609,25 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		if getattr(app, "ENABLE_ITEMSHOP_WARDROBE", False):
 			categoryItem = CategoryItem()
 			categoryItem.SetParent(categoryListBox)
-			categoryItem.SetPosition(0, len(categoryListBox.GetItems()) * 50, True)
+			categoryItem.SetPosition(0, len(categoryListBox.GetItems()) * categoryData.ROW_PITCH, True)
 			categoryItem.SetData(WARDROBE_CATEGORY_INDEX, "|cfffffed " + getattr(localeInfo, "WARDROBE_TITLE", "\u0160atn\u00edk"), categoryListBox)
 			categoryItem.SAFE_SetStringEvent("MOUSE_OVER_IN", self.OverInCategory, WARDROBE_CATEGORY_INDEX, proxy(categoryItem))
 			categoryItem.SAFE_SetStringEvent("MOUSE_OVER_OUT", self.OverOutCategory, WARDROBE_CATEGORY_INDEX, proxy(categoryItem))
 			categoryItem.SetEvent(self.ClickCategory, "mouse_click", WARDROBE_CATEGORY_INDEX, -1)
 			categoryItem.Show()
 			categoryListBox.AppendItem(categoryItem)
-		for key, data in itemShopCategoryData.items():
+		for key, name, subs in categoryData.CATEGORIES:
+			data = itemShopCategoryData[key]
 			categoryItem = CategoryItem()
 			categoryItem.SetParent(categoryListBox)
-			categoryItem.SetPosition(0,len(categoryListBox.GetItems())*50,True)
+			categoryItem.SetPosition(0,len(categoryListBox.GetItems()) * categoryData.ROW_PITCH,True)
 			categoryItem.SetData(key, data["name"],categoryListBox)
 			categoryItem.SAFE_SetStringEvent("MOUSE_OVER_IN",self.OverInCategory,key, proxy(categoryItem))
 			categoryItem.SAFE_SetStringEvent("MOUSE_OVER_OUT",self.OverOutCategory, key, proxy(categoryItem))
 			categoryItem.SetEvent(self.ClickCategory, "mouse_click", key, -1)
 			categoryItem.Show()
 			categoryListBox.AppendItem(categoryItem)
-		categoryListBox.SetBasePos(1)
+		categoryListBox.RefreshScroll()
 
 
 	def RequestAfkRewards(self):
@@ -572,37 +682,35 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 			button.SetEvent(self.OpenAfkShop)
 			self.children["afkShopButton"] = button
 		data = uiafkrewardshop.Snapshot()
-		visible = uiafkrewardshop.IsSupported()
-		self._afkPresentation = (visible, data)
+		offered = uiafkrewardshop.IsSupported()
+		self._afkPresentation = (offered, data)
+		# The AFK shop and the AFK balance are always in the toolbar. Until the server offers the rewards the balance
+		# reads "-" (unknown, never a false 0) and the AFK page says the points are unavailable (balances, prices and
+		# purchases stay the server's).
 		for key in ("afkBalanceText", "afkShopButton"):
-			if visible:
-				self.children[key].Show()
-			else:
-				self.children[key].Hide()
-		self.children["leftDragonCoinImage"].SetPosition(15 if visible else 35, 20)
-		self.children["dragonCoinText"].SetPosition(44 if visible else 64, 17)
-		for index, key in enumerate(("buyCoinBtn", "purchasesBtn", "hotItemsBtn", "offersBtn", "afkShopButton")):
-			self.children[key].SetPosition((270 if visible else 180) + index * 102, 12)
-		search = self.children["itemSearchBg"]
-		search.SetPosition((957 if visible else 869) - search.GetWidth(), 13)
-		button = self.children["afkShopButton"]
+			self.children[key].Show()
+		self.children["leftDragonCoinImage"].SetPosition(15, 20)
+		self.children["dragonCoinText"].SetPosition(44, 17)
+		for index, key in enumerate(("buyCoinBtn", "purchasesBtn", "hotItemsBtn", "offersBtn", "afkShopButton",
+				"costumeExchangeBtn")):
+			self.children[key].SetPosition(TOOLBAR_X + index * TOOLBAR_PITCH, 12)
+		self.children["itemSearchBg"].SetPosition(SEARCH_X, 13)
+		self.children["afkShopButton"].Enable()
 		if data is not None:
-			button.Enable()
+			balance = NumberToMoneyFormat(data[0])
+		elif offered:
+			balance = uiafkrewardshop.Text("AFK_STATE_LOADING", "Loading...")
 		else:
-			button.Disable()
-		if visible:
-			balance = NumberToMoneyFormat(data[0]) if data is not None else uiafkrewardshop.Text("AFK_STATE_LOADING", "Loading...")
-			self.children["afkBalanceText"].SetText(uiafkrewardshop.Text("AFK_SHOP_BALANCE", "AFK points") + "\n|cffF8BE47" + balance)
-		if data is None and self.afkShop and self.afkShop.IsShow():
-			self.CloseAfkShop()
-			self.ClosePurchasesWindow()
+			balance = "-"
+		self.children["afkBalanceText"].SetText(uiafkrewardshop.Text("AFK_SHOP_BALANCE", "AFK points") + "\n|cffF8BE47" + balance)
 		if self.afkShop:
 			self.afkShop.Refresh()
+		skin = getattr(self, "r1skin", None)
+		if skin:
+			skin.LayoutHeader()
 
 	def OpenAfkShop(self):
 		import uiafkrewardshop
-		if uiafkrewardshop.Snapshot() is None:
-			return
 		self.ClosePurchasesWindow()
 		self.ClearSubCategoryWindow()
 		self.children["itemSearch"].KillFocus()
@@ -610,11 +718,15 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		self.categorySubIndex = -1
 		if self.afkShop is None:
 			self.afkShop = uiafkrewardshop.AfkRewardShop(self.children["boardImage"])
+			skin = getattr(self, "r1skin", None)
+			if skin:
+				skin.StyleAfk(self.afkShop)
 		for key in ("itemListBox", "itemScrollBar", "LoadingImage"):
 			self.children[key].Hide()
 		self.afkShop.Refresh()
 		self.afkShop.Show()
-		net.SendAfkRewardsSnapshot()
+		if uiafkrewardshop.IsSupported():
+			getattr(net, "SendAfkRewardsSnapshot", lambda: False)()
 
 	def CloseAfkShop(self):
 		if self.afkShop:
@@ -628,10 +740,19 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 	def OpenWardrobe(self, emptyArg=None):
 		if not getattr(app, "ENABLE_ITEMSHOP_WARDROBE", False):
 			return
+		import uiwardrobe
+		if self.wardrobeWindow is not None and uiwardrobe.IsR1(self.wardrobeWindow) != uiwardrobe.WantR1():
+			self.wardrobeWindow.Destroy()		# the look was switched in Settings since the last open
+			self.wardrobeWindow = None
 		if self.wardrobeWindow is None:
-			import uiwardrobe
-			self.wardrobeWindow = uiwardrobe.WardrobeWindow(self)
+			self.wardrobeWindow = uiwardrobe.CreateWindow(self)
 		self.wardrobeWindow.Open(itemshopData)
+
+	def OpenCostumeExchange(self):
+		import uiitemshopcostumeexchange
+		if self.costumeExchangeWindow is None:
+			self.costumeExchangeWindow = uiitemshopcostumeexchange.CostumeExchangeWindow()
+		self.costumeExchangeWindow.Open()
 
 	def BuyWardrobeItem(self, itemVnum):
 		offer = None
@@ -671,7 +792,10 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		buyQuestionDialog.Show()
 
 	def __AcceptWardrobeBuy(self, itemID):
-		net.SendChatPacket("/ishop buy %d 1" % itemID)
+		if getattr(app, "ENABLE_ITEMSHOP_BUNDLES", False):
+			net.SendChatPacket("/ishop buy_v2 %d 1" % itemID)
+		else:
+			net.SendChatPacket("/ishop buy %d 1" % itemID)
 		self.__CloseWardrobeBuy()
 
 	def __CloseWardrobeBuy(self):
@@ -710,7 +834,8 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		self.ClearSubCategoryWindow()
 		if categoryIndex==self.categoryIndex:
 			return
-		categoryItem.LoadImage(IMG_DIR+"category_no_selected.tga")
+		categoryItem.LoadImage(Img("category_no_selected.tga"))
+		R1("CategoryState", categoryItem, "normal")
 		categoryItem.OnRender()
 
 	def OverInCategory(self, categoryIndex, categoryItem):
@@ -728,9 +853,13 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 				subCategoryBtns.SetPosition(px+categoryItem.GetWidth()+2,py+y)
 			else:
 				subCategoryBtns.SetPosition(px+categoryItem.GetWidth()+2,maxYPos-(len(subCategoryBtns.children)*39)-1)
+			R1("SubMenuPlace", subCategoryBtns, categoryItem)
 			self.children["subCategoryBtns"]=subCategoryBtns
 
-		categoryItem.LoadImage(IMG_DIR+"category_selected.tga")
+		# R1: the row under the mouse is lighter, the chosen one the dark well with the red line
+		hover = _r1 is not None and categoryIndex != self.categoryIndex
+		categoryItem.LoadImage(Img("category_hover" if hover else "category_selected.tga"))
+		R1("CategoryState", categoryItem, "hover" if hover else "selected")
 		categoryItem.OnRender()
 
 	def UpdateSubCategoryWindow(self):
@@ -768,14 +897,15 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 
 		subCategoryBtns = ui.ImageBox()
 		subCategoryBtns.SetParent(self)
+		R1("SubMenu", subCategoryBtns, len(categoryData))
 		children = []
 
 		for j in range(len(categoryData)):
 			categoryBtn = ui.RadioButton()
 			categoryBtn.SetParent(subCategoryBtns)
-			categoryBtn.SetUpVisual(IMG_DIR+"submenu_selected.tga")
-			categoryBtn.SetOverVisual(IMG_DIR+"submenu_selected2.tga")
-			categoryBtn.SetDownVisual(IMG_DIR+"submenu_selected2.tga")
+			categoryBtn.SetUpVisual(Img("submenu_selected.tga"))
+			categoryBtn.SetOverVisual(Img("submenu_selected2.tga"))
+			categoryBtn.SetDownVisual(Img("submenu_selected2.tga", "submenu_down"))
 			categoryBtn.SetHideToolTipEvent(ui.__mem_func__(self.ClearSubCategoryWindow))
 			categoryBtn.SetEvent(self.ClickCategory, "", categoryIndex, j)
 			categoryBtn.SetPosition(0,39*j)
@@ -787,6 +917,7 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 			categoryBtnText.SetPosition(categoryBtn.GetWidth()//2,8)
 			categoryBtnText.SetTextType("horizontal#center")
 			categoryBtnText.SetFontName("Tahoma:16")
+			R1("SubMenuText", categoryBtnText)
 			categoryBtnText.SetText(categoryData[j])
 			categoryBtnText.Show()
 			categoryBtn.backText = categoryBtnText
@@ -817,7 +948,9 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 				self.RefreshItemList(itemList)
 
 	def SortList(self, itemDataList):
-		return itemDataList
+		# A body-part chest leads its tab; the rest keeps the server order.
+		import ischests
+		return ischests.ChestsFirst(itemDataList)
 		sortData = []
 		for itemData in itemDataList:
 			sortItem = SortClass(itemData)
@@ -936,8 +1069,8 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		self.RefreshItem()
 
 	def BuyDragonCoin(self):
-		# self.LoadFirstOpening()
-		os.system("start \"\" "+WEBSITE_LINK)
+		# "Koupit mince": the coin top-up page from the data file (no row = the button opens nothing).
+		OpenLinkInBrowser(ItemShopLink("ITEMSHOP_BUY_COIN_URL"))
 
 	def OpenWeb(self, url):
 		self.CloseWeb()
@@ -981,16 +1114,27 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 				self.moneySize = 0
 
 	def Open(self):
-		self._afkRequestAttempts = 0
-		self.RefreshAfkRewards()
-		self.RequestAfkRewards()
+		# Catalog reply callbacks also call Open (once per category). Only a
+		# hidden-to-visible open should refresh balances or restart AFK polling.
+		wasVisible = self.IsShow()
+		if not wasVisible:
+			self._afkRequestAttempts = 0
+			self.RefreshAfkRewards()
+			self.RequestAfkRewards()
 		if "sendPacketData" not in self.children:
 			self.children["sendPacketData"] = 1
 			self.children["LoadingImage"].Show()
 			self.LoadFirstOpening()
 			global UPDATE_TIME
-			net.SendChatPacket("/ishop data %d" % UPDATE_TIME)
+			if getattr(app, "ENABLE_ITEMSHOP_BUNDLES", False):
+				net.SendChatPacket("/ishop data_v2 %d" % UPDATE_TIME)
+			else:
+				net.SendChatPacket("/ishop data %d" % UPDATE_TIME)
 			net.SendChatPacket("/ishop reacts")
+		elif not wasVisible:
+			# The offers and the balance came with the first open. Coins bought on
+			# the website since then exist only on the server: ask for the balance.
+			net.SendChatPacket("/ishop coins")
 
 		self.Show()
 		self.SetTop()
@@ -1026,6 +1170,9 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 
 	def OpenPurchasesWindow(self):
 		self.CloseAfkShop()
+		skin = getattr(self, "r1skin", None)
+		if skin:
+			skin.Page("log")
 		self.children["itemListBox"].Hide()
 		self.children["itemScrollBar"].Hide()
 		self.children["categoryListBox"].Hide()
@@ -1079,13 +1226,16 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		PurchasesListBox.Render(0)
 
 	def ClosePurchasesWindow(self):
+		skin = getattr(self, "r1skin", None)
+		if skin:
+			skin.Page("shop")
 		self.children["PurchasesScrollBar"].Hide()
 		self.children["PurchasesListBox"].Hide()
 
 		self.children["itemListBox"].Show()
 		self.children["itemScrollBar"].Show()
 		self.children["categoryListBox"].Show()
-		self.children["categoryScrollBar"].Hide() # CATEGORY SCROLLBAR DISABLED
+		self.children["categoryListBox"].RefreshScroll()
 
 	def Close(self):
 		if self.afkShop and self.afkShop.IsShow():
@@ -1094,6 +1244,8 @@ class ItemShopWindow(ui.BoardWithTitleBar):
 		self.CloseWeb()
 		if self.wardrobeWindow:
 			self.wardrobeWindow.Close()
+		if self.costumeExchangeWindow:
+			self.costumeExchangeWindow.Close()
 
 		global buyQuestionDialog
 		if buyQuestionDialog != None:
@@ -1128,7 +1280,7 @@ class PurchasesLog(ui.ExpandedImageBox):
 	def LoadData(self, index):
 		if index >= 0:
 			self.childrenImages["self"] = self
-			self.LoadImage(IMG_DIR+"purch_img.tga")
+			self.LoadImage(Img("purch_img.tga"))
 
 		try:
 			logData = playerLog[index]
@@ -1170,6 +1322,7 @@ class PurchasesLog(ui.ExpandedImageBox):
 				logText.SetPosition(text[0],text[1])
 			else:
 				logText.SetPosition(text[0],0)
+			R1("LogText", logText, index < 0)
 			logText.Show()
 			self.childrenTextLine["text%d"%j] = logText
 
@@ -1342,6 +1495,7 @@ class BuyWindow(ItemShopBoard):
 		self.AddFlag("attach")
 		self.AddFlag("float")
 		self.Destroy()
+		self.r1 = R1("BuyDialog", self)
 		buyText = MultiTextLine()
 		buyText.SetParent(self)
 		buyText.SetTextRange(25)
@@ -1366,6 +1520,16 @@ class BuyWindow(ItemShopBoard):
 		cancelBtn.SetText(localeInfo.UI_CANCEL)
 		cancelBtn.Show()
 		self.children["cancelBtn"] = cancelBtn
+		if self.r1:
+			self.__DressR1()
+	def __DressR1(self):
+		try:
+			self.r1.Dress()
+		except Exception:
+			import uir1
+			uir1.TraceFailure("Item Shop dialog")
+			self.r1.Undo()
+			self.r1 = None
 	def Destroy(self):
 		self.children={}
 	def SetText(self, text):
@@ -1379,8 +1543,10 @@ class BuyWindow(ItemShopBoard):
 			minWidth+=1
 		self.SetSize(minWidth,minHeight)
 		buyText.SetPosition(self.GetWidth()//2,28)
-		self.children["yesBtn"].SetPosition((self.GetWidth()//2)+15,94)
-		self.children["cancelBtn"].SetPosition((self.GetWidth()//2)-self.children["cancelBtn"].GetWidth()-15,94)
+		self.children["yesBtn"].SetPosition((self.GetWidth()//2)-self.children["yesBtn"].GetWidth()-15,94)
+		self.children["cancelBtn"].SetPosition((self.GetWidth()//2)+15,94)
+		if getattr(self, "r1", None):
+			self.r1.Layout()
 	def SetCancelEvent(self, func):
 		self.children["cancelBtn"].SetEvent(func)
 	def SetAcceptEvent(self, func):
@@ -1457,7 +1623,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		ui.ExpandedImageBox.__init__(self)
 		self.Destroy()
 		self.buyCount=1
-		self.LoadImage(IMG_DIR+"item_box.tga")
+		self.LoadImage(Img("item_box.tga"))
 		self.childrenImages["self"] = self
 	def Destroy(self):
 		self.data = []
@@ -1492,7 +1658,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 
 		likeBtn = ui.ExpandedImageBox()
 		likeBtn.SetParent(self)
-		likeBtn.LoadImage(IMG_DIR+"like.tga")
+		likeBtn.LoadImage(self.ReactionImage("like"))
 		likeBtn.SAFE_SetStringEvent("MOUSE_OVER_IN", self.__OverInLikeBtn)
 		likeBtn.SAFE_SetStringEvent("MOUSE_OVER_OUT", self.__OverOutLikeBtn)
 		likeBtn.SetEvent(ui.__mem_func__(self.ClickLike), "mouse_click")
@@ -1502,7 +1668,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 
 		dislikeBtn = ui.ExpandedImageBox()
 		dislikeBtn.SetParent(self)
-		dislikeBtn.LoadImage(IMG_DIR+"dislike.tga")
+		dislikeBtn.LoadImage(self.ReactionImage("dislike"))
 		dislikeBtn.SAFE_SetStringEvent("MOUSE_OVER_IN", self.__OverInDislikeBtn)
 		dislikeBtn.SAFE_SetStringEvent("MOUSE_OVER_OUT", self.__OverOutDislikeBtn)
 		dislikeBtn.SetEvent(ui.__mem_func__(self.ClickDislike), "mouse_click")
@@ -1525,24 +1691,44 @@ class ItemShopItem(ui.ExpandedImageBox):
 		dislikeCountText.SetPosition(220 + (dislikeBtn.GetWidth() // 2), 35 + dislikeBtn.GetHeight() + 2)
 		dislikeCountText.Show()
 		self.childrenTextLine["dislikeCountText"] = dislikeCountText
+		R1("CardReactions", self)
 
 		self.RefreshReactionUI()
 
+	def MyVote(self):
+		if not self.data:
+			return 0
+		return int(itemshopReactions.get(int(self.data[LIST_ITEM_ID]), {}).get("myVote", 0))
+
+	def ReactionImage(self, kind, hover=False):
+		"""like / dislike: the hover picture under the mouse; in the R1 look the player's own vote shows the filled
+		thumb (like_active / dislike_active), the original look keeps its two pictures."""
+		original = kind + ("_hover.tga" if hover else ".tga")
+		if self.MyVote() == (1 if kind == "like" else -1):
+			return Img(original, kind + "_active")
+		return Img(original)
+
+	def ShowReaction(self, kind, hover=None):
+		key = kind + "Btn"
+		if key not in self.childrenImages:
+			return
+		if hover is None:
+			hover = getattr(self, "reactionHover", None) == kind
+		else:
+			self.reactionHover = kind if hover else None
+		self.childrenImages[key].LoadImage(self.ReactionImage(kind, hover))
+
 	def __OverInLikeBtn(self):
-		if "likeBtn" in self.childrenImages:
-			self.childrenImages["likeBtn"].LoadImage(IMG_DIR+"like_hover.tga")
+		self.ShowReaction("like", True)
 
 	def __OverOutLikeBtn(self):
-		if "likeBtn" in self.childrenImages:
-			self.childrenImages["likeBtn"].LoadImage(IMG_DIR+"like.tga")
+		self.ShowReaction("like", False)
 
 	def __OverInDislikeBtn(self):
-		if "dislikeBtn" in self.childrenImages:
-			self.childrenImages["dislikeBtn"].LoadImage(IMG_DIR+"dislike_hover.tga")
+		self.ShowReaction("dislike", True)
 
 	def __OverOutDislikeBtn(self):
-		if "dislikeBtn" in self.childrenImages:
-			self.childrenImages["dislikeBtn"].LoadImage(IMG_DIR+"dislike.tga")
+		self.ShowReaction("dislike", False)
 
 	def RefreshReactionUI(self):
 		if not self.data:
@@ -1561,6 +1747,8 @@ class ItemShopItem(ui.ExpandedImageBox):
 
 		self.childrenTextLine["likeCountText"].SetText(self.__FormatCompactNumber(likes))
 		self.childrenTextLine["dislikeCountText"].SetText(self.__FormatCompactNumber(dislikes))
+		self.ShowReaction("like")
+		self.ShowReaction("dislike")
 
 	def __FormatCompactNumber(self, n):
 		try:
@@ -1637,6 +1825,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 			timeText.SetPosition(168,65)
 			timeText.SetWindowHorizontalAlignLeft()
 			timeText.SetFontName("Tahoma:13")
+			R1("CardTime", timeText)
 			timeText.Show()
 			self.childrenTextLine["timeText"] = timeText
 
@@ -1647,10 +1836,10 @@ class ItemShopItem(ui.ExpandedImageBox):
 		buyButton.SetParent(self)
 
 		if time != 0 and app.GetGlobalTimeStamp() > time:
-			buyButton.LoadImage(IMG_DIR+"button_buy_disabled.tga")
+			buyButton.LoadImage(Img("button_buy_disabled.tga"))
 			self.butButtonSet = True
 		else:
-			buyButton.LoadImage(IMG_DIR+"buy_0.tga")
+			buyButton.LoadImage(Img("buy_0.tga"))
 			buyButton.SAFE_SetStringEvent("MOUSE_OVER_IN",self.OverInBuyBtn)
 			buyButton.SAFE_SetStringEvent("MOUSE_OVER_OUT",self.OverOutBuyBtn)
 			buyButton.SetEvent(ui.__mem_func__(self.ClickBuyBtn),"mouse_click")
@@ -1668,6 +1857,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		buyBtnText.SetOutline(True)
 		buyBtnText.Show()
 		self.childrenTextLine["buyBtnText"] = buyBtnText
+		R1("CardBuy", self, buyButton, buyBtnText)
 
 	def ClickBuyBtn(self, emptyArg):
 		time = self.data[LIST_ITEM_TIME]
@@ -1686,8 +1876,8 @@ class ItemShopItem(ui.ExpandedImageBox):
 			price = (price * (100 - discount)) // 100
 
 		item.SelectItem(self.data[LIST_ITEM_VNUM])
-		if self.buyCount > 1:
-			text+=localeInfo.ITEMSHOP_BUY_TEXT_COUNT % (item.GetItemName(),self.buyCount)
+		if self.DeliveredCount() > 1:
+			text+=localeInfo.ITEMSHOP_BUY_TEXT_COUNT % (item.GetItemName(),self.DeliveredCount())
 		else:
 			text+=localeInfo.ITEMSHOP_BUY_TEXT % item.GetItemName()
 
@@ -1695,7 +1885,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		text+=localeInfo.ITEMSHOP_PRICE % price
 
 		buyQuestionDialog.SetText(text)
-		buyQuestionDialog.SetAcceptEvent(self.AcceptBuy)
+		buyQuestionDialog.SetAcceptEvent(lambda count=self.buyCount: self.AcceptBuy(count))
 		buyQuestionDialog.SetCancelEvent(self.CloseQuestionDialog)
 		buyQuestionDialog.SetCenterPosition()
 		buyQuestionDialog.SetTop()
@@ -1708,8 +1898,11 @@ class ItemShopItem(ui.ExpandedImageBox):
 			buyQuestionDialog.Destroy()
 			buyQuestionDialog=None
 
-	def AcceptBuy(self):
-		net.SendChatPacket("/ishop buy %d %d"%(self.data[LIST_ITEM_ID],self.buyCount))
+	def AcceptBuy(self, count=None):
+		if count is None:
+			count = self.buyCount
+		command = "/ishop buy_v2" if getattr(app, "ENABLE_ITEMSHOP_BUNDLES", False) else "/ishop buy"
+		net.SendChatPacket("%s %d %d"%(command,self.data[LIST_ITEM_ID],count))
 		self.CloseQuestionDialog()
 
 	def EmptyFunction(self):
@@ -1717,11 +1910,11 @@ class ItemShopItem(ui.ExpandedImageBox):
 
 	def OverOutBuyBtn(self):
 		if "buyButton" in self.childrenImages:
-			self.childrenImages["buyButton"].LoadImage(IMG_DIR+"buy_0.tga")
+			self.childrenImages["buyButton"].LoadImage(Img("buy_0.tga"))
 
 	def OverInBuyBtn(self):
 		if "buyButton" in self.childrenImages:
-			self.childrenImages["buyButton"].LoadImage(IMG_DIR+"buy_1.tga")
+			self.childrenImages["buyButton"].LoadImage(Img("buy_1.tga"))
 
 	def SetPrice(self, price, discount):
 		self.ClearChildren("lineImage")
@@ -1733,6 +1926,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		itemPrice.SetPosition(60, 35)
 		itemPrice.SetTextType("horizontal#left")
 		itemPrice.SetFontName("Tahoma:13")
+		R1("CardPrice", itemPrice)
 
 		price = price*self.buyCount
 
@@ -1758,6 +1952,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 			scaleCalc = float(xSize)*(1.0/10.0)
 			lineImage.SetScale(scaleCalc, 1.0)
 			lineImage.SetPosition(17,(ySize//2)+1)
+			R1("CardStrike", itemPrice, lineImage, localeInfo.ITEMSHOP_PRICE_ONLY_TEXT % NumberToMoneyFormat(price))
 			lineImage.Show()
 			self.childrenImages["lineImage"] = lineImage
 
@@ -1786,6 +1981,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		#itemName.SetFontColor(247,189,72)
 		itemName.Show()
 		self.childrenTextLine["itemName"] = itemName
+		R1("CardName", itemName, name)
 
 	def SetVoucherBadge(self):
 		self.ClearChildren("voucherBadge")
@@ -1799,20 +1995,42 @@ class ItemShopItem(ui.ExpandedImageBox):
 		badge.SetPackedFontColor(0xff8BBDFF)
 		badge.SetOutline(True)
 		badge.SetText("[ %s ]" % getattr(localeInfo, "COSTUME_VOUCHER_BADGE", "Voucher"))
+		R1("CardBadge", badge)
 		badge.Show()
 		self.childrenTextLine["voucherBadge"] = badge
+
+	def OfferUnits(self):
+		return max(1, self.data[LIST_ITEM_COUNT] if len(self.data) > LIST_ITEM_COUNT else 1)
+
+	def DeliveredCount(self):
+		return self.buyCount * self.OfferUnits()
+
+	def MaxOffers(self):
+		# Like the server's IsValidPurchaseCount: a stackable item at most one stack
+		# (MAX_BUY_COUNT pieces) in whole offers, any other item one offer.
+		item.SelectItem(self.data[LIST_ITEM_VNUM])
+		if not item.IsFlag(item.ITEM_FLAG_STACKABLE):
+			return 1
+		return max(1, MAX_BUY_COUNT // self.OfferUnits())
+
+	def SetCountUnits(self):
+		# A bundle offer says how many pieces the typed offers deliver ("= 30 ks").
+		units = self.childrenTextLine.get("CountUnits")
+		if units:
+			units.SetText(localeInfo.ITEMSHOP_BUNDLE_PIECES % self.DeliveredCount())
 
 	def SetCount(self):
 		self.ClearChildren("CountBg")
 		self.ClearChildren("CountText")
 		self.ClearChildren("CountLeft")
 		self.ClearChildren("CountRight")
+		self.ClearChildren("CountUnits")
 		if not item.IsFlag(item.ITEM_FLAG_STACKABLE):
 			return
 
 		CountLeft = ui.ExpandedImageBox()
 		CountLeft.SetParent(self)
-		CountLeft.LoadImage(IMG_DIR+"count_left.tga")
+		CountLeft.LoadImage(Img("count_left.tga"))
 		CountLeft.SetPosition(60,85)
 		CountLeft.SetEvent(ui.__mem_func__(self.ClickCount),"mouse_click",0)
 		CountLeft.Show()
@@ -1820,48 +2038,75 @@ class ItemShopItem(ui.ExpandedImageBox):
 
 		CountBg = ui.ExpandedImageBox()
 		CountBg.SetParent(self)
-		CountBg.LoadImage(IMG_DIR+"count_back.tga")
+		CountBg.LoadImage(Img("count_back.tga"))
+		# Wide enough for the digits of the largest count.
+		countWidth = max(CountBg.GetWidth(), 8*len(str(self.MaxOffers()))+6)
+		CountBg.SetScale(float(countWidth)/CountBg.GetWidth(), 1.0)
+		CountBg.SetSize(countWidth, CountBg.GetHeight())
 		CountBg.SetPosition(60+CountLeft.GetWidth(),85)
 		CountBg.Show()
 		self.childrenImages["CountBg"] = CountBg
 
-		CountText = ui.TextLine()
+		CountText = ui.EditLine()
 		CountText.SetParent(CountBg)
-		CountText.SetHorizontalAlignCenter()
-		CountText.SetVerticalAlignCenter()
-		CountText.SetWindowHorizontalAlignCenter()
-		CountText.SetWindowVerticalAlignCenter()
-		CountText.SetText("1")
+		CountText.SetPosition(3,2)
+		CountText.SetSize(CountBg.GetWidth()-6,CountBg.GetHeight()-2)
+		CountText.SetNumberMode()
+		CountText.SetMax(len(str(self.MaxOffers())))
+		CountText.SetText(str(self.buyCount))
+		CountText.OnIMEUpdate = ui.__mem_func__(self.OnCountUpdate)
+		CountText.SetOnFocusEvent(ui.__mem_func__(self.OnCountFocus))
+		CountText.SetKillFocusEvent(ui.__mem_func__(self.OnCountKillFocus))
+		CountText.SetReturnEvent(ui.__mem_func__(CountText.KillFocus))
+		CountText.SetEscapeEvent(ui.__mem_func__(CountText.KillFocus))
 		CountText.Show()
 		self.childrenTextLine["CountText"] = CountText
 
 		CountRight = ui.ExpandedImageBox()
 		CountRight.SetParent(self)
-		CountRight.LoadImage(IMG_DIR+"count_right.tga")
+		CountRight.LoadImage(Img("count_right.tga"))
 		CountRight.SetPosition(60+CountLeft.GetWidth()+CountBg.GetWidth(),85)
 		CountRight.SetEvent(ui.__mem_func__(self.ClickCount),"mouse_click",1)
 		CountRight.Show()
 		self.childrenImages["CountRight"] = CountRight
 
+		if self.OfferUnits() > 1:
+			CountUnits = ui.TextLine()
+			CountUnits.SetParent(self)
+			CountUnits.SetPosition(60+CountLeft.GetWidth()+CountBg.GetWidth()+CountRight.GetWidth()+4,87)
+			CountUnits.Show()
+			self.childrenTextLine["CountUnits"] = CountUnits
+			self.SetCountUnits()
+		R1("CardCount", self)
+
 	def ClickCount(self,emptyArg, btnType):
 		value = 1
 		if app.IsPressed(app.DIK_LCONTROL):
 			value += 4
-		buyCount = self.buyCount
 		if btnType == 0:
-			buyCount -= value
-			if buyCount <= 0:
-				buyCount = 1
-		else:
-			buyCount += value
-			if buyCount <= 0:
-				buyCount = 1
-			elif buyCount > 20:
-				buyCount = 20
-		self.buyCount = buyCount
+			value = -value
+		self.SetBuyCount(self.buyCount + value)
 
-		if "CountText" in self.childrenTextLine:
-			self.childrenTextLine["CountText"].SetText(str(self.buyCount))
+	def OnCountFocus(self):
+		# Typing replaces the count; an empty field keeps it (OnCountKillFocus).
+		self.childrenTextLine["CountText"].SetText("")
+
+	def OnCountUpdate(self):
+		countText = self.childrenTextLine["CountText"]
+		ui.EditLine.OnIMEUpdate(countText)
+		if countText.GetText():
+			self.SetBuyCount(int(countText.GetText()))
+
+	def OnCountKillFocus(self):
+		self.childrenTextLine["CountText"].SetText(str(self.buyCount))
+
+	def SetBuyCount(self, buyCount):
+		# The field counts offers; one offer delivers OfferUnits() pieces (Quote on the server).
+		self.buyCount = min(max(1, buyCount), self.MaxOffers())
+		countText = self.childrenTextLine.get("CountText")
+		if countText and countText.GetText() != str(self.buyCount):
+			countText.SetText(str(self.buyCount))
+		self.SetCountUnits()
 
 		itemData = self.data
 		self.SetPrice(itemData[LIST_ITEM_PRICE],itemData[LIST_ITEM_DISCOUNT])
@@ -1875,6 +2120,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 		iconFileName = item.GetIconImageFileName()
 		item.SelectItem(iscostumevoucher.DisplayVnum(itemVnum))
 		(width,height) = item.GetItemSize()
+		centerIcon = _r1 is not None and item.GetItemType() != item.ITEM_TYPE_COSTUME
 		item.SelectItem(itemVnum)
 		(xPos, yPos) = (1,46)
 		if height == 1:
@@ -1889,6 +2135,9 @@ class ItemShopItem(ui.ExpandedImageBox):
 		itemImage.SetParent(self)
 		itemImage.LoadImage(iconFileName)
 		itemImage.SetPosition(xPos,yPos)
+		if centerIcon:
+			R1("CardIcon", itemImage)
+		itemImage.SetEvent(ui.__mem_func__(self.PreviewItem), "mouse_click")
 		itemImage.SetMouseRightButtonDownEvent(ui.__mem_func__(self.OnMouseRightButtonDown))
 		if app.ENABLE_SHOW_CHEST_DROP:
 			itemImage.SAFE_SetStringEvent("MOUSE_RIGHT_BUTTON_UP", self.RightClickItem, itemVnum)
@@ -1898,6 +2147,18 @@ class ItemShopItem(ui.ExpandedImageBox):
 		itemImage.Show()
 		self.childrenImages["itemImage"] = itemImage
 		
+	def PreviewItem(self):
+		if not self.data:
+			return False
+		return self.OpenItemPreview(self.data[LIST_ITEM_VNUM])
+
+	def OpenItemPreview(self, itemVnum):
+		"""A click on the offer image previews it: the costume, mount, pet or
+		elf on the model, a chest its contents (Shift no longer needed)."""
+		if self.OpenCostumePreview(itemVnum):
+			return True
+		return self.OpenChestPreview(itemVnum)
+
 	def OnMouseRightButtonDown(self):
 		if not self.data:
 			return False
@@ -1906,41 +2167,48 @@ class ItemShopItem(ui.ExpandedImageBox):
 		return True
 
 	def RightClickItem(self, itemVnum):
-		if not (app.IsPressed(app.DIK_LSHIFT) or app.IsPressed(app.DIK_RSHIFT)):
-			self.OpenCostumePreview(itemVnum)
-			return
+		# Right click (with or without Shift) stays an alias of the left click.
+		self.OpenItemPreview(itemVnum)
 
+	def OpenChestPreview(self, itemVnum):
 		if not app.ENABLE_SHOW_CHEST_DROP:
-			return
+			return False
 
 		item.SelectItem(itemVnum)
 		itemType = item.GetItemType()
 		if not (item.ITEM_TYPE_GIFTBOX == itemType or item.ITEM_TYPE_TREASURE_BOX == itemType or item.ITEM_TYPE_GACHA == itemType):
-			return
+			return False
 
 		interface = osfInfo.GetInterfaceInstance()
 		if not interface:
-			return
+			return False
 
 		if not hasattr(interface, "dlgChestDrop") or not interface.dlgChestDrop:
-			return
+			return False
 
-		interface.dlgChestDrop.RequestPreviewByVnum(itemVnum)
+		return bool(interface.dlgChestDrop.RequestPreviewByVnum(itemVnum))
 
 	def OpenCostumePreview(self, itemVnum):
-		"""Right-click preview window for a costume or costume voucher offer."""
+		"""Shared click preview for equipment, companions and costume vouchers."""
 		if not getattr(app, "ENABLE_RENDER_TARGET_PREVIEW", False):
 			return False
 		costumeVnum = iscostumevoucher.DisplayVnum(itemVnum)
-		previewType = CostumePreviewType(costumeVnum)
+		previewType, previewVnum = itempreview.Resolve(item, costumeVnum)
 		item.SelectItem(itemVnum)
 		if not previewType:
 			return False
 		interface = osfInfo.GetInterfaceInstance()
 		if not interface or not hasattr(interface, "OpenRenderTargetWindow"):
 			return False
+		# A VIP elf outfit is worn by the elf-form Buffi, not by the viewer:
+		# the preview opens the elf race the outfit is drawn as.
+		import vipelfvisual
+		elf = vipelfvisual.PreviewModel(costumeVnum)
+		if elf:
+			import uirendertargetview
+			previewVnum, previewType = elf[0], uirendertargetview.TYPE_MONTER
 		# uirendertargetview opens on the viewer's own class and sex.
-		osfInfo.RENDER_TARGET_ITEM_VNUM = costumeVnum
+		osfInfo.RENDER_TARGET_ITEM_VNUM = previewVnum
 		osfInfo.RENDER_TARGET_ITEM_TYPE = previewType
 		interface.OpenRenderTargetWindow()
 		return True
@@ -1953,7 +2221,7 @@ class ItemShopItem(ui.ExpandedImageBox):
 				if iscostumevoucher.IsVoucher(itemVnum) and hasattr(tooltip, "SetCostumeVoucherOfferToolTip"):
 					tooltip.SetCostumeVoucherOfferToolTip(itemVnum)
 				else:
-					tooltip.SetItemToolTip(itemVnum)
+					tooltip.SetItemToolTip(itemVnum, itemShopOffer=True)
 	def OverOutItem(self):
 		interface = osfInfo.GetInterfaceInstance()
 		if interface:
@@ -2029,7 +2297,7 @@ class CategoryItem(ui.ExpandedImageBox):
 		ui.ExpandedImageBox.__init__(self)
 		self.Destroy()
 		self.categoryIndex=-1
-		self.LoadImage(IMG_DIR+"category_no_selected.tga")
+		self.LoadImage(Img("category_no_selected.tga"))
 	def Destroy(self):
 		self.parent=None
 		self.categoryIndex=0
@@ -2452,6 +2720,7 @@ class ListBox(ui.Window):
 	def SetScrollBar(self, scrollBar):
 		scrollBar.SetScrollEvent(ui.__mem_func__(self.__OnScroll))
 		self.scrollBar=scrollBar
+		uiwheel.Attach(scrollBar, scrollBar)	# the wheel over the bar itself scrolls the offers too
 	def OnMouseWheel(self, nLen):
 		if self.scrollBar:
 			if self.scrollBar.IsShow():
@@ -2481,6 +2750,55 @@ class ListBox(ui.Window):
 			return
 		self.Render(basePos)
 		self.basePos=basePos
+
+class CategoryListBox(ListBox):
+	"""Sidebar scrolls only its overflow; wheel events never escape to products."""
+	def Render(self, basePos):
+		# Reposition/visibility only on a scroll or layout event, never in OnUpdate.
+		for item in self.itemList:
+			x, y = item.exPos
+			y -= basePos
+			item.SetPosition(x, y)
+			if y >= self.GetHeight() or y + item.GetHeight() <= 0:
+				item.Hide()
+			else:
+				item.Show()
+				item.OnRender()
+
+	def GetScrollRange(self):
+		return max(0, len(self.itemList) * self.itemHeight - self.GetHeight())
+
+	def SetScrollBar(self, scrollBar):
+		self.scrollBar = scrollBar
+		scrollBar.SetScrollEvent(ui.__mem_func__(self.OnScroll))
+		uiwheel.Bind(scrollBar, self)
+		self.RefreshScroll()
+
+	def RefreshScroll(self):
+		bar = self.scrollBar
+		if bar is None:
+			return
+		overflow = self.GetScrollRange()
+		content = max(self.GetHeight(), len(self.itemList) * self.itemHeight)
+		bar.SetMiddleBarSize(float(self.GetHeight()) / max(1, content))
+		bar.SetScrollStep(min(1.0, float(self.itemHeight) / max(1, overflow)))
+		bar.Show() if overflow else bar.Hide()
+		self.SetBasePos(min(self.basePos, overflow))
+		bar.SetPos(float(min(self.basePos, overflow)) / max(1, overflow))
+		self.Render(self.basePos)
+
+	def OnScroll(self):
+		self.SetBasePos(int(round(self.scrollBar.GetPos() * self.GetScrollRange())))
+
+	def SetBasePos(self, basePos):
+		ListBox.SetBasePos(self, max(0, min(int(basePos), self.GetScrollRange())))
+
+	def OnMouseWheel(self, delta):
+		if not delta:
+			return False
+		uiwheel.Scroll(self.scrollBar, delta)
+		return True
+
 
 def Simulation():
 	itemList = []

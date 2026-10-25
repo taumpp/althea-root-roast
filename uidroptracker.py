@@ -8,6 +8,7 @@ import player
 import ui
 import uiScriptLocale
 import uiToolTip
+import uiwheel
 import wndMgr
 
 import droptrackermodel
@@ -29,6 +30,9 @@ TASKBAR_ICON_SIZE = 32
 TASKBAR_ICON_GAP = 2
 TASKBAR_MAX_ICONS = 24
 TASKBAR_FADE_SECONDS = 1.5
+# A new item in the strip fades in once (the old 0.45 s sine pulse blinked it 2-3 times).
+TASKBAR_FADE_IN_SECONDS = 0.25
+HOVER_COLOR = 0x553f3527
 FLOATING_GRIP_WIDTH = 14
 FLOATING_SCREEN_MARGIN = 4
 FLOATING_TASKBAR_GAP = 4
@@ -113,13 +117,59 @@ def _SourceLabels():
 		droptrackermodel.SOURCE_CHEST: _Locale(
 			"DROP_TRACKER_CHEST", "Chest"
 		),
+		droptrackermodel.SOURCE_MINING: _Locale(
+			"DROP_TRACKER_MINING", "Mining"
+		),
+		droptrackermodel.SOURCE_WOODCUT: _Locale(
+			"DROP_TRACKER_WOODCUT", "Wood"
+		),
+		droptrackermodel.SOURCE_FISHING: _Locale(
+			"DROP_TRACKER_FISHING", "Fishing"
+		),
 	}
+
+
+# The chat line of each gathering craft (locale_game: "%d", item name).
+GATHERED_CHAT_KEYS = {
+	droptrackermodel.SOURCE_MINING: "GATHERED_MINING",
+	droptrackermodel.SOURCE_WOODCUT: "GATHERED_WOODCUT",
+	droptrackermodel.SOURCE_FISHING: "GATHERED_FISHING",
+}
+
+
+def _ChatGatheredPieces(rows):
+	"""One chat line per gathered item ("12x Iron ore"): with the tracker on,
+	DropInfo is hidden and the server leaves these lines to the client."""
+	pieces = droptrackermodel.GatheredPieces(rows)
+	if not pieces:
+		return
+	import chat
+	for sourceType, itemVnum, amount in pieces:
+		text = getattr(localeInfo, GATHERED_CHAT_KEYS.get(sourceType, ""), "")
+		if not text:
+			continue
+		try:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, text % (amount, _ItemName(itemVnum)))
+		except (TypeError, ValueError):
+			pass
 
 
 def _SourceName(sourceType, sourceVnum):
 	if sourceType == droptrackermodel.SOURCE_CHEST:
 		# A chest source is the chest item itself.
 		return _ItemName(sourceVnum)
+	if sourceType in droptrackermodel.GATHER_SOURCES:
+		# The craft ("Mining"), with the vein when the server names one.
+		label = _SourceLabels()[sourceType]
+		if sourceVnum == droptrackermodel.GATHER_SOURCE_VNUM:
+			return label
+		try:
+			name = nonplayer.GetMonsterName(int(sourceVnum))
+		except:
+			name = ""
+		if not name:
+			return label
+		return _Locale("DROP_TRACKER_SOURCE_NAMED", "%s: %s") % (label, name)
 	try:
 		name = nonplayer.GetMonsterName(int(sourceVnum))
 		if name:
@@ -154,6 +204,21 @@ def _ElapsedText(timestamp, now):
 def _ColorWithAlpha(color, alpha):
 	alphaByte = max(0, min(255, int(float(alpha) * 255.0)))
 	return (alphaByte << 24) | (int(color) & 0x00ffffff)
+
+
+def _Smooth(progress):
+	progress = max(0.0, min(1.0, float(progress)))
+	return progress * progress * (3.0 - 2.0 * progress)
+
+
+def _ScaleColorAlpha(color, alpha):
+	"""The colour with its own alpha multiplied by ``alpha`` (signed like the R1 colours for the x64 binding)."""
+	color = int(color) & 0xffffffff
+	alpha = max(0.0, min(1.0, float(alpha)))
+	value = (int(((color >> 24) & 0xff) * alpha) << 24) | (color & 0x00ffffff)
+	if value & 0x80000000:
+		value -= 0x100000000
+	return value
 
 
 def _MakeText(
@@ -464,6 +529,32 @@ class DetailDropRow(object):
 		self.owner.HideItemToolTip()
 
 
+def _BuildR1(window):
+	"""The R1 look of the window (uidroptrackerr1.Skin) or None for the original look."""
+	try:
+		import uidroptrackerr1
+	except Exception:
+		return None
+	return uidroptrackerr1.Build(window)
+
+
+def _StripR1():
+	"""The R1 look of the drop strips (uidroptrackerr1.StripLook) or None for the original look."""
+	try:
+		import uidroptrackerr1
+		return uidroptrackerr1.StripR1()
+	except:
+		return None
+
+
+def _StripR1Failed():
+	try:
+		import uidroptrackerr1
+		uidroptrackerr1.StripFailed()
+	except:
+		pass
+
+
 class DropTrackerWindow(ui.BoardWithTitleBar):
 	COMPACT_WIDTH = 430
 	COMPACT_HEIGHT = 480
@@ -485,6 +576,7 @@ class DropTrackerWindow(ui.BoardWithTitleBar):
 		self.showAdvanced = False
 		self.showHidden = False
 		self.expandedItemVnum = 0
+		self.r1 = None
 
 		self.AddFlag("movable")
 		self.AddFlag("float")
@@ -492,9 +584,14 @@ class DropTrackerWindow(ui.BoardWithTitleBar):
 		self.SetTitleName(_Locale("DROP_TRACKER_TITLE", "Drop tracker"))
 		self.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.SetCenterPosition()
-		self._BuildCompact()
-		self._BuildDetails()
+		# The R1 look (uidroptrackerr1) builds the same widgets in its own look;
+		# the old look setting or a failure of the R1 look builds the original ones.
+		self.r1 = _BuildR1(self)
+		if self.r1 is None:
+			self._BuildCompact()
+			self._BuildDetails()
 		self.SetDetailed(False)
+		uiwheel.Pages(self, self.WheelPreviousPage, self.WheelNextPage)		# the wheel pages the detailed list
 		self.Hide()
 
 	def _BuildCompact(self):
@@ -716,6 +813,8 @@ class DropTrackerWindow(ui.BoardWithTitleBar):
 			self.DETAIL_HEIGHT if self.detailed else self.COMPACT_HEIGHT
 		)
 		self.SetSize(width, height)
+		if self.r1 is not None:
+			self.r1.Resize(width, height)
 		for widget in self.compactWidgets:
 			widget.Hide()
 		for card in (self.kpiKills, self.kpiItems):
@@ -970,6 +1069,16 @@ class DropTrackerWindow(ui.BoardWithTitleBar):
 		self.model.page = min(pageCount - 1, self.model.page + 1)
 		self.Refresh()
 
+	def WheelPreviousPage(self):
+		if not self.detailed:
+			return False
+		self.PreviousPage()
+
+	def WheelNextPage(self):
+		if not self.detailed:
+			return False
+		self.NextPage()
+
 	def ToggleBlacklist(self, itemVnum):
 		self.model.ToggleBlacklist(itemVnum)
 		self.expandedItemVnum = 0
@@ -1022,8 +1131,8 @@ class TaskBarDropIcon(ui.Window):
 		self.owner = owner
 		self.data = None
 		self.itemVnum = 0
-		self.lastUpdatedAt = 0.0
-		self.pulseUntil = 0.0
+		self.appearAt = 0.0
+		self.alpha = 1.0
 		self.SetParent(parent)
 		self.SetPosition(
 			index * (TASKBAR_ICON_SIZE + TASKBAR_ICON_GAP), 0
@@ -1032,11 +1141,21 @@ class TaskBarDropIcon(ui.Window):
 		self.AddFlag("float")
 		self.SetPickAlways()
 
+		# R1 look (uidroptrackerr1.StripLook): the item slot C under the icon; None = the original look.
+		self.r1 = getattr(owner, "r1look", None)
+		self.r1cell = None
+		if self.r1:
+			try:
+				self.r1cell = self.r1.Cell(self)
+			except:
+				_StripR1Failed()
+				self.r1 = None
+
 		self.hover = ui.Bar()
 		self.hover.SetParent(self)
 		self.hover.SetPosition(0, 0)
 		self.hover.SetSize(TASKBAR_ICON_SIZE, TASKBAR_ICON_SIZE)
-		self.hover.SetColor(0x553f3527)
+		self.hover.SetColor(self.r1.Hover() if self.r1 else HOVER_COLOR)
 		self.hover.AddFlag("not_pick")
 		self.hover.Hide()
 
@@ -1049,23 +1168,17 @@ class TaskBarDropIcon(ui.Window):
 		self.amount.SetParent(self)
 		self.amount.SetPosition(TASKBAR_ICON_SIZE - 2, 17)
 		self.amount.SetHorizontalAlignRight()
-		self.amount.SetPackedFontColor(COLOR_GOLD)
+		self.amount.SetPackedFontColor(self.r1.Amount() if self.r1 else COLOR_GOLD)
 		self.amount.SetOutline()
 		self.amount.SetFeather(False)
 		self.amount.AddFlag("not_pick")
 		self.amount.Hide()
 		self.Hide()
 
-	def SetData(self, data, now, alpha):
-		updatedAt = float(data.get("updated_at", data["timestamp"]))
-		if (
-			self.data is None or
-			int(self.data["item_vnum"]) != int(data["item_vnum"]) or
-			updatedAt != self.lastUpdatedAt
-		):
-			self.pulseUntil = now + 0.45
-		self.lastUpdatedAt = updatedAt
-
+	def SetData(self, data, now, alpha, appearAt=0.0):
+		# appearAt belongs to the item (TaskBarDropStrip._AppearTimes), not to this slot: an item that only moves
+		# to another slot, or whose amount grows, keeps its alpha and does not start over.
+		self.appearAt = float(appearAt)
 		self.data = data
 		vnum = int(data["item_vnum"])
 		if self.itemVnum != vnum:
@@ -1078,33 +1191,41 @@ class TaskBarDropIcon(ui.Window):
 				max(0, (TASKBAR_ICON_SIZE - iconHeight) // 2),
 			)
 		self.amount.SetText(_FormatOverlayAmount(data["amount"]))
+		self._ApplyAlpha(now, alpha)
 		self.icon.Show()
 		self.amount.Show()
-		self._ApplyAlpha(now, alpha)
-		self.Show()
+		if not self.IsShow():
+			self.Show()
 
 	def Clear(self):
 		if self.data:
 			self.owner.system.HideItemToolTip()
 		self.data = None
 		self.itemVnum = 0
-		self.lastUpdatedAt = 0.0
-		self.pulseUntil = 0.0
+		self.appearAt = 0.0
 		self.hover.Hide()
 		self.icon.Hide()
 		self.amount.Hide()
-		self.Hide()
+		if self.IsShow():
+			self.Hide()
 
 	def _ApplyAlpha(self, now, alpha):
-		pulseAlpha = 1.0
-		if now < self.pulseUntil:
-			pulseAlpha = 0.72 + 0.28 * abs(math.sin(
-				(self.pulseUntil - now) * 18.0
-			))
-		iconAlpha = max(0.0, min(1.0, alpha * pulseAlpha))
-		self.icon.SetAlpha(iconAlpha)
+		# One alpha for the whole icon: the R1 slot cell and the hover fade with the image and the amount, so
+		# nothing stays drawn after the fade-out (the opaque slot cells "hung" until the next Tick).
+		fadeIn = 1.0
+		if TASKBAR_FADE_IN_SECONDS > 0:
+			fadeIn = _Smooth((now - self.appearAt) / TASKBAR_FADE_IN_SECONDS)
+		value = max(0.0, min(1.0, float(alpha) * fadeIn))
+		self.alpha = value
+		self.icon.SetAlpha(value)
 		self.amount.SetPackedFontColor(
-			_ColorWithAlpha(COLOR_GOLD, alpha)
+			self.r1.Amount(value) if self.r1 else _ColorWithAlpha(COLOR_GOLD, value)
+		)
+		cell = getattr(self.r1cell, "ops", None)
+		if cell:
+			cell.SetAlpha(value)
+		self.hover.SetColor(
+			self.r1.Hover(value) if self.r1 else _ScaleColorAlpha(HOVER_COLOR, value)
 		)
 
 	def UpdateAnimation(self, now, alpha):
@@ -1136,6 +1257,10 @@ class TaskBarDropStrip(ui.Window):
 		self.system = system
 		self.taskBar = None
 		self.icons = []
+		self.appearAt = {}
+		self.shownAlpha = 0.0
+		self.lastAnimAt = 0.0
+		self.r1look = _StripR1()
 		self.AddFlag("float")
 		self.SetSize(1, TASKBAR_ICON_SIZE)
 		for index in range(TASKBAR_MAX_ICONS):
@@ -1161,7 +1286,8 @@ class TaskBarDropStrip(ui.Window):
 			self._Clear()
 			return
 
-		alpha = self._GroupAlpha(now)
+		alpha = self._DisplayAlpha(now)
+		appear = self._AppearTimes(recent, now)
 		for index, icon in enumerate(self.icons):
 			if index < len(recent):
 				icon.SetPosition(
@@ -1169,7 +1295,7 @@ class TaskBarDropStrip(ui.Window):
 						TASKBAR_ICON_SIZE + TASKBAR_ICON_GAP
 					), 0
 				)
-				icon.SetData(recent[index], now, alpha)
+				icon.SetData(recent[index], now, alpha, appear[index])
 			else:
 				icon.Clear()
 
@@ -1179,7 +1305,8 @@ class TaskBarDropStrip(ui.Window):
 		)
 		self.SetPosition(left, 2)
 		self.SetSize(max(1, width), TASKBAR_ICON_SIZE)
-		self.Show()
+		if not self.IsShow():
+			self.Show()
 		self.SetTop()
 
 	def OnUpdate(self):
@@ -1238,17 +1365,57 @@ class TaskBarDropStrip(ui.Window):
 		)
 		return progress * progress * (3.0 - 2.0 * progress)
 
+	def _DisplayAlpha(self, now):
+		"""The group alpha as drawn: it falls with the fade-out, and when a new pickup restarts the lifetime in the
+		middle of a fade-out it climbs back over TASKBAR_FADE_IN_SECONDS instead of jumping to 1 (a blink)."""
+		target = self._GroupAlpha(now)
+		if not self.IsShow() or target <= self.shownAlpha:
+			self.shownAlpha = target
+		else:
+			step = max(0.0, now - self.lastAnimAt)
+			if TASKBAR_FADE_IN_SECONDS > 0:
+				step /= TASKBAR_FADE_IN_SECONDS
+			else:
+				step = 1.0
+			self.shownAlpha = min(target, self.shownAlpha + step)
+		self.lastAnimAt = now
+		return self.shownAlpha
+
+	def _AppearTimes(self, recent, now):
+		"""When each shown item first appeared in the strip, by item vnum (the same item keeps its time when it moves
+		to another slot or its amount grows)."""
+		times = []
+		shown = set()
+		for data in recent:
+			vnum = int(data["item_vnum"])
+			shown.add(vnum)
+			if vnum not in self.appearAt:
+				self.appearAt[vnum] = now
+			times.append(self.appearAt[vnum])
+		for vnum in list(self.appearAt.keys()):
+			if vnum not in shown:
+				del self.appearAt[vnum]
+		return times
+
 	def _UpdateAnimation(self, now):
 		if not self.IsShow():
 			return
-		alpha = self._GroupAlpha(now)
+		if self._GroupAlpha(now) <= 0.0 and any(icon.data for icon in self.icons):
+			# Faded out: hide in this frame (the model drops the expired items), not up to 0.25 s later in Tick,
+			# so no invisible strip keeps catching the mouse.
+			self.Refresh()
+			return
+		alpha = self._DisplayAlpha(now)
 		for icon in self.icons:
 			icon.UpdateAnimation(now, alpha)
 
 	def _Clear(self):
 		for icon in self.icons:
 			icon.Clear()
-		self.Hide()
+		self.appearAt = {}
+		self.shownAlpha = 0.0
+		if self.IsShow():
+			self.Hide()
 
 
 class FloatingDropStripGrip(ui.Bar):
@@ -1296,6 +1463,13 @@ class FloatingDropStripGrip(ui.Bar):
 		self.owner.EndGripDrag()
 
 	def _RefreshColor(self):
+		r1 = getattr(self.owner, "r1look", None)
+		if r1:
+			state = "editing" if self.editing else ("hover" if self.hovered else "normal")
+			color, ink = r1.Grip(state)
+			self.SetColor(color)
+			self.label.SetPackedFontColor(ink)
+			return
 		if self.editing:
 			self.SetColor(0xaa755627)
 			self.label.SetPackedFontColor(COLOR_GOLD)
@@ -1313,17 +1487,21 @@ class FloatingDropStrip(TaskBarDropStrip):
 		self.system = system
 		self.taskBar = None
 		self.icons = []
+		self.appearAt = {}
+		self.shownAlpha = 0.0
+		self.lastAnimAt = 0.0
 		self.visibleCount = 0
 		self.editUntil = 0.0
 		self.growLeft = False
 		self.dragging = False
+		self.r1look = _StripR1()
 		self.AddFlag("float")
 		self.SetSize(FLOATING_GRIP_WIDTH, TASKBAR_ICON_SIZE)
 
 		self.editBackdrop = ui.Bar()
 		self.editBackdrop.SetParent(self)
 		self.editBackdrop.SetPosition(0, 0)
-		self.editBackdrop.SetColor(0x88302a22)
+		self.editBackdrop.SetColor(self.r1look.Backdrop() if self.r1look else 0x88302a22)
 		self.editBackdrop.AddFlag("not_pick")
 		self.editBackdrop.Hide()
 
@@ -1381,16 +1559,18 @@ class FloatingDropStrip(TaskBarDropStrip):
 			self._Clear()
 			return
 
-		alpha = self._GroupAlpha(now)
+		alpha = self._DisplayAlpha(now)
+		appear = self._AppearTimes(recent, now)
 		for index, icon in enumerate(self.icons):
 			if index < len(recent):
-				icon.SetData(recent[index], now, alpha)
+				icon.SetData(recent[index], now, alpha, appear[index])
 			else:
 				icon.Clear()
 
 		self.visibleCount = len(recent)
 		self._ApplyLayout(anchorX, anchorY, editing)
-		self.Show()
+		if not self.IsShow():
+			self.Show()
 		self.SetTop()
 
 	def OnUpdate(self):
@@ -1584,6 +1764,8 @@ class DropTrackerSystem(object):
 		self.model = droptrackermodel.DropTrackerModel()
 		self.layout = droptrackermodel.DropTrackerLayoutConfig()
 		self.available = False
+		# The server sends gathering rows and left their chat lines to us.
+		self.gatherClient = False
 		self.lastRefresh = 0.0
 		self.tooltipItem = uiToolTip.ItemToolTip()
 		self.tooltipItem.Hide()
@@ -1605,6 +1787,8 @@ class DropTrackerSystem(object):
 
 	def SetCapability(self, available):
 		self.available = bool(available)
+		if not self.available:
+			self.gatherClient = False
 		if self.available:
 			self._LoadPlayerIdentity()
 		else:
@@ -1614,9 +1798,21 @@ class DropTrackerSystem(object):
 			self.window.Refresh()
 		self.RefreshRecent()
 
+	def OfferGather(self, version):
+		# DropTrackerGatherV1: the server sends ore, wood and catches as
+		# tracker rows; answering takes its bare gathering lines away, since
+		# _ChatGatheredPieces prints them with the count.
+		if version != "1" or not self.available:
+			return
+		import net
+		net.SendChatPacket("/drop_tracker_gather")
+		self.gatherClient = True
+
 	def AddBatch(self, rows):
 		if not self.available:
 			return
+		if self.gatherClient:
+			_ChatGatheredPieces(rows)
 		self._LoadPlayerIdentity()
 		if self.model.AddBatch(rows):
 			self.RefreshRecent()

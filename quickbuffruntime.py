@@ -9,6 +9,34 @@ MISSING_RETRY = 10.0
 REJECTED_RETRY = 30.0
 DURATION_GRACE = 3.0
 MANUAL_ONLY_VNUMS = frozenset((71018, 71019, 71020))
+# Wire type from server-src game/src/affect.h::AFFECT_BLEND. The EXE has no
+# exported chr constant for this raw type; it is not a content/balance value.
+BLEND_AFFECT_TYPE = 531
+
+
+class QuickBuffEffects(object):
+	"""Raw server affect deadlines, independent of icons and tooltip state."""
+	def __init__(self):
+		self.entries = {}
+
+	def Add(self, affect, point, duration, now):
+		self.entries[(affect, point)] = now + max(0, duration)
+
+	def Remove(self, affect, point):
+		self.entries.pop((affect, point), None)
+
+	def Remaining(self, targets, now):
+		remaining = 0
+		for affect, point in targets:
+			for (activeAffect, activePoint), deadline in self.entries.items():
+				if affect == activeAffect and (point is None or point == activePoint):
+					# A zero timer is not permission to use the item: the server
+					# still owns the effect until its remove packet arrives.
+					remaining = max(remaining, AUTO_SCAN_INTERVAL, deadline - now)
+		return remaining
+
+	def Clear(self):
+		self.entries.clear()
 
 # Every special tab the server can store items in; the server routes cooked
 # fish and elixirs to Consumable (server-src special_inventory_destination_policy.h).
@@ -56,6 +84,8 @@ class QuickBuffItemPolicy(object):
 				}
 			item_type = self.item.GetItemType()
 			subtype = self.item.GetItemSubType()
+			apply = None
+			affect = None
 			if item_type == self.item.ITEM_TYPE_BLEND:
 				duration = 0
 				if slot is not None:
@@ -63,6 +93,7 @@ class QuickBuffItemPolicy(object):
 				if duration <= 0:
 					duration = int(self.item.GetValue(2))
 				kind = "blend"
+				apply = int(self.player.GetItemMetinSocket(slot, 0)) if slot is not None else None
 			elif (
 				item_type in (
 					self.item.ITEM_TYPE_USE,
@@ -72,11 +103,15 @@ class QuickBuffItemPolicy(object):
 			):
 				kind = "ability"
 				duration = int(self.item.GetValue(1))
+				apply = int(self.item.GetValue(0))
+				affect = int(self.item.GetValue(3))
 			elif (
 				item_type == self.item.ITEM_TYPE_USE
 				and subtype == getattr(self.item, "USE_AFFECT", -1)
 			):
 				kind = "affect"
+				affect = int(self.item.GetValue(0))
+				apply = int(self.item.GetValue(1))
 				duration = int(self.item.GetValue(3))
 			else:
 				return None
@@ -87,6 +122,8 @@ class QuickBuffItemPolicy(object):
 				"kind": kind,
 				"duration": duration,
 				"automatic": True,
+				"apply": apply,
+				"affect": affect,
 			}
 		except (
 			AttributeError,
@@ -256,6 +293,7 @@ class QuickBuffController(object):
 		self.manual_queue = []
 		self.automatic_queue = []
 		self.pending_requests = []
+		self.observed_active_vnums = set()
 		self.vip_active = self._NativeVipActive()
 		self.last_auto_scan_at = float("-inf")
 		self.last_request_at = float("-inf")
@@ -292,6 +330,10 @@ class QuickBuffController(object):
 		if not self.vip_active:
 			self.automatic_queue = []
 
+	def IsBusy(self):
+		"""Uses are queued or awaiting confirmation (a sanctioned automation)."""
+		return bool(self.manual_queue or self.automatic_queue or self.pending_requests)
+
 	def _PendingVnums(self):
 		return set(request["vnum"] for request in self.pending_requests)
 
@@ -310,6 +352,7 @@ class QuickBuffController(object):
 			and now - self.last_auto_scan_at >= AUTO_SCAN_INTERVAL
 		):
 			self.last_auto_scan_at = now
+			self._ObserveEffects(now)
 			pending = self._PendingVnums()
 			manual = set(self.manual_queue)
 			self.automatic_queue = _merge_unique(
@@ -328,7 +371,8 @@ class QuickBuffController(object):
 		if self.manual_queue:
 			queue = self.manual_queue
 			automatic = False
-		elif self.model.auto_enabled and self.vip_active and self.automatic_queue:
+		elif (self.model.auto_enabled and self.vip_active
+			and self.automatic_queue and not self.pending_requests):
 			queue = self.automatic_queue
 			automatic = True
 		else:
@@ -338,6 +382,21 @@ class QuickBuffController(object):
 		vnum = queue.pop(0)
 		self._UseOrSchedule(vnum, now, automatic)
 		self.model.Save(now=now)
+
+	def _ObserveEffects(self, now):
+		# Observe all checked items, even while their saved due time is future.
+		# A server removal wins over a prototype timer or the safety grace.
+		configured = set(self.model.ExecutionVnums())
+		self.observed_active_vnums.intersection_update(configured)
+		for vnum in configured:
+			remaining = self.active_effect_remaining_fn(vnum)
+			if remaining > 0:
+				self.observed_active_vnums.add(vnum)
+				self.model.SetNextDue(vnum, now + remaining + DURATION_GRACE)
+				self.automatic_queue = [queued for queued in self.automatic_queue if queued != vnum]
+			elif vnum in self.observed_active_vnums:
+				self.observed_active_vnums.remove(vnum)
+				self.model.SetNextDue(vnum, now)
 
 	def _CanUseAutomatically(self, vnum):
 		slot = self.scanner.Find(vnum)
@@ -367,9 +426,13 @@ class QuickBuffController(object):
 		if remaining > 0:
 			self.model.SetNextDue(vnum, now + remaining + DURATION_GRACE)
 			return False
-		if self.policy.IsActiveBlend(slot, descriptor):
-			self.model.SetNextDue(vnum, now + duration + DURATION_GRACE)
-			return False
+		# The first stack may be inactive while another owned stack supplies
+		# this bonus. Never toggle or retry it before that stack expires.
+		for owned_slot in self.scanner.MatchingPositions(vnum):
+			if self.policy.IsActiveBlend(owned_slot, descriptor):
+				remaining = self.policy.RuntimeDuration(owned_slot, descriptor)
+				self.model.SetNextDue(vnum, now + remaining + DURATION_GRACE)
+				return False
 
 		request = {
 			"vnum": vnum,
@@ -403,8 +466,10 @@ class QuickBuffController(object):
 		remaining = []
 		for request in self.pending_requests:
 			vnum = request["vnum"]
+			effect_remaining = self.active_effect_remaining_fn(vnum)
 			confirmed = (
-				self.scanner.TotalCount(vnum) < request["count"]
+				effect_remaining > 0
+				or self.scanner.TotalCount(vnum) < request["count"]
 				or self.scanner.MatchingPositions(vnum) != request["positions"]
 				or (
 					request["kind"] == "blend"
@@ -416,8 +481,8 @@ class QuickBuffController(object):
 				if request["automatic"]:
 					self.model.SetNextDue(
 						vnum,
-						request["request_at"]
-						+ request["duration"]
+						(now + effect_remaining if effect_remaining > 0 else
+						 request["request_at"] + request["duration"])
 						+ DURATION_GRACE,
 					)
 			elif now >= request["deadline"]:
@@ -431,4 +496,5 @@ class QuickBuffController(object):
 		self.manual_queue = []
 		self.automatic_queue = []
 		self.pending_requests = []
+		self.observed_active_vnums.clear()
 		self.model.Save(force=True)

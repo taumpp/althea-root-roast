@@ -11,6 +11,8 @@ import app
 class AttachMetinDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.__LoadScript()
 
 		self.metinItemPos = 0

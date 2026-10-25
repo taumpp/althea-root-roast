@@ -38,7 +38,7 @@ class CostumeInventoryWindow(ui.ScriptWindow):
 		("AuraToolTipButton", 6, "HIDDEN_AURA_COSTUME"),
 		("ShiningWeaponToolTipButton", 7, "HIDDEN_SHINING_WEAPON"),
 		("ShiningArmorToolTipButton", 8, "HIDDEN_SHINING_ARMOR"),
-		("MountToolTipButton", 9, "HIDDEN_MOUNT"),
+		# no eye on the mount slot, hiding the mount did nothing.
 	)
 
 	def __init__(self, inventoryWindow):

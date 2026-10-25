@@ -28,9 +28,12 @@ def UnsentRequestText():
 
 class TargetedRarityDialog(ui.BoardWithTitleBar):
     pendingSince = 0.0
+    openingPreview = False
 
     def __init__(self):
         ui.BoardWithTitleBar.__init__(self)
+        import uiconfirm
+        uiconfirm.Bind(self, 'accept')
         self.SetSize(390, 285)
         self.AddFlag("float")
         self.SetTitleName(Text("RARITY_TARGETED_TITLE", u"C\u00edlen\u00e1 prom\u011bna rarity"))
@@ -44,7 +47,7 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
         self.buttons = []
         self.children = []
         self.tip = uiToolTip.ItemToolTip()
-        self.hint = self._Label(18, 39, Text("RARITY_TARGETED_HINT", u"Vyber bonus, kter\u00fd chce\u0161 p\u0159eto\u010dit."))
+        self.hint = self._Label(18, 39, Text("RARITY_TARGETED_HINT", u"Vyber bonus, kter\u00fd chce\u0161 zm\u011bnit."))
         self.itemName = self._Label(18, 62, "")
         for slot in range(3):
             button = ui.RadioButton()
@@ -58,7 +61,7 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
             button.Show()
             self.buttons.append(button)
             self.labels.append(self._Label(67, 93 + 35 * slot, ""))
-        self.cost = self._Label(18, 199, Text("RARITY_TARGETED_COST", u"Cena: 1\u00d7 C\u00edlen\u00e1 prom\u011bna rarity"))
+        self.cost = self._Label(18, 199, Text("RARITY_TARGETED_COST", u"Cena: 1x C\u00edlen\u00e1 prom\u011bna rarity"))
         self.status = self._Label(18, 218, "")
         self.accept = ui.Button()
         self.accept.SetParent(self)
@@ -66,7 +69,7 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
         self.accept.SetUpVisual("d:/ymir work/ui/public/large_button_01.sub")
         self.accept.SetOverVisual("d:/ymir work/ui/public/large_button_02.sub")
         self.accept.SetDownVisual("d:/ymir work/ui/public/large_button_03.sub")
-        self.accept.SetText(Text("RARITY_TARGETED_ACTION", u"P\u0159eto\u010dit"))
+        self.accept.SetText(Text("RARITY_TARGETED_ACTION", u"Zm\u011bnit"))
         self.accept.SetEvent(ui.__mem_func__(self.Confirm))
         self.accept.Show()
         self.Hide()
@@ -109,6 +112,7 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
             self.Refresh()
         else:
             chat.AppendChat(chat.CHAT_TYPE_INFO, uiRarity.TimeoutText())
+            self.Close()
         return True
 
     def OnUpdate(self):
@@ -136,9 +140,8 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
         self.selectedSlot = min(grade, 3) - 1
         self.previewRequestId = 0
         self.status.SetText("")
-        self.SetCenterPosition()
-        self.SetTop()
-        self.Show()
+        self.Hide()
+        self.openingPreview = True
         self.Refresh()
         return self.RequestPreview()
 
@@ -183,13 +186,20 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
         self.pendingSince = uiRarity.Now()
         self.status.SetText(localeInfo.RARITY_WAITING if self.pendingPreview else UnsentRequestText())
         self.Refresh()
+        if not self.pendingPreview and self.openingPreview:
+            chat.AppendChat(chat.CHAT_TYPE_INFO, UnsentRequestText())
+            self.Close()
         return self.pendingPreview
 
     def OnPreviewResult(self, requestId, mode, result, *unused):
         if int(mode) != MODE or not self.pendingPreview:
             return
         self.pendingPreview = False
-        if not self.IsShow():
+        if not self.IsShow() and not self.openingPreview:
+            return
+        if self.openingPreview and int(result) != getattr(net, "RARITY_RESULT_OK", 0):
+            chat.AppendChat(chat.CHAT_TYPE_INFO, uiRarity.ResultText(result))
+            self.Close()
             return
         if int(result) == getattr(net, "RARITY_RESULT_OK", 0):
             self.previewRequestId = int(requestId)
@@ -198,6 +208,11 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
             self.previewRequestId = 0
             self.status.SetText(uiRarity.ResultText(result))
         self.Refresh()
+        if self.openingPreview:
+            self.openingPreview = False
+            self.SetCenterPosition()
+            self.SetTop()
+            self.Show()
 
     def Confirm(self):
         if not self.previewRequestId or self.pendingPreview or self.pendingCommit:
@@ -220,6 +235,7 @@ class TargetedRarityDialog(ui.BoardWithTitleBar):
             self.RequestPreview()
 
     def Close(self):
+        self.openingPreview = False
         self.previewRequestId = 0
         self.Hide()
 

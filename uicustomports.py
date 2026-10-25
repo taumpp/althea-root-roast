@@ -7,6 +7,7 @@ import net
 import ui
 import uiCommon
 import uicrimsoncontrols
+import uiwheel
 
 
 SLOT_COUNT = 50
@@ -133,13 +134,30 @@ class CustomPortsWindow(ui.BoardWithTitleBar):
 		self.dialogSlot = None
 		self.dialogAction = None
 
-		self._Build()
+		self.r1 = self._BuildR1()
+		if self.r1 is None:
+			self._Build()
+		uiwheel.Pages(self, self.WheelPreviousPage, self.WheelNextPage)		# the wheel pages I-V
 		self.Hide()
+
+	def _BuildR1(self):
+		# The R1 look (root/uicustomportsr1.py) unless Settings -> "Starý vzhled"; None = the original controls.
+		try:
+			import uicustomportsr1
+		except Exception:
+			return None
+		try:
+			return uicustomportsr1.Build(self, ICON_PATHS, PAGE_LABELS, ROWS_PER_PAGE, _Locale)
+		except Exception:
+			return None
 
 	def Destroy(self):
 		self._CloseInputDialog()
 		self._CloseQuestionDialog()
 		self.Hide()
+		if getattr(self, "r1", None) is not None:
+			self.r1.Destroy()
+			self.r1 = None
 		self.records = {}
 		self.pendingRows = {}
 		self.rows = []
@@ -283,6 +301,12 @@ class CustomPortsWindow(ui.BoardWithTitleBar):
 		self.page = pageIndex
 		self.Refresh()
 
+	def WheelPreviousPage(self):
+		self.SetPage(self.page - 1)
+
+	def WheelNextPage(self):
+		self.SetPage(self.page + 1)
+
 	def _AbsoluteSlot(self, rowIndex):
 		return self.page * ROWS_PER_PAGE + rowIndex
 
@@ -361,6 +385,8 @@ class CustomPortsWindow(ui.BoardWithTitleBar):
 				button.Down()
 			else:
 				button.SetUp()
+		if getattr(self, "r1", None) is not None:
+			self.r1.Sync()
 
 	def _RecordForRow(self, rowIndex):
 		slot = self._AbsoluteSlot(rowIndex)

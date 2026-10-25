@@ -11,6 +11,7 @@ VALID_BASE_KEYS = frozenset(
 		"SEMICOLON", "APOSTROPHE", "GRAVE", "BACKSLASH", "COMMA",
 		"PERIOD", "SLASH", "SPACE", "ENTER", "ESC", "SYSRQ", "TAB",
 		"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "DECIMAL", "NUMPADENTER",
+		"MOUSE4", "MOUSE5",
 	)
 )
 
@@ -55,8 +56,9 @@ class Shortcut(object):
 
 	def display(self):
 		labels = {"CTRL": "Ctrl", "SHIFT": "Shift", "ALT": "Alt"}
+		key_label = {"MOUSE4": "Mouse4", "MOUSE5": "Mouse5"}.get(self.key, self.key)
 		return "+".join(
-			tuple(labels[value] for value in self.modifiers) + (self.key,)
+			tuple(labels[value] for value in self.modifiers) + (key_label,)
 		)
 
 	def __eq__(self, other):

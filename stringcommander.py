@@ -19,10 +19,13 @@ class CallBackFunction:
 		def __call__(self, *arg):
 			return self.func(self.obj, *arg)
 
-	def __init__(self, mfunc):
+	def __init__(self, mfunc, variadic=False):
 		self.argCount=mfunc.__func__.__code__.co_argcount
+		# Opt in per wire command. Existing commands keep their fixed arity and
+		# surplus-token truncation; paginated envelopes retain their full payload.
+		self.variadic = variadic
 
-		if self.argCount>1:
+		if self.argCount>1 or variadic:
 			self.call=CallBackFunction.__arg_call__(mfunc.__self__.__class__, mfunc.__self__, mfunc.__func__)
 		else:
 			self.call=CallBackFunction.__noarg_call__(mfunc.__self__.__class__, mfunc.__self__, mfunc.__func__)
@@ -37,8 +40,8 @@ class Analyzer:
 	def __init__(self):
 		self.cmdDict={}
 
-	def SAFE_RegisterCallBack(self, cmd, callBackFunc):
-		self.cmdDict[cmd]=CallBackFunction(callBackFunc)
+	def SAFE_RegisterCallBack(self, cmd, callBackFunc, variadic=False):
+		self.cmdDict[cmd]=CallBackFunction(callBackFunc, variadic)
 
 	def Run(self, line):
 		tokens=line.split()
@@ -59,6 +62,7 @@ class Analyzer:
 			raise RuntimeError("Analyzer.Run(line=%s) - cmd=%s, curArgCount[%d]<needArgCount[%d]" % (line, cmd, len(tokens), argCount))
 			return 0
 
-		tokens=tokens[:argCount]
+		if not callBackFunc.variadic:
+			tokens=tokens[:argCount]
 		callBackFunc(*tokens)
 		return 1

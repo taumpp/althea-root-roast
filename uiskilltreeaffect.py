@@ -5,6 +5,7 @@ import skilltreelocale
 import ui
 import uiScriptLocale
 import uieffecttooltipstyle
+import uiaffecthover
 from uiaffectsummary import CompactAffectSummary
 
 ICON = "d:/ymir work/ui/game/skill_tree_v2/activation/tree_active.png"
@@ -52,14 +53,30 @@ class SkillTreeAffectImage(ui.ExpandedImageBox):
     def GetSummaryTitle(self):
         return uiScriptLocale.SKILL_TREE_TITLE
 
-    def OnMouseOverIn(self):
+    def ShowHover(self):
         if self.IsShow() and self.members:
             if self.summary is None:
                 self.summary = SkillTreeSummary(self)
             self.summary.Open()
+            return self.summary.Close
+        return None
+
+    def HoverHeld(self):
+        # The summary panel closes itself after its grace (uiaffectsummary); one surface of the bar (uiaffecthover).
+        return bool(self.summary and self.summary.IsShow())
+
+    def HoverGuard(self, other):
+        try:
+            # The window height (25 x 26), not ImageBox.GetHeight = the texture.
+            return other.GetGlobalPosition()[1] >= self.GetGlobalPosition()[1] + ui.Window.GetHeight(self) - 1
+        except Exception:
+            return False
+
+    def OnMouseOverIn(self):
+        uiaffecthover.Over(self)
 
     def OnMouseOverOut(self):
-        pass
+        uiaffecthover.Out(self)
 
     def Destroy(self):
         if self.summary:

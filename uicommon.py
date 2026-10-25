@@ -14,9 +14,83 @@ import shop
 
 import re
 
+def _R1Dress(dialog, kind):
+	"""The R1 look of the common dialogs (root/uir1dialog.py, visual only); None keeps the original look
+	(Settings -> the original look, or building R1 failed - traced)."""
+	try:
+		import uir1dialog
+	except Exception:
+		import dbg
+		dbg.TraceError("uir1dialog unavailable, the original dialog look is used.")
+		return None
+	return uir1dialog.Dress(dialog, kind)
+
+def _R1Yang(dialog, amount, legacy):
+	"""A yang amount of a dressed dialog as the one R1 yang price of the client ("1.000 Yang", root/uir1price.py,
+	); ``legacy`` (the original text) when the dialog keeps its original look."""
+	if getattr(dialog, "r1skin", None) is None:
+		return legacy
+	try:
+		import uir1price
+		return uir1price.FormatYang(amount)
+	except Exception:
+		return legacy
+
+def _R1Layout(dialog):
+	if getattr(dialog, "r1skin", None) is not None:
+		import uir1dialog
+		uir1dialog.Layout(dialog)
+
+def _R1Fit(dialog):
+	"""A message text changed: the R1 message font that fits the dialog (uir1dialog.Fit)."""
+	if getattr(dialog, "r1skin", None) is not None:
+		import uir1dialog
+		uir1dialog.Fit(dialog)
+
+def _R1Title(dialog, name):
+	if getattr(dialog, "r1skin", None) is not None:
+		import uir1dialog
+		uir1dialog.SetTitle(dialog, name)
+
+# The Ano / Ne dialogs (QuestionDialog, QuestionDialog2, QuestionDialogWithTimeLimit) grow to their widest message
+# line: the uiscript width (or the caller's SetWidth) is the minimum, QUESTION_MAX_WIDTH the maximum; a line still
+# wider is shortened with QUESTION_ELLIPSIS. Margin per side: QUESTION_TEXT_MARGIN in the original look, the R1
+# dialog padding (uir1dialog.MESSAGE_MARGIN) in R1.
+QUESTION_TEXT_MARGIN = 20
+QUESTION_MAX_WIDTH = 520
+QUESTION_ELLIPSIS = "..."
+
+def _MessageMargin(dialog):
+	if getattr(dialog, "r1skin", None) is not None:
+		import uir1dialog
+		return uir1dialog.MESSAGE_MARGIN
+	return QUESTION_TEXT_MARGIN
+
+def _TextWidth(line):
+	if not line.GetText():
+		return 0
+	try:
+		return int(line.GetTextSize()[0])
+	except Exception:
+		return 0
+
+def _ShortenText(line, text, room):
+	"""The longest start of text with QUESTION_ELLIPSIS that fits room px (the font the line has now)."""
+	low, high = 0, len(text)
+	while low < high:
+		middle = (low + high + 1) // 2
+		line.SetText(text[:middle].rstrip() + QUESTION_ELLIPSIS)
+		if _TextWidth(line) <= room:
+			low = middle
+		else:
+			high = middle - 1
+	line.SetText(text[:low].rstrip() + QUESTION_ELLIPSIS)
+
 class PopupDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accceptButton')
 		self.__LoadDialog()
 		self.acceptEvent = lambda *arg: None
 
@@ -37,7 +111,10 @@ class PopupDialog(ui.ScriptWindow):
 			import exception
 			exception.Abort("PopupDialog.LoadDialog.BindObject")
 
+		_R1Dress(self, "popup")
+
 	def Open(self):
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.SetTop()
 		self.Show()
@@ -58,11 +135,13 @@ class PopupDialog(ui.ScriptWindow):
 			self.board.SetPosition(width, 0)
 
 		self.board.SetSize(width, height)
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.UpdateRect()
 
 	def SetText(self, text):
 		self.message.SetText(text)
+		_R1Fit(self)
 
 	def SetAcceptEvent(self, event):
 		self.acceptEvent = event
@@ -99,6 +178,8 @@ class PopupDialog(ui.ScriptWindow):
 class InputDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 
 		self.__CreateDialog()
 
@@ -115,8 +196,10 @@ class InputDialog(ui.ScriptWindow):
 		self.cancelButton = getObject("CancelButton")
 		self.inputSlot = getObject("InputSlot")
 		self.inputValue = getObject("InputValue")
+		_R1Dress(self, "input")
 
 	def Open(self):
+		_R1Layout(self)
 		self.inputValue.SetFocus()
 		self.SetCenterPosition()
 		self.SetTop()
@@ -133,6 +216,7 @@ class InputDialog(ui.ScriptWindow):
 
 	def SetTitle(self, name):
 		self.board.SetTitleName(name)
+		_R1Title(self, name)
 
 	def SetNumberMode(self):
 		self.inputValue.SetNumberMode()
@@ -157,12 +241,14 @@ class InputDialog(ui.ScriptWindow):
 		self.inputValue.SetSize(width, self.inputValue.GetHeight())
 		if self.IsRTL():
 			self.inputValue.SetPosition(self.inputValue.GetWidth(), 0)
+		_R1Layout(self)
 
 	def SetBoardWidth(self, width):
 		self.SetSize(max(width + 50, 160), self.GetHeight())
 		self.board.SetSize(max(width + 50, 160), self.GetHeight())
 		if self.IsRTL():
 			self.board.SetPosition(self.board.GetWidth(), 0)
+		_R1Layout(self)
 		self.UpdateRect()
 
 	def SetAcceptEvent(self, event):
@@ -180,6 +266,8 @@ class InputDialog(ui.ScriptWindow):
 class QuestionDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__CreateDialog()
 
 	def __del__(self):
@@ -368,6 +456,8 @@ class InputDialogWithDescription(InputDialog):
 			import exception
 			exception.Abort("InputDialogWithDescription.LoadBoardDialog.BindObject")
 
+		_R1Dress(self, "input_desc")
+
 	def SetDescription(self, text):
 		self.description.SetText(text)
 
@@ -398,6 +488,8 @@ class InputDialogWithDescription2(InputDialog):
 			import exception
 			exception.Abort("InputDialogWithDescription.LoadBoardDialog.BindObject")
 
+		_R1Dress(self, "input_desc2")
+
 	def SetDescription1(self, text):
 		self.description1.SetText(text)
 
@@ -407,6 +499,8 @@ class InputDialogWithDescription2(InputDialog):
 class QuestionDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__CreateDialog()
 
 	def __del__(self):
@@ -420,8 +514,11 @@ class QuestionDialog(ui.ScriptWindow):
 		self.textLine = self.GetChild("message")
 		self.acceptButton = self.GetChild("accept")
 		self.cancelButton = self.GetChild("cancel")
+		_R1Dress(self, "question")
+		self._InitMessageWidth()
 
 	def Open(self):
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.SetTop()
 		self.Show()
@@ -430,6 +527,61 @@ class QuestionDialog(ui.ScriptWindow):
 		self.Hide()
 
 	def SetWidth(self, width):
+		"""The caller's width is the new minimum; a longer message still widens the dialog."""
+		self.messageMinWidth = int(width)
+		self.__ApplyWidth(self.messageMinWidth)
+		self._FitMessageWidth()
+
+	def _InitMessageWidth(self):
+		"""After a uiscript load: its width is the minimum, no message text set yet."""
+		self.messageMinWidth = self.GetWidth()
+		self.messageTexts = {}
+
+	def _MessageLines(self):
+		return (("message", self.textLine),)
+
+	def _SetMessage(self, key, line, text):
+		self.messageTexts[key] = text
+		line.SetText(text)
+		_R1Fit(self)
+		self._FitMessageWidth()
+
+	def _FitMessageWidth(self):
+		"""The width of the widest shown message line plus the margins, between the minimum and
+		QUESTION_MAX_WIDTH, re-centred and re-laid out (R1: frame and buttons) when it changes; a line wider than
+		the maximum is shortened."""
+		if not hasattr(self, "messageTexts"):
+			self._InitMessageWidth()
+		lines = []
+		for key, line in self._MessageLines():
+			if line is None or not line.IsShow():
+				continue
+			text = self.messageTexts.get(key)
+			if text is not None and line.GetText() != text:
+				line.SetText(text)                 # shortened for an earlier width: measure the whole text again
+				_R1Fit(self)
+			lines.append((line, line.GetText()))
+		if not lines:
+			return
+		low = self.messageMinWidth
+		high = max(low, QUESTION_MAX_WIDTH)
+		for unused in range(3):                    # R1 picks the message font for the width: settle on both
+			margin = _MessageMargin(self)
+			wanted = max([_TextWidth(line) for line, text in lines]) + 2 * margin
+			width = min(high, max(low, wanted))
+			if width == self.GetWidth():
+				break
+			self.__ApplyWidth(width)
+		room = self.GetWidth() - 2 * _MessageMargin(self)
+		shortened = False
+		for line, text in lines:
+			if _TextWidth(line) > room:
+				_ShortenText(line, text, room)
+				shortened = True
+		if shortened:
+			_R1Fit(self)
+
+	def __ApplyWidth(self, width):
 		height = self.GetHeight()
 		self.SetSize(width, height)
 
@@ -437,6 +589,7 @@ class QuestionDialog(ui.ScriptWindow):
 			self.board.SetPosition(width, 0)
 
 		self.board.SetSize(width, height)
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.UpdateRect()
 
@@ -453,7 +606,7 @@ class QuestionDialog(ui.ScriptWindow):
 		self.cancelButton.SetEvent(event)
 
 	def SetText(self, text):
-		self.textLine.SetText(text)
+		self._SetMessage("message", self.textLine, text)
 
 	def SetAcceptText(self, text):
 		self.acceptButton.SetText(text)
@@ -463,6 +616,7 @@ class QuestionDialog(ui.ScriptWindow):
 
 	def OnPressEscapeKey(self):
 		self.Close()
+		self.cancelButton.CallEvent()
 		return True
 
 	def GetTextSize(self):
@@ -500,12 +654,17 @@ class QuestionDialog2(QuestionDialog):
 		self.textLine2 = self.GetChild("message2")
 		self.acceptButton = self.GetChild("accept")
 		self.cancelButton = self.GetChild("cancel")
+		_R1Dress(self, "question2")
+		self._InitMessageWidth()
+
+	def _MessageLines(self):
+		return (("message1", self.textLine1), ("message2", self.textLine2))
 
 	def SetText1(self, text):
-		self.textLine1.SetText(text)
+		self._SetMessage("message1", self.textLine1, text)
 
 	def SetText2(self, text):
-		self.textLine2.SetText(text)
+		self._SetMessage("message2", self.textLine2, text)
 
 	if app.ENABLE_GROWTH_PET_SYSTEM:
 		def GetTextSize1(self):
@@ -541,8 +700,11 @@ class QuestionDialogWithTimeLimit(QuestionDialog2):
 		self.textLine2 = self.GetChild("message2")
 		self.acceptButton = self.GetChild("accept")
 		self.cancelButton = self.GetChild("cancel")
+		_R1Dress(self, "question2")
+		self._InitMessageWidth()
 
 	def Open(self, msg, timeout):
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.SetTop()
 		self.Show()
@@ -569,6 +731,8 @@ if app.ENABLE_NEW_DROP_DIALOG:
 	class QuestionDropDialog(ui.ScriptWindow):
 		def __init__(self):
 			ui.ScriptWindow.__init__(self)
+			import uiconfirm
+			uiconfirm.Bind(self, 'acceptButton')
 			self.__CreateDialog()
 
 		def __del__(self):
@@ -589,6 +753,13 @@ if app.ENABLE_NEW_DROP_DIALOG:
 			self.itemSlot = self.GetChild("ItemSlot")
 			self.itemSlot.SetOverInItemEvent(ui.__mem_func__(self.OverInItem))
 			self.itemSlot.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
+			# R1 look "Zahodit předmět" (root/uir1dropdialog.py); "Starý vzhled" or a failure keeps the original
+			self.r1drop = None
+			try:
+				import uir1dropdialog
+				uir1dropdialog.Dress(self)
+			except Exception:
+				self.r1drop = None
 
 		def SetItemSlot(self, slotIndex):
 			itemIndex = player.GetItemIndex(slotIndex)
@@ -701,11 +872,14 @@ if app.ENABLE_NEW_DROP_DIALOG:
 			if self.pending:
 				return True
 			self.Close()
+			self.cancelButton.CallEvent()
 			return True
 
 class MoneyInputDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 
 		self.moneyHeaderText = localeInfo.MONEY_INPUT_DIALOG_SELLPRICE
 		self.__avgPriceText = None
@@ -733,12 +907,14 @@ class MoneyInputDialog(ui.ScriptWindow):
 		except:
 			pass
 		self.moneyText = getObject("MoneyValue")
+		_R1Dress(self, "money")
 
 	def Open(self):
 		self.inputValue.SetText("")
 		self.inputValue.SetFocus()
 		self.ClearAveragePrice()
 		self.__OnValueUpdate()
+		_R1Layout(self)
 		self.SetCenterPosition()
 		self.SetTop()
 		self.Show()
@@ -753,6 +929,7 @@ class MoneyInputDialog(ui.ScriptWindow):
 
 	def SetTitle(self, name):
 		self.board.SetTitleName(name)
+		_R1Title(self, name)
 
 	def SetFocus(self):
 		self.inputValue.SetFocus()
@@ -788,7 +965,7 @@ class MoneyInputDialog(ui.ScriptWindow):
 			self.SetAveragePriceText("")
 			return
 
-		self.SetAveragePriceText("~ %s" % (localeInfo.NumberToMoneyString(price)))
+		self.SetAveragePriceText("~ %s" % (_R1Yang(self, price, localeInfo.NumberToMoneyString(price))))
 
 	def SetAcceptEvent(self, event):
 		self.acceptButton.SetEvent(event)
@@ -880,7 +1057,10 @@ class MoneyInputDialog(ui.ScriptWindow):
 			except ValueError:
 				money = 199999999
 
-		self.moneyText.SetText(self.moneyHeaderText + localeInfo.NumberToMoneyString(money))
+		if getattr(self, "r1skin", None) is not None:
+			self.moneyText.SetText("%s %s" % (self.moneyHeaderText.rstrip(), _R1Yang(self, money, "")))
+		else:
+			self.moneyText.SetText(self.moneyHeaderText + localeInfo.NumberToMoneyString(money))
 
 class InputPinCodeDialog(ui.ScriptWindow):
 	PIN_CODE_TOOLTIP = [
@@ -893,6 +1073,8 @@ class InputPinCodeDialog(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__CreateDialog()
 
 	def __del__(self):
@@ -972,6 +1154,8 @@ class InputPinCodeDialog(ui.ScriptWindow):
 class InputNewPinCodeDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__CreateDialog()
 
 	def __del__(self):
@@ -1058,6 +1242,8 @@ class InputNewPinCodeDialog(ui.ScriptWindow):
 class BuyMultipleDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.__CreateDialog()
 
 	def __del__(self):
@@ -1078,6 +1264,13 @@ class BuyMultipleDialog(ui.ScriptWindow):
 		self.itemSlot.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
 		
 		self.quantityEditValue.SetUpdateEvent(ui.__mem_func__(self.OnChangeQuantity))
+		# R1 look "Nákup více kusů" (root/uir1dropdialog.py); "Starý vzhled" or a failure keeps the original
+		self.r1drop = None
+		try:
+			import uir1dropdialog
+			uir1dropdialog.DressBuy(self)
+		except Exception:
+			self.r1drop = None
 		
 		self.buyQuantity = 1
 		self.totalPrice = 0
@@ -1159,35 +1352,27 @@ class BuyMultipleDialog(ui.ScriptWindow):
 				txtAccept = localeInfo.NumberToSecondaryCoinString(singlePrice * self.buyQuantity)
 				self.acceptButton.SetText(localeInfo.BUY_WITH_PRICE % (txtAccept))
 			elif PriceType == 3: #ITEM
-			
+				# every price item with how many the player has against the price of the chosen quantity,
+				# "Sigil II  12 / 25" in green / red (root/ownedcount.py)
+				import ownedcount
+
 				txtTitle = localeInfo.FINAL_PRICE
 				txtAccept = ""
-				sigilPrice = None
-				priceItemCount = 0
-				
+				prices = []
+
 				for j in range(shop.SHOPEX_VNUM_COUNT):
 					PriceVnum, PriceVnumCount = shop.ExGetItemPrice(slotIndex, j)
 					if PriceVnum == 0 or PriceVnumCount == 0:
 						continue
-					priceItemCount += 1
-					
 					item.SelectItem(PriceVnum)
-					
-					singlePrice = PriceVnumCount // itemCount
-				
-					priceItem = item.GetIconImageFileName()
-					if 91200 <= PriceVnum <= 91203:
-						sigilPrice = (priceItem, singlePrice * self.buyQuantity, item.GetItemName())
-					priceItem = priceItem.replace("\\", "/")
-					priceItem = priceItem.replace("icon/", "")
-					priceItem = priceItem.replace(".tga", "")
-					iconPriceItem = "|I" + priceItem + "|i"
-					
-					txtTitle += localeInfo.NumberToString(singlePrice * self.buyQuantity) + "x " + iconPriceItem + " + "
-					
-				if sigilPrice and priceItemCount == 1:
-					iconPath, sigilCount, sigilName = sigilPrice
-					txtTitle = "%dx %s" % (sigilCount, sigilName)
+					need = PriceVnumCount * self.buyQuantity
+					prices.append((item.GetIconImageFileName(), item.GetItemName(), need,
+						ownedcount.Owned(PriceVnum)))
+
+				if len(prices) == 1:
+					# one price item: its icon in front of "name  owned / need"
+					iconPath, priceName, need, owned = prices[0]
+					txtTitle = "%s  %s" % (priceName, ownedcount.Tagged(owned, need))
 					if not self.sigilPriceIcon:
 						self.sigilPriceIcon = ui.ExpandedImageBox()
 						self.sigilPriceIcon.SetParent(self.board)
@@ -1204,9 +1389,12 @@ class BuyMultipleDialog(ui.ScriptWindow):
 					self.textLine.SetHorizontalAlignLeft()
 					self.textLine.SetPosition(rowX + iconWidth + 5, 25)
 				else:
-					txtTitle = txtTitle[:-3]
-				txtAccept = txtAccept[:-3]
-				
+					parts = []
+					for iconPath, priceName, need, owned in prices:
+						iconToken = iconPath.replace("\\", "/").replace("icon/", "").replace(".tga", "")
+						parts.append("|I%s|i %s" % (iconToken, ownedcount.Tagged(owned, need)))
+					txtTitle += " + ".join(parts)
+
 				self.acceptButton.SetText(uiScriptLocale.SHOP_BUY)
 
 			elif PriceType == 4: #EXP

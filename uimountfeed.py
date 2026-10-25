@@ -43,6 +43,8 @@ class MountFeedWindow(ui.BoardWithTitleBar):
 		self.basket = FeedBasket()
 		self.deadline = 0.0
 		ui.BoardWithTitleBar.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accept')
 		self.AddFlag("movable")
 		self.AddFlag("float")
 		self.SetSize(self.WIDTH, self.HEIGHT)
@@ -56,7 +58,7 @@ class MountFeedWindow(ui.BoardWithTitleBar):
 		self.body.AddFlag("not_pick")
 		self.body.Show()
 		K1.Text(self, 123, 40, u"Vlož krystaly duše mounta", color=K1.GOLD, align="center")
-		K1.Text(self, 123, 54, u"Pravým klikem odebereš výběr", size=11, color=K1.MUTED, align="center")
+		K1.Text(self, 123, 54, u"Pravým tlačítkem odebereš výběr", size=11, color=K1.MUTED, align="center")
 		self.grid = ui.GridSlotWindow()
 		self.grid.SetParent(self)
 		self.grid.SetPosition(75, 65)
@@ -78,6 +80,11 @@ class MountFeedWindow(ui.BoardWithTitleBar):
 		self.accept.SetEvent(ui.__mem_func__(self.Accept))
 		self.accept.Show()
 		ui.BoardWithTitleBar.Hide(self)
+		try:
+			import uir1frame
+			uir1frame.Dress(self)
+		except Exception:
+			pass
 
 	def Open(self):
 		if self.basket.busy:
@@ -100,7 +107,7 @@ class MountFeedWindow(ui.BoardWithTitleBar):
 
 	def RefreshControls(self):
 		count = sum(row is not None for row in self.basket.slots)
-		self.status.SetText(u"Probíhá krmení…" if self.basket.busy or self.basket.active
+		self.status.SetText(u"Probíhá krmení..." if self.basket.busy or self.basket.active
 			else u"Vybráno: %d / 9" % count)
 		K1.SetColor(self.status, K1.BLUE)
 		if count and not self.basket.active and not self.basket.busy and self.owner.CanStartFeeding():
@@ -120,10 +127,10 @@ class MountFeedWindow(ui.BoardWithTitleBar):
 			chat.AppendChat(chat.CHAT_TYPE_INFO, u"Předmět na kurzoru se změnil. Vyber ho znovu.")
 			return
 		if vnum not in CRYSTAL_VNUMS:
-			chat.AppendChat(chat.CHAT_TYPE_INFO, u"Sem patří pouze krystaly duše mounta.")
+			chat.AppendChat(chat.CHAT_TYPE_INFO, u"Sem patří jen krystaly duše mounta.")
 			return
 		if mouse.GetAttachedItemCount() != count:
-			chat.AppendChat(chat.CHAT_TYPE_INFO, u"Vlož celý stack krystalů jako při krmení PETa.")
+			chat.AppendChat(chat.CHAT_TYPE_INFO, u"Vlož celý stack krystalů jako při krmení mazlíka.")
 			return
 		if self.basket.add(slot, cell, vnum, count):
 			mouse.DeattachObject()

@@ -12,11 +12,14 @@ import ui
 import uiCommon
 import mouseModule
 import slotwindowpolicy
+import npcsellprice
 import localeInfo
 import constInfo
 import osfInfo
 import shopgrid
 import uicrimsoncontrols
+import uir1
+import uiScriptLocale
 
 
 SHOP_WINDOW_WIDTH = 344
@@ -28,6 +31,11 @@ SHOP_BOTTOM_MARGIN = 11
 SHOP_BUY_X = 94
 SHOP_SELL_X = 178
 SHOP_CLOSE_X = 98
+# "Vylepšit nástroj" (NASTROJ-OKNO = A) beside Koupit / Prodat in the original look: the three centred in one row
+SHOP_TRADE_W = 72
+SHOP_TOOL_W = 148
+SHOP_TOOL_VISUAL = "148x23"
+SHOP_BUTTON_GAP = SHOP_SELL_X - SHOP_BUY_X - SHOP_TRADE_W
 
 """
 Note:
@@ -43,6 +51,7 @@ class ShopDialog(ui.ScriptWindow):
 		self.tooltipItem = 0
 		self.xShopStart = 0
 		self.yShopStart = 0
+		self.shopIsRemote = False
 		self.questionDialog = None
 		self.popup = None
 		self.itemBuyQuestionDialog = None
@@ -51,6 +60,14 @@ class ShopDialog(ui.ScriptWindow):
 		self.visibleAnchorToRealIndex = {}
 		self.visibleSlotToRealIndex = {}
 		self.visibleSlotCount = 0
+		self.r1 = None
+		self.r1Failed = False
+		self.shopVid = 0
+		self.shopIsPrivate = False
+		self.btnCraftTool = None
+		self.craftToolIds = ()
+		self.craftToolEvent = None
+		self.footerY = 0
 		if app.ENABLE_ANIMATED_WINDOW:
 			self.bClosed = False
 
@@ -65,25 +82,83 @@ class ShopDialog(ui.ScriptWindow):
 			return 1
 
 	def __ResizeForRows(self, rowCount):
-		footerY = SHOP_GRID_Y + int(rowCount) * SHOP_SLOT_SIZE + SHOP_FOOTER_GAP
+		r1 = getattr(self, "r1", None)
+		gridBottom = SHOP_GRID_Y + int(rowCount) * SHOP_SLOT_SIZE
+		footerY = gridBottom + SHOP_FOOTER_GAP + (r1.CaptionHeight() if r1 else 0)
 		windowHeight = footerY + SHOP_FOOTER_HEIGHT + SHOP_BOTTOM_MARGIN
 
 		self.SetSize(SHOP_WINDOW_WIDTH, windowHeight)
 		self.board.SetSize(SHOP_WINDOW_WIDTH, windowHeight)
 		self.titleBar.SetWidth(self.board.GetWidth() + 8)
-		self.btnBuy.SetPosition(SHOP_BUY_X, footerY)
-		self.btnSell.SetPosition(SHOP_SELL_X, footerY)
-		self.btnClose.SetPosition(SHOP_CLOSE_X, footerY)
+		self.footerY = footerY
+		self.__PlaceFooter()
+		if r1:
+			r1.Resize(SHOP_WINDOW_WIDTH, windowHeight, gridBottom)
 
-	def __RebuildGrid(self):
-		records = []
-		tabCount = max(1, int(shop.GetTabCount()))
+	def __PlaceFooter(self):
+		"""Koupit / Prodat centred; with "Vylepšit nástroj" the three of them centred in one row."""
+		footerY = self.footerY
+		tool = self.btnCraftTool is not None and self.btnCraftTool.IsShow()
+		if tool:
+			left = (SHOP_WINDOW_WIDTH - 2 * SHOP_TRADE_W - SHOP_TOOL_W - 2 * SHOP_BUTTON_GAP) // 2
+			self.btnBuy.SetPosition(left, footerY)
+			self.btnSell.SetPosition(left + SHOP_TRADE_W + SHOP_BUTTON_GAP, footerY)
+			self.btnCraftTool.SetPosition(left + 2 * (SHOP_TRADE_W + SHOP_BUTTON_GAP), footerY)
+		else:
+			self.btnBuy.SetPosition(SHOP_BUY_X, footerY)
+			self.btnSell.SetPosition(SHOP_SELL_X, footerY)
+		self.btnClose.SetPosition(SHOP_CLOSE_X, footerY)
+		if self.r1:
+			self.r1.LayoutFooter(tool)
+
+	def __CreateCraftToolButton(self):
+		"""The original look's "Vylepšit nástroj" (hidden until the server names the NPC's tools)."""
+		button = ui.Button()
+		button.SetParent(self.board)
+		uicrimsoncontrols.ApplyVisuals(button, SHOP_TOOL_VISUAL)
+		# locale_game CRAFT_TOOL_SHOP_BUTTON (the key itself in a locale without it, like crafttoolmodel.Text)
+		button.SetText(getattr(localeInfo, "CRAFT_TOOL_SHOP_BUTTON", "CRAFT_TOOL_SHOP_BUTTON"))
+		button.SetEvent(ui.__mem_func__(self.OnCraftTool))
+		button.Hide()
+		return button
+
+	def SetCraftTools(self, toolIds, event=None):
+		"""The shop of an upgrade NPC (CraftToolShopV1, NASTROJ-OKNO = A): "Vylepšit nástroj" beside Koupit / Prodat
+		for this shop session; every Open hides it again. ``event(toolIds)`` opens the tool window."""
+		self.craftToolIds = tuple(toolIds or ())
+		self.craftToolEvent = event
+		if self.btnCraftTool is None:
+			return
+		if self.craftToolIds and event is not None and not self.shopIsPrivate:
+			self.btnCraftTool.Show()
+		else:
+			self.btnCraftTool.Hide()
+		self.__PlaceFooter()
+
+	def OnCraftTool(self):
+		if self.craftToolEvent is not None and self.craftToolIds:
+			self.craftToolEvent(self.craftToolIds)
+
+	def __PageRecords(self, tabCount):
+		pages = [[] for i in range(tabCount)]
 		for realIndex in range(tabCount * shop.SHOP_SLOT_COUNT):
 			itemVnum = int(shop.GetItemID(realIndex))
 			if itemVnum:
-				records.append((realIndex, self.__ItemHeight(itemVnum)))
+				pages[realIndex // shop.SHOP_SLOT_COUNT].append((realIndex, self.__ItemHeight(itemVnum)))
+		return pages
 
-		layout = shopgrid.PackShopItems(records)
+	def __RebuildGrid(self):
+		tabCount = max(1, int(shop.GetTabCount()))
+		pages = self.__PageRecords(tabCount)
+		# R1 private shop with two pages: page 1 on the left half, page 2 on the right ("Strana 1 / Strana 2").
+		halves = bool(self.r1 and self.shopIsPrivate and tabCount == 2)
+		if self.r1:
+			self.r1.SetHalves(halves)
+		records = [record for page in pages for record in page]
+		if halves:
+			layout = shopgrid.PackShopHalves(pages)
+		else:
+			layout = shopgrid.PackShopItems(records)
 		for visibleSlot in range(self.visibleSlotCount):
 			self.itemSlotWindow.ClearSlot(visibleSlot)
 			self.itemSlotWindow.EnableSlotCoverImage(visibleSlot, False)
@@ -93,7 +168,7 @@ class ShopDialog(ui.ScriptWindow):
 			0, shopgrid.GRID_COLUMNS, rowCount,
 			SHOP_SLOT_SIZE, SHOP_SLOT_SIZE, 0, 0)
 		self.itemSlotWindow.SetSlotBaseImage(
-			"d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+			self.r1.SlotBase() if self.r1 else "d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
 		self.itemSlotWindow.SetSlotStyle(wndMgr.SLOT_STYLE_NONE)
 
 		self.visibleAnchorToRealIndex = layout["anchors"]
@@ -178,6 +253,8 @@ class ShopDialog(ui.ScriptWindow):
 			import exception
 			exception.Abort("ShopDialog.LoadDialog.BindObject")
 
+		self.btnCraftTool = self.__CreateCraftToolButton()
+
 		uicrimsoncontrols.ApplyVisuals(self.btnBuy, "72x24")
 		uicrimsoncontrols.ApplyVisuals(self.btnSell, "72x24")
 		uicrimsoncontrols.ApplyVisuals(self.btnClose, "148x23")
@@ -200,9 +277,35 @@ class ShopDialog(ui.ScriptWindow):
 
 		self.titleBar.SetCloseEvent(ui.__mem_func__(self.Close))
 
+		self.__LoadR1()
 		self.Refresh()
 
+	def __LoadR1(self):
+		"""The R1 look (root/uishopr1.py) drawn into this window unless Settings -> "Starý vzhled" chose the original
+		look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uishopr1
+			self.r1 = uishopr1.ShopSkin(self, uiScriptLocale.SHOP_TITLE)
+		except Exception:
+			uir1.TraceFailure("the shop")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.Close()
 		self.ClearDictionary()
 
@@ -211,6 +314,8 @@ class ShopDialog(ui.ScriptWindow):
 		self.btnBuy = 0
 		self.btnSell = 0
 		self.btnClose = 0
+		self.btnCraftTool = None
+		self.craftToolEvent = None
 		self.titleBar = 0
 		self.board = 0
 		self.visibleAnchorToRealIndex = {}
@@ -240,6 +345,17 @@ class ShopDialog(ui.ScriptWindow):
 		else:
 			isPrivateShop = True
 
+		self.__SyncLook()
+		self.shopVid, self.shopIsPrivate = vid, isPrivateShop
+		self.SetCraftTools(())				# CraftToolShopV1 follows for an upgrade NPC
+		# A server-opened remote shop (the dungeon ticket shop, owner
+		# sentinel 0) has no merchant to walk away from, so the NPC distance rule
+		# below must not close it. Only the close button or ESC does.
+		self.shopIsRemote = (vid == 0)
+		if self.r1:
+			import uishopr1
+			self.r1.SetTitle(uishopr1.SignText(vid) if isPrivateShop else "")
+
 		if player.IsMainCharacterIndex(vid):
 			isMainPlayerPrivateShop = True
 
@@ -256,10 +372,6 @@ class ShopDialog(ui.ScriptWindow):
 		shop.Open(isPrivateShop, isMainPlayerPrivateShop)
 
 		self.Refresh()
-		windowX = max(0, wndMgr.GetScreenWidth() - 400)
-		windowY = max(0, min(10, wndMgr.GetScreenHeight() - self.GetHeight()))
-		self.SetPosition(windowX, windowY)
-		self.SetTop()
 
 		if app.ENABLE_COMBAT_ZONE:
 			if self.__HasCombatZoneItems():
@@ -269,7 +381,13 @@ class ShopDialog(ui.ScriptWindow):
 			else:
 				self.SetCombatZoneBoard(False)
 
+		# Every shop (NPC merchants, the dungeon shop from Teleportation) opens exactly in the
+		# middle of the screen on top of every window, like the other dialogs - not in the old fixed
+		# top-right corner (SCREEN_WIDTH - 400, 10). The size is final here (after Refresh and the combat
+		# zone board). Nothing else moves: the inventory stays where the player has it.
+		self.SetCenterPosition()
 		self.Show()
+		self.SetTop()
 
 		if app.ENABLE_ANIMATED_WINDOW:
 			self.bClosed = False
@@ -293,6 +411,7 @@ class ShopDialog(ui.ScriptWindow):
 
 		shop.Close()
 		net.SendShopEndPacket()
+		self.SetCraftTools(())
 		self.CancelShopping()
 		self.tooltipItem.HideToolTip()
 		if app.ENABLE_ANIMATED_WINDOW:
@@ -401,12 +520,7 @@ class ShopDialog(ui.ScriptWindow):
 					itemtype = player.DRAGON_SOUL_INVENTORY
 
 			if player.IsValuableItem(itemtype, attachedSlotPos):
-				itemPrice = item.GetISellItemPrice()
-
-				if item.Is1GoldItem():
-					itemPrice = attachedCount // itemPrice // 5
-				else:
-					itemPrice = itemPrice * max(1, attachedCount) // 5
+				itemPrice = npcsellprice.SellPrice(item.GetISellItemPrice(), max(1, attachedCount), item.Is1GoldItem())
 
 				itemName = item.GetItemName()
 
@@ -417,6 +531,8 @@ class ShopDialog(ui.ScriptWindow):
 				questionDialog.SetCancelEvent(ui.__mem_func__(self.OnCloseQuestionDialog))
 				questionDialog.Open()
 				self.questionDialog = questionDialog
+				# The shown price is void once the server changes the sale terms.
+				npcsellprice.Watch(questionDialog, ui.__mem_func__(self.OnCloseQuestionDialog))
 
 				constInfo.SET_ITEM_QUESTION_DIALOG_STATUS(1)
 			else:
@@ -606,6 +722,9 @@ class ShopDialog(ui.ScriptWindow):
 			self.tooltipItem.HideToolTip()
 
 	def OnUpdate(self):
+		if self.shopIsRemote:
+			return
+
 		USE_SHOP_LIMIT_RANGE = 1000
 
 		(x, y, z) = player.GetMainCharacterPosition()
@@ -663,7 +782,7 @@ class MallPageDialog(ui.ScriptWindow):
 		MALL_PAGE_HEIGHT = 480
 
 		app.ShowWebPage(
-			"http://metin2.co.kr/08_mall/game_mall/login_fail.htm", 
+			"https://althea.to/",
 			(x, y, x + MALL_PAGE_WIDTH, y + MALL_PAGE_HEIGHT))
 
 		self.Lock()

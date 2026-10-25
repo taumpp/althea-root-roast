@@ -15,7 +15,54 @@ RACES = (
 )
 # skilldesc MotionIndex of support skills 194-198 and their clip names.
 SKILL_CLIPS = ((4, 'hosin'), (5, 'boho'), (6, 'gicheon'), (20, 'kwaesok'), (21, 'jeungryeok'))
+# outfit item -> (race, armor part) of the elf the outfit is drawn as, from the
+# server mapping; read once, on the first preview.
+OUTFIT_TABLE = 'locale/common/vip_elf_outfits.txt'
 _registered = False
+_outfits = None
+
+def LoadOutfits(lines):
+	outfits = {}
+	for line in lines:
+		cols = line.split('#', 1)[0].split()
+		if len(cols) < 2:
+			continue
+		try:
+			outfits[int(cols[0])] = (int(cols[1]), int(cols[2]) if len(cols) > 2 else 0)
+		except ValueError:
+			continue
+	return outfits
+
+def _ReadOutfits():
+	try:
+		import app
+		handle = app.OpenTextFile(OUTFIT_TABLE)
+		try:
+			return LoadOutfits([app.GetTextFileLine(handle, i) for i in range(app.GetTextFileLineCount(handle))])
+		finally:
+			app.CloseTextFile(handle)
+	except Exception:
+		return {}
+
+def PreviewModel(outfitVnum):
+	"""(race, armor part) of the elf an outfit is drawn as, or None.
+
+	Only races this client registered; an outfit worn by the player's own
+	character would show no elf."""
+	global _outfits
+	if _outfits is None:
+		_outfits = _ReadOutfits()
+	model = _outfits.get(outfitVnum)
+	if model is None or model[0] not in dict(RACES):
+		return None
+	return model
+
+def PreviewArmor(race):
+	"""Armor part the preview puts on an elf race (0 = none)."""
+	for model in (_outfits or {}).values():
+		if model[0] == race:
+			return model[1]
+	return 0
 
 def Register():
 	global _registered

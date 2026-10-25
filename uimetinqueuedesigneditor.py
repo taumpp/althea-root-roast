@@ -183,7 +183,7 @@ class MetinQueueDesignEditor(ui.BoardWithTitleBar):
                              (design.SPARKS, u"Množství jisker")):
             self._Slider(3, field, label)
         sizeHint = self._Row(3, None, 38)
-        self._Text(sizeHint, 0, 0, u"100 % zachovává základní velikost návrhu.", PANEL_WIDTH, role=fontconfig.ROLE_DENSE)
+        self._Text(sizeHint, 0, 0, u"100% zachovává základní velikost návrhu.", PANEL_WIDTH, role=fontconfig.ROLE_DENSE)
 
         frame = self._Keep(ui.Bar(), self, RIGHT, 120, "PreviewFrame")
         frame.SetSize(356, 266)
@@ -211,8 +211,8 @@ class MetinQueueDesignEditor(ui.BoardWithTitleBar):
         self._Button(self, 136, 510, u"Výchozí sestava", lambda: self.controller.RestoreAllDefaults(), "148x23", "DefaultButton")
         self.widgets["DefaultButton"].SetToolTipText(u"Pulzující obal + Klasický vír, zlatá, základní velikost a jas.")
         self._Button(self, 298, 512, u"Zpět", lambda: self.controller.UndoReset(), "61x21", "UndoButton")
-        self._Button(self, 462, 510, u"Zrušit", self.Close, "100x21")
-        self._Button(self, 574, 508, u"Uložit", self._Ok, "170x24", "SaveButton")
+        self._Button(self, 462, 508, u"Uložit", self._Ok, "170x24", "SaveButton")
+        self._Button(self, 644, 510, u"Zrušit", self.Close, "100x21")
         self._SetPane(0, False)
 
     def _SetPane(self, index, sample=True):
@@ -331,13 +331,13 @@ class MetinQueueDesignEditor(ui.BoardWithTitleBar):
             text.SetText(design.DisplayValue(field, draft[field]))
         for field, name in ((design.BODY_ENABLED, "BodyToggle"), (design.RING_ENABLED, "RingToggle")):
             self.widgets[name].Down() if draft[field] else self.widgets[name].SetUp()
-        self.widgets["ColorValue"].SetText(u"Zlatá · #E5B95F" if draft[design.PRIMARY] == design.GOLD else "#%06X" % draft[design.PRIMARY])
+        self.widgets["ColorValue"].SetText(u"Zlatá | #E5B95F" if draft[design.PRIMARY] == design.GOLD else "#%06X" % draft[design.PRIMARY])
         for name, field, choices in (("PulseButton", design.PULSE, design.PULSE_CHOICES),
                                      ("FocusButton", design.FOCUS, design.FOCUS_CHOICES)):
             self.widgets[name].SetText(dict(choices)[draft[field]])
-        self.widgets["SelectedName"].SetText(u"Náhled · " + design.BY_NUMBER[draft[0]][2])
+        self.widgets["SelectedName"].SetText(u"Náhled | " + design.BY_NUMBER[draft[0]][2])
         self.widgets["SelectedRing"].SetText(u"Prstenec: " + (design.RING_NAMES[draft[design.RING_STYLE]] if draft[design.RING_ENABLED] else u"vypnutý"))
-        self.widgets["MotionHint"].SetText(u"100 % = výchozí tempo efektu." if design.Supports(draft[0], design.TEMPO, draft)
+        self.widgets["MotionHint"].SetText(u"100% = výchozí tempo efektu." if design.Supports(draft[0], design.TEMPO, draft)
                                           else u"Tento obal má vlastní původní pohyb.")
         self.widgets["UndoButton"].Show() if self.controller.undoReset is not None else self.widgets["UndoButton"].Hide()
         self._RefreshCatalogue()
@@ -354,7 +354,7 @@ class MetinQueueDesignEditor(ui.BoardWithTitleBar):
         changed = (self.controller.draft[0] != self.controller.original[0] or
                    self.controller.draftNearbyFill != self.controller.originalNearbyFill or
                    any(tuple(value) != self.controller.originalProfiles[key] for key, value in self.controller.profiles.items()))
-        self.SetStatus(u"Neuložené změny · Uložit potvrdí celý rozepsaný vzhled." if changed else
+        self.SetStatus(u"Neuložené změny. Uložit potvrdí celý rozepsaný vzhled." if changed else
                        u"Vyber styl. Náhled reaguje ihned, nastavení potvrdíš tlačítkem Uložit.")
 
     def SetStatus(self, text):
@@ -420,7 +420,7 @@ class DesignOptionsEntry(object):
             if child is not title:
                 child.Hide()
         for y, text in ((48, u"Vzhled fronty meteorů"), (78, ""),
-                        (108, u"Obal a prstenec vybíráte nezávisle."),
+                        (108, u"Obal a prstenec vybíráš nezávisle."),
                         (127, u"Barva, pohyb a náhled v jednom editoru.")):
             label = ui.TextLine()
             label.SetParent(page)

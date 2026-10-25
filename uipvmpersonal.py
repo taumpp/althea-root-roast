@@ -12,6 +12,7 @@ import skill
 import ui
 import uiToolTip
 import uiAffectShower
+import uiaffecthover
 import wndMgr
 import pvmhudposition
 import pvmpersonal as policy
@@ -123,35 +124,38 @@ class BonusButton(ui.Window):
         self.owner.Request(self.source, False)
         return True
 
-    def OnMouseOverIn(self):
+    # The Pasivky row under the effect bar shares the bar's one hover surface (root/uiaffecthover.py): a fast move
+    # between the two never leaves two tooltips, Over B before Out A never hides B, and two buttons are never hovered.
+    def ShowHover(self):
         self.hover = True
         self.next_tooltip = 0.0
         self.RefreshTooltip(app.GetTime())
+        button = weakref.ref(self)
+        tooltip = self.owner.tooltip
+
+        def hide():
+            alive = button()
+            if alive is not None:
+                alive.hover = False
+            tooltip.HideToolTip()
+        return hide
+
+    def OnMouseOverIn(self):
+        uiaffecthover.Over(self)
 
     def OnMouseOverOut(self):
-        self.hover = False
-        self.owner.tooltip.HideToolTip()
+        uiaffecthover.Out(self)
 
 
 class PersonalBonuses(ui.Window):
-    # These extra passives have no ordinary cast-affect entry to supply art.
-    # Reuse the canonical skill tiles, matching AffectShower's fixed _03 grade.
-    HUD_ICON_PATHS = {
-        2: 'd:/ymir work/ui/skill/warrior/palbang_03.sub',
-        16: 'd:/ymir work/ui/skill/warrior/gigongcham_03.sub',
-        18: 'd:/ymir work/ui/skill/warrior/daejin_03.sub',
-        31: 'd:/ymir work/ui/skill/assassin/amseup_03.sub',
-        33: 'd:/ymir work/ui/skill/assassin/charyun_03.sub',
-        46: 'd:/ymir work/ui/skill/assassin/yeonsa_03.sub',
-        47: 'd:/ymir work/ui/skill/assassin/gwangyeok_03.sub',
-        76: 'd:/ymir work/ui/skill/sura/maryeong_03.sub',
-        80: 'd:/ymir work/ui/skill/sura/tusok_03.sub',
-        106: 'd:/ymir work/ui/skill/shaman/noejeon_03.sub',
-    }
+    # Every passive shows the tile the skill window shows for its skill
+    # (uiAffectShower.CurrentSkillIcon reads it from SkillDesc.txt). The skill
+    # vnum is never matched against affect numbers: AFFECT_POISON is 3 and
+    # AFFECT_SLOW is 4, which gave Bojove zureni and Aura mece their icons.
 
     def __init__(self, parent, affect_shower, interface):
         ui.Window.__init__(self)
-        self.SetParent(parent)
+        # Keep the movable panel in UI; GameWindow is in the lower GAME layer.
         self.AddFlag('float')
         self.parent_window = weakref.proxy(parent)
         self.character = player.GetName()
@@ -171,6 +175,7 @@ class PersonalBonuses(ui.Window):
         self.pending_notice = None
         self.next_notice = 0.0
         self.next_command = 0.0
+        self.pending_activation = None
         self.next_sync = 0.0
         self.cast_key = None
         self.tooltip = uiToolTip.SkillToolTip()
@@ -208,8 +213,13 @@ class PersonalBonuses(ui.Window):
 
     def _Place(self, position):
         x, y = self._ClampedPosition(position)
-        parent_x, parent_y = self.parent_window.GetGlobalPosition()
-        self.SetPosition(x - parent_x, y - parent_y)
+        self.SetPosition(x, y)
+
+    def OnUpdate(self):
+        if not self.parent_window.IsShow():
+            self.EndDrag()
+            self.tooltip.HideToolTip()
+            self.Hide()
 
     def BeginDrag(self):
         if not self.model.enabled or not self.IsShow():
@@ -273,8 +283,19 @@ class PersonalBonuses(ui.Window):
         now = app.GetTime()
         if not self.model.enabled or self.drag_origin is not None or now < self.next_command:
             return
+        row = self.model.rows.get(source)
+        if not row or not row['learned']:
+            return
+        if self.pending_activation:
+            pending_source, revision, deadline = self.pending_activation
+            pending_row = self.model.rows.get(pending_source)
+            if pending_row and pending_row['revision'] == revision and now < deadline:
+                return
+            self.pending_activation = None
         command = self.model.command(source, on, now)
         if command:
+            if on and source in policy.CAST_SKILLS:
+                self.pending_activation = (source, row['revision'], now + 2.0)
             net.SendChatPacket(command)
             self.next_command = now + 0.3
             self.next_sync = now + 1.0
@@ -308,18 +329,16 @@ class PersonalBonuses(ui.Window):
             image.Hide()
         self.cast_images = {}
         for source, unused_revision in active:
-            raw = source
-            filename = self.HUD_ICON_PATHS.get(source)
-            if filename is None:
-                for affect, data in self.affects.AFFECT_DATA_DICT.items():
-                    if uiAffectShower.TypeToAffect(affect) == source:
-                        raw, filename = affect, data[1]
-                        break
-            if filename is None:
+            affect = uiAffectShower.SkillToAffect(source, self.affects.AFFECT_DATA_DICT)
+            raw = source if affect is None else affect
+            fallback = self.affects.AFFECT_DATA_DICT.get(affect, (None, ''))[1]
+            filename = uiAffectShower.CurrentSkillIcon(fallback, source)
+            if not filename:
                 continue
             # Summary membership never replaces the separate activation controls.
             image = uiAffectShower.AffectImage()
             image.SetParent(self.affects)
+            image.skillIconSource = (fallback, source)
             image.LoadImage(filename)
             image.SetScale(0.7, 0.7)
             image.SetSize(22, 22)
@@ -386,7 +405,9 @@ class PersonalBonuses(ui.Window):
             self.Hide()
             return
         now = app.GetTime()
-        wanted = [r['skill'] for r in self.model.hud_rows()]
+        wanted = [r['skill'] for r in self.model.control_rows()]
+        title_width, title_height = self.heading.GetTextSize()
+        header_height = max(18, title_height + 4)
         for source in list(self.buttons):
             if source not in wanted:
                 button = self.buttons.pop(source)
@@ -397,7 +418,7 @@ class PersonalBonuses(ui.Window):
             if source not in self.buttons:
                 self.buttons[source] = BonusButton(self, source)
             button = self.buttons[source]
-            button.SetPosition(index * 40, 14)
+            button.SetPosition(index * 40, header_height + 1)
             button.Refresh(now)
             button.Show()
         # The confirmed two-hour state also owns ordinary skill highlights
@@ -407,17 +428,21 @@ class PersonalBonuses(ui.Window):
                 if source in policy.CAST_SKILLS:
                     player.SetPvmPersonalSkillActive(source, bool(self.model.remaining(source, now)))
         self._CastImages(now)
-        width = max(52, self.heading.GetTextSize()[0] + 12, len(wanted)*40-4) if wanted else 0
-        self.SetSize(width, 64 if wanted else 0)
-        self.header.SetSize(width, 13)
-        self.header_background.SetSize(width, 13)
+        width = max(52, title_width + 12, len(wanted)*40-4) if wanted else 0
+        self.SetSize(width, header_height + 51 if wanted else 0)
+        self.header.SetSize(width, header_height)
+        self.header_background.SetSize(width, header_height)
+        self.heading.SetPosition(11, (header_height - title_height) // 2)
         if wanted:
             if self.saved_position is None:
                 x, y = self.affects.GetGlobalPosition()
                 self._Place((x, y + self.affects.GetHeight() + 8))
             else:
                 self._Place(self.saved_position)
-            self.Show()
+            if self.parent_window.IsShow():
+                self.Show()
+            else:
+                self.OnUpdate()
         else:
             self.EndDrag()
             self.tooltip.HideToolTip()
@@ -447,4 +472,5 @@ class PersonalBonuses(ui.Window):
         self.buttons = {}
         self.cast_images = {}
         self.pending_notice = None
+        self.pending_activation = None
         policy.set_current(None)

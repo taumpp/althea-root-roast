@@ -2576,6 +2576,8 @@ if app.ENABLE_FONT_OPTION:
 		def __init__(self, parent):
 			print("PopupDialog::PopupDialog()")
 			ui.ScriptWindow.__init__(self)
+			import uiconfirm
+			uiconfirm.Bind(self, 'accept', child=True)
 
 			self.__Load()
 			self.__Bind()
@@ -2601,9 +2603,20 @@ if app.ENABLE_FONT_OPTION:
 				exception.Abort("PopupDialog.__Bind")
 
 			self.okButton.SAFE_SetEvent(self.__OnOK)
+			# R1 dialog look (root/uir1dialog.py); "Starý vzhled" or a failure keeps the original
+			try:
+				import uir1dialog
+				uir1dialog.DressPopup(self)
+			except Exception:
+				pass
 
 		def Open(self, msg):
 			self.textLine.SetText(msg)
+			try:
+				import uir1dialog
+				uir1dialog.Layout(self)
+			except Exception:
+				pass
 			self.SetCenterPosition()
 			self.Show()
 			self.SetTop()

@@ -7,11 +7,11 @@ GEAR_NAMES = (
 )
 GEAR_UNLOCK_LEVELS = (5, 10, 15, 20, 25)
 GEAR_BONUSES = (
-	(u"Síla proti kamenům +10 %",),
-	(u"Síla proti bossům +10 %",),
+	(u"Silný proti meteorům +10%",),
+	(u"Silný proti bossům +10%",),
 	(u"Obrana +100",),
 	(u"Hodnota útoku +100",),
-	(u"Síla všech elementů +10 %", u"Útok zbraní +5 %", u"Síla proti příšerám +10 %"),
+	(u"Síla všech živlů +10%", u"Útok zbraní +5%", u"Silný proti příšerám +10%"),
 )
 ELEMENT_NAMES = (
 	u"Oheň",
@@ -81,6 +81,7 @@ class MountSystemViewModel(object):
 		self.gear = ()
 		self.elements = ()
 		self.soul = self._build_soul(0, 0, 0)
+		self.soul_level_up = 0
 		self.prismatic = self._build_prismatic(0)
 		self.open_element_id = None
 
@@ -114,6 +115,10 @@ class MountSystemViewModel(object):
 		)
 		bonuses = self._build_bonuses(snapshot.get("bonuses", ()))
 
+		# owner 21. 10. 2026: a soul level-up empties the bar and the fed EXP looked lost; the new level of the same
+		# mount in the same session (not the first snapshot, a relog or another mount) for the window to announce
+		same = self.revision >= 0 and nonce == self.session_nonce and (mount_race_value or None) == self.mount_race
+		self.soul_level_up = soul["level"] if same and soul["level"] > self.soul["level"] else 0
 		self.revision = revision
 		self.session_nonce = nonce
 		self.flags = flags
@@ -155,7 +160,7 @@ class MountSystemViewModel(object):
 			return False
 		self.prismatic = dict(self.prismatic)
 		self.prismatic["text"] = (
-			u"Prizmatické jádro vybaveno"
+			u"Prizmatické jádro nasazeno"
 			if equipped else u"Prizmatické jádro v inventáři"
 		)
 		return True

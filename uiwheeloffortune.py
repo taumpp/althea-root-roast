@@ -69,9 +69,12 @@ class MessageWindow(ui.BoardWithTitleBar):
 		ui.BoardWithTitleBar.__del__(self)
 	def __init__(self):
 		ui.BoardWithTitleBar.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'okButton')
 		self.Destroy()
 	def Destroy(self):
 		self.children = {}
+		self.okButton = None
 	def LoadMessage(self, itemVnum, itemCount):
 		self.SetTitleName(localeInfo.WHEEL_REWARD_TITLE)
 		self.SetCloseEvent(self.Close)
@@ -119,6 +122,7 @@ class MessageWindow(ui.BoardWithTitleBar):
 		okBtn.SetPosition(105-(okBtn.GetWidth()//2),135)
 		okBtn.Show()
 		self.children["okBtn"] = okBtn
+		self.okButton = okBtn
 
 		self.Show()
 

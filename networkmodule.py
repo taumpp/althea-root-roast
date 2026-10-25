@@ -2,6 +2,7 @@
 # Network
 
 import app
+import startuptiming
 import chr
 import dbg
 import net
@@ -22,6 +23,7 @@ import introLoading
 
 import uiOfflineShop
 import uiwarpstate
+import uiwarpcurtain
 import noticestyle
 
 
@@ -34,6 +36,8 @@ class PopupDialog(ui.ScriptWindow):
 	def __init__(self):
 		#print "NEW POPUP DIALOG ----------------------------------------------------------------------------"
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accept', child=True)
 		self.CloseEvent = 0
 		self.messageLines = []
 
@@ -44,6 +48,19 @@ class PopupDialog(ui.ScriptWindow):
 	def LoadDialog(self):
 		PythonScriptLoader = ui.PythonScriptLoader()
 		PythonScriptLoader.LoadScriptFile(self, "UIScript/PopupDialog.py")
+		# R1 dialog look (root/uir1dialog.py, kind stream_popup); "Starý vzhled" or a failure keeps the original
+		try:
+			import uir1dialog
+			uir1dialog.DressPopup(self, "stream_popup")
+		except Exception:
+			pass
+
+	def _R1(self, name, *args):
+		try:
+			import uir1dialog
+			return getattr(uir1dialog, name)(self, *args)
+		except Exception:
+			return None
 
 	def Open(self, Message, event = 0, ButtonName = localeInfo.UI_CANCEL):
 		if True == self.IsShow():
@@ -74,7 +91,8 @@ class PopupDialog(ui.ScriptWindow):
 		measure = self.GetChild("message")
 		measure.Hide()
 		measure.SetText("")
-		measure.SetFontName(localeInfo.UI_DEF_FONT)
+		font, color = self._R1("MessageFont", localeInfo.UI_DEF_FONT) or (localeInfo.UI_DEF_FONT, None)
+		measure.SetFontName(font)
 
 		def width(text):
 			measure.SetText(text)
@@ -86,7 +104,9 @@ class PopupDialog(ui.ScriptWindow):
 		for text in rows:
 			line = ui.TextLine()
 			line.SetParent(board)
-			line.SetFontName(localeInfo.UI_DEF_FONT)
+			line.SetFontName(font)
+			if color is not None:
+				line.SetPackedFontColor(color)
 			line.SetWindowHorizontalAlignCenter()
 			line.SetHorizontalAlignCenter()
 			line.SetVerticalAlignTop()
@@ -103,6 +123,7 @@ class PopupDialog(ui.ScriptWindow):
 		height = max(105, buttonY + button.GetHeight() + 21)
 		board.SetSize(280, height)
 		self.SetSize(280, height)
+		self._R1("Layout")
 
 	def Close(self):
 		if False == self.IsShow():
@@ -129,6 +150,27 @@ class PopupDialog(ui.ScriptWindow):
 	def OnIMEReturn(self):
 		self.Close()
 		return True
+
+_SEAMLESS_WARP_FAILURES = {
+	"ALREADY": "LOGIN_FAILURE_ALREAY",
+	"FULL": "LOGIN_FAILURE_TOO_MANY_USER",
+	"SHUTDOWN": "LOGIN_FAILURE_SHUTDOWN",
+	"REPAIR": "LOGIN_FAILURE_REPAIR_ID",
+	"BLOCK": "LOGIN_FAILURE_BLOCK_ID",
+	"NOTAVAIL": "LOGIN_FAILURE_NOT_AVAIL",
+	"VIP_ONLY": "LOGIN_FAILURE_VIP_ONLY",
+}
+
+
+def SeamlessWarpFailureMessage(status):
+	"""Login-screen text for a refused seamless reconnect (login failure)."""
+	status = (status or "").strip()
+	name = _SEAMLESS_WARP_FAILURES.get(status)
+	message = getattr(localeInfo, name, None) if name else None
+	if message:
+		return message
+	return getattr(localeInfo, "LOGIN_FAILURE_UNKNOWN", "") + status
+
 
 ##
 ## Main Stream
@@ -161,6 +203,8 @@ class MainStream(object):
 		self.familyName = ""
 
 		self.curtain = 0
+		# Seamless warp curtain (uiwarpcurtain); None keeps every warp legacy.
+		self.warpCurtain = None
 		self.curPhaseWindow = 0
 		self.newPhaseWindow = 0
 
@@ -188,14 +232,27 @@ class MainStream(object):
 		self.popupWindow.Destroy()
 		self.popupWindow = 0
 
+		if self.warpCurtain:
+			self.warpCurtain.Destroy()
+		self.warpCurtain = None
 		self.curtain = 0
 
 	def Create(self):
 		self.CreatePopupDialog()
 
 		self.curtain = uiPhaseCurtain.PhaseCurtain()
+		try:
+			self.warpCurtain = uiwarpcurtain.WarpCurtain()
+		except Exception as error:
+			# Without it the EXE's seamless path is never taken.
+			self.warpCurtain = None
+			dbg.TraceError("SeamlessWarp curtain unavailable: %s" % error)
 
-	def SetPhaseWindow(self, newPhaseWindow):
+	def SetPhaseWindow(self, newPhaseWindow, immediate = False):
+		# Exactly one curtain: any phase change ends a warp curtain.
+		warpCurtain = getattr(self, "warpCurtain", None)
+		if warpCurtain:
+			warpCurtain.Abort()
 		if self.newPhaseWindow:
 			#print "이미 새로운 윈도우로 바꾼상태에서 또 바꿈", newPhaseWindow
 			self.__ChangePhaseWindow()
@@ -205,6 +262,10 @@ class MainStream(object):
 		if self.curPhaseWindow:
 			if _IsCustomPortsInstantWarp():
 				self.curtain.HideInstantly()
+				self.__ChangePhaseWindow()
+			elif immediate:
+				# Opening the new window sends its phase packet; do not delay
+				# it behind the ~10-frame fade of the previous phase.
 				self.__ChangePhaseWindow()
 			else:
 				#print "페이드 아웃되면 바꿈"
@@ -243,6 +304,104 @@ class MainStream(object):
 
 	## SelectPhase
 	##########################################################################################
+	################################
+	# Seamless warp (EXE hooks, SeamlessWarpPolicy.h in client-src)
+	#
+	# The EXE calls these only on a connection whose server offered the warp
+	# curtain and only when all five exist. The game window survives the
+	# reconnect: Leave/Arrive replace its Close/Open, and no other phase
+	# window is created until the destination is in the game.
+
+	def __AbortWarpCurtain(self):
+		if self.warpCurtain:
+			self.warpCurtain.Abort()
+
+	def __SeamlessGameWindow(self):
+		window = self.curPhaseWindow
+		if window and not self.newPhaseWindow and hasattr(window, "OnSeamlessWarpLeave"):
+			return window
+		return None
+
+	def IsWarpCurtainInputLocked(self):
+		return bool(self.warpCurtain and self.warpCurtain.IsInputLocked())
+
+	def IsWarpCurtainActive(self):
+		# Any stage, fades included: other curtains wait for it (one at a time).
+		return bool(self.warpCurtain and self.warpCurtain.IsActive())
+
+	def IsWarpCurtainCovering(self):
+		return bool(self.warpCurtain and self.warpCurtain.IsCovering())
+
+	def NoteWarpCurtainFrame(self):
+		# One in-game frame for the curtain's adaptive settle baseline.
+		if self.warpCurtain:
+			self.warpCurtain.SampleGameFrame()
+
+	def BINARY_WarpCurtainBegin(self, mapIndex, kind):
+		# False keeps the legacy warp: no curtain, no surviving window.
+		if not self.warpCurtain or not self.__SeamlessGameWindow():
+			return False
+		try:
+			self.warpCurtain.Begin(mapIndex, kind)
+		except Exception as error:
+			dbg.TraceError("SeamlessWarp curtain begin failed: %s" % error)
+			self.__AbortWarpCurtain()
+			return False
+		return True
+
+	def BINARY_WarpCurtainEnd(self, result):
+		if self.warpCurtain:
+			self.warpCurtain.End(result)
+		return True
+
+	def BINARY_SeamlessWarpLeave(self):
+		if self.warpCurtain:
+			self.warpCurtain.Leave()
+		window = self.__SeamlessGameWindow()
+		if window:
+			window.OnSeamlessWarpLeave()
+		return True
+
+	def BINARY_SeamlessWarpArrive(self):
+		if self.warpCurtain:
+			self.warpCurtain.Arrive()
+		window = self.__SeamlessGameWindow()
+		if window:
+			window.OnSeamlessWarpArrive()
+		return True
+
+	def BINARY_SeamlessMapWarpLeave(self):
+		if self.warpCurtain:
+			self.warpCurtain.Leave()
+		window = self.__SeamlessGameWindow()
+		if window:
+			window.OnSeamlessMapWarpLeave()
+		return True
+
+	def BINARY_SeamlessMapWarpArrive(self):
+		if self.warpCurtain:
+			self.warpCurtain.Arrive()
+		window = self.__SeamlessGameWindow()
+		if window:
+			window.OnSeamlessMapWarpArrive()
+		return True
+
+	def BINARY_SeamlessWarpFailed(self, status):
+		# The EXE already closed the destination connection; the surviving
+		# game window closes with the phase change below.
+		self.__AbortWarpCurtain()
+		self.SetLoginPhaseWithMessage(SeamlessWarpFailureMessage(status))
+		return True
+
+	def SetLoginPhaseWithMessage(self, message):
+		uiwarpstate.Clear()
+		net.Disconnect()
+		self.familyNameStatus = -1
+		self.familyName = ""
+
+		import introconnect
+		self.SetPhaseWindow(introconnect.ConnectionWindow(self, message))
+
 	def SetLogoPhase(self):
 		uiwarpstate.Clear()
 		net.Disconnect()
@@ -334,16 +493,38 @@ class MainStream(object):
 			import exception
 			exception.Abort("networkModule.SetLoadingPhase")
 
+	def BINARY_WikiEntryBegin(self):
+		# Compatibility hooks for released EXEs. Wiki is requested only in Game.
+		pass
+
+	def BINARY_WikiEntryCommand(self, line):
+		# No Loading transfer exists. In-game commands use the normal dispatcher.
+		pass
+
+	def BINARY_WikiEntryReady(self):
+		# Login and every warp must remain independent of optional wiki data,
+		# including a missing capability, busy core or broken catalogue module.
+		return 1
+
 	def SetGamePhase(self):
 		try:
+			startupTiming = startuptiming.Timer("game_phase")
 			import game
+			startupTiming.Mark("import_game")
 			self.popupWindow.Close()
+			startupTiming.Mark("Close")
 			instantCustomPortsWarp = _IsCustomPortsInstantWarp()
-			self.SetPhaseWindow(game.GameWindow(self))
+			startupTiming.Mark("setup_02")
+			# GameWindow.Open sends the enter-game packet and covers the world
+			# with its own curtain until the main actor exists.
+			self.SetPhaseWindow(game.GameWindow(self), immediate=True)
+			startupTiming.Mark("SetPhaseWindow")
 			if instantCustomPortsWarp:
 				complete = getattr(net, "CompleteCustomPortsInstantWarp", None)
 				if complete:
 					complete()
+			startupTiming.Mark("optional_04")
+			startupTiming.Finish()
 		except:
 			raise
 			import exception
@@ -410,6 +591,7 @@ class MainStream(object):
 
 	def SetWarpPhase(self):
 		try:
+			self.__AbortWarpCurtain()
 			newPhaseWindow = self
 
 			self.Close()

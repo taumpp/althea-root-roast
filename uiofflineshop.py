@@ -970,7 +970,7 @@ class BuilderWindow(ui.ScriptWindow):
 				'TARGET_SLOT_INDEX' : targetSlotIndex + 80*self.__currentPage,
 			}
 			GetOfflineShopManager().RegisterAveragePriceDialog(0, itemVnum, itemCount, self.__priceInput)
-			self.__priceInput.SetAveragePriceText("~ …")
+			self.__priceInput.SetAveragePriceText("~ ...")
 			net.SendOfflineShopRequestAveragePrice(0, itemVnum, itemCount)
 
 			self.__priceInput.Open()
@@ -1464,7 +1464,7 @@ class EditorWindow(ui.ScriptWindow):
 			}
 
 			GetOfflineShopManager().RegisterAveragePriceDialog(self.__GetId(), itemVnum, itemCount, self.__priceInput)
-			self.__priceInput.SetAveragePriceText("~ …")
+			self.__priceInput.SetAveragePriceText("~ ...")
 			net.SendOfflineShopRequestAveragePrice(self.__GetId(), itemVnum, itemCount)
 
 			self.__priceInput.Open()

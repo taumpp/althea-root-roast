@@ -19,6 +19,7 @@ import background
 import miniMap
 import chr
 import uiScriptLocale
+import ownedcount
 
 from _weakref import proxy
 
@@ -34,6 +35,19 @@ if (localeInfo.IsEUROPE() and app.GetLocalePath() != "locale/br"):
 			return "0"
 
 		return "%s" % (','.join([ i-3<0 and str(n)[:i] or str(n)[i-3:i] for i in range(len(str(n))%3, len(str(n))+1, 3) if i ]))
+
+def BuildingPriceText(price):
+	"""The price of a guild building with the dots of the one R1 yang price of the client ("20.000.000",
+	root/uir1price.py, ; the 75 px well under "Cena" has no room for the unit); "Starý vzhled"
+	keeps this module's own "20,000,000"."""
+	try:
+		import uir1
+		import uir1price
+		if uir1.UseR1():
+			return uir1price.FormatAmount(price)
+	except Exception:
+		pass
+	return NumberToMoneyString(price)
 
 MATERIAL_STONE_INDEX = 0
 MATERIAL_LOG_INDEX = 1
@@ -55,6 +69,8 @@ def unsigned32(n):
 class DeclareGuildWarDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 
 		self.type=0
 		self.__CreateDialog()
@@ -222,6 +238,8 @@ class DeclareGuildWarDialog(ui.ScriptWindow):
 class AcceptGuildWarDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 
 		self.type = 0
 		self.__CreateDialog()
@@ -609,6 +627,8 @@ class CheckBox(ui.ImageBox):
 class ChangeGradeNameDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
@@ -824,6 +844,8 @@ class GuildWindow(ui.ScriptWindow):
 				pyScrLoader.LoadScriptFile(self, "uiscript/guildwindow.py")
 
 			self.popupDialog = ui.ScriptWindow()
+			import uiconfirm
+			uiconfirm.Bind(self.popupDialog, "accept", child=True)
 			pyScrLoader.LoadScriptFile(self.popupDialog, "UIScript/PopupDialog.py")
 
 			self.changeGradeNameDialog = ChangeGradeNameDialog()
@@ -915,6 +937,12 @@ class GuildWindow(ui.ScriptWindow):
 			## QuestionDialog
 			self.popupMessage = self.popupDialog.GetChild("message")
 			self.popupDialog.GetChild("accept").SetEvent(ui.__mem_func__(self.popupDialog.Hide))
+			# R1 dialog look (root/uir1dialog.py); "Starý vzhled" or a failure keeps the original
+			try:
+				import uir1dialog
+				uir1dialog.DressPopup(self.popupDialog)
+			except Exception:
+				pass
 
 			## ChangeGradeName
 			self.changeGradeNameDialog.GetChild("AcceptButton").SetEvent(ui.__mem_func__(self.OnChangeGradeName))
@@ -1725,6 +1753,11 @@ class GuildWindow(ui.ScriptWindow):
 	## GuildInfo
 	def __PopupMessage(self, msg):
 		self.popupMessage.SetText(msg)
+		try:
+			import uir1dialog
+			uir1dialog.Layout(self.popupDialog)
+		except Exception:
+			pass
 		self.popupDialog.SetTop()
 		self.popupDialog.Show()
 
@@ -2479,7 +2512,7 @@ class BuildGuildBuildingWindow(ui.ScriptWindow):
 		if app.IsEnableTestServerFlag():
 			return True
 
-		curStoneCount = player.GetItemCountByVnum(MATERIAL_STONE_ID)
+		curStoneCount = ownedcount.Owned(MATERIAL_STONE_ID)
 		if curStoneCount < self.needStoneCount:
 			return False
 		return True
@@ -2488,7 +2521,7 @@ class BuildGuildBuildingWindow(ui.ScriptWindow):
 		if app.IsEnableTestServerFlag():
 			return True
 
-		curLogCount = player.GetItemCountByVnum(MATERIAL_LOG_ID)
+		curLogCount = ownedcount.Owned(MATERIAL_LOG_ID)
 		if curLogCount < self.needLogCount:
 			return False
 		return True
@@ -2497,17 +2530,28 @@ class BuildGuildBuildingWindow(ui.ScriptWindow):
 		if app.IsEnableTestServerFlag():
 			return True
 
-		curPlywoodCount = player.GetItemCountByVnum(MATERIAL_PLYWOOD_ID)
+		curPlywoodCount = ownedcount.Owned(MATERIAL_PLYWOOD_ID)
 		if curPlywoodCount < self.needPlywoodCount:
 			return False
 		return True
+
+	def RefreshOwnedCounts(self):
+		"""The stone / log / plywood "owned / need" of the chosen building (also when the inventory changes)."""
+		for line, vnum, need in ((self.buildingMaterialStoneValue, MATERIAL_STONE_ID, getattr(self, "needStoneCount", 0)),
+				(self.buildingMaterialLogValue, MATERIAL_LOG_ID, getattr(self, "needLogCount", 0)),
+				(self.buildingMaterialPlywoodValue, MATERIAL_PLYWOOD_ID, getattr(self, "needPlywoodCount", 0))):
+			if need > 0:
+				ownedcount.Paint(line, ownedcount.Owned(vnum), need)
+			else:
+				line.SetPackedFontColor(self.ENABLE_COLOR)
+				line.SetText("0")
 
 	def __OnSelectCategory(self):
 		self.listScrollBar.SetPos(0.0)
 		self.__RefreshItem()
 
 	def __SetBuildingData(self, data):
-		self.buildingPriceValue.SetText(NumberToMoneyString(data["PRICE"]))
+		self.buildingPriceValue.SetText(BuildingPriceText(data["PRICE"]))
 
 		self.needMoney = int(data["PRICE"])
 
@@ -2516,33 +2560,13 @@ class BuildGuildBuildingWindow(ui.ScriptWindow):
 		self.needLogCount = int(materialList[MATERIAL_LOG_INDEX])
 		self.needPlywoodCount = int(materialList[MATERIAL_PLYWOOD_INDEX])
 
-		if (localeInfo.IsEUROPE() and app.GetLocalePath() != "locale/ca") and (localeInfo.IsEUROPE() and app.GetLocalePath() != "locale/br"):
-			self.buildingMaterialStoneValue.SetText(materialList[MATERIAL_STONE_INDEX])
-			self.buildingMaterialLogValue.SetText(materialList[MATERIAL_LOG_INDEX] )
-			self.buildingMaterialPlywoodValue.SetText(materialList[MATERIAL_PLYWOOD_INDEX])
-		else:
-			self.buildingMaterialStoneValue.SetText(materialList[MATERIAL_STONE_INDEX] + localeInfo.THING_COUNT)
-			self.buildingMaterialLogValue.SetText(materialList[MATERIAL_LOG_INDEX] + localeInfo.THING_COUNT)
-			self.buildingMaterialPlywoodValue.SetText(materialList[MATERIAL_PLYWOOD_INDEX] + localeInfo.THING_COUNT)
 		if self.__IsEnoughMoney():
 			self.buildingPriceValue.SetPackedFontColor(self.ENABLE_COLOR)
 		else:
 			self.buildingPriceValue.SetPackedFontColor(self.DISABLE_COLOR)
 
-		if self.__IsEnoughMaterialStone():
-			self.buildingMaterialStoneValue.SetPackedFontColor(self.ENABLE_COLOR)
-		else:
-			self.buildingMaterialStoneValue.SetPackedFontColor(self.DISABLE_COLOR)
-
-		if self.__IsEnoughMaterialLog():
-			self.buildingMaterialLogValue.SetPackedFontColor(self.ENABLE_COLOR)
-		else:
-			self.buildingMaterialLogValue.SetPackedFontColor(self.DISABLE_COLOR)
-
-		if self.__IsEnoughMaterialPlywood():
-			self.buildingMaterialPlywoodValue.SetPackedFontColor(self.ENABLE_COLOR)
-		else:
-			self.buildingMaterialPlywoodValue.SetPackedFontColor(self.DISABLE_COLOR)
+		# the materials as "owned / need", green / red like every item price (root/ownedcount.py)
+		self.RefreshOwnedCounts()
 
 		self.rot_x_limit = data["X_ROT_LIMIT"]
 		self.rot_y_limit = data["Y_ROT_LIMIT"]

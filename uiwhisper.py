@@ -17,14 +17,35 @@ class WhisperButton(ui.Button):
 	def __del__(self):
 		ui.Button.__del__(self)
 
-	def SetToolTipText(self, text, x = 0, y = 32):
-		ui.Button.SetToolTipText(self, text, x, y)
+	def SetToolTipText(self, text, x = 0, y = 32, maxWidth = 0):
+		# The "tooltip" of these TOP_MOST letters is their permanent name label
+		# under the icon. It is a plain TextLine of its own: the registered
+		# "TEXT" tooltip factory may build a hover-only hint (R1), which stays
+		# empty when shown before the button itself is shown.
+		if not self.ToolTipText:
+			label = ui.TextLine()
+			if app.ENABLE_DUNGEON_INFO:
+				label.SetWindowName("not_render_tooltip")
+			label.SetParent(self)
+			label.SetSize(0, 0)
+			label.SetHorizontalAlignCenter()
+			if app.WJ_MULTI_TEXTLINE:
+				label.DisableEnterToken()
+			label.SetOutline()
+			label.AddFlag("not_pick")
+			label.SetPosition(x + self.GetWidth() // 2, y)
+			self.ToolTipText = label
+		self.ToolTipText.SetText(text)
+		if maxWidth > 0 and self.ToolTipText.GetTextSize()[0] > maxWidth:
+			shortened = text
+			while shortened and self.ToolTipText.GetTextSize()[0] > maxWidth:
+				shortened = shortened[:-1]
+				self.ToolTipText.SetText(shortened.rstrip() + "…")
 		self.ToolTipText.Show()
 
-	def SetToolTipTextWithColor(self, text, color, x = 0, y = 32):
-		ui.Button.SetToolTipText(self, text, x, y)
+	def SetToolTipTextWithColor(self, text, color, x = 0, y = 32, maxWidth = 0):
+		self.SetToolTipText(text, x, y, maxWidth)
 		self.ToolTipText.SetPackedFontColor(color)
-		self.ToolTipText.Show()
 
 	def ShowToolTip(self):
 		if 0 != self.ToolTipText:

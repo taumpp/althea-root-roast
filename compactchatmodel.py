@@ -7,6 +7,10 @@ import re
 import tempfile
 import time
 from urllib.parse import quote, unquote, urlsplit
+try:
+    import duelchallenge
+except ImportError:  # isolated model tests load this file alone
+    duelchallenge = None
 
 REAL_OPEN = getattr(builtins, 'old_open', builtins.open)
 MAX_TABS = 10
@@ -49,7 +53,7 @@ def web_url(value):
         host.encode('idna')
         if not re.fullmatch(r'[\w.\-:\[\]]+', host, re.UNICODE):
             return None
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, LookupError):
         return None
     return value
 
@@ -107,12 +111,33 @@ def linkify(value, system_links=False):
             if system_links and kind == "guildinvite":
                 from guildv2model import invitation_link_id
                 trusted_invite = invitation_link_id(link.group(1)) is not None
+            if system_links and kind == "duel":
+                # Duel challenge line: grey text once answered or expired.
+                result.append(duelchallenge.challenges.RenderLink(link.group(1), link.group(2))
+                              if duelchallenge else visible_text(link.group(2)))
+                continue
             result.append(part if kind in ('item', 'petitem', 'wiki') or trusted_invite else visible_text(link.group(2)))
         elif RICH.fullmatch(part):
             result.append(part)
         else:
             result.append(WEB.sub(substitute, part))
     return ''.join(result)
+
+
+def render_message(row, own_name, timestamps, channel, width, measure):
+    """One malformed rich message must not prevent input or other messages."""
+    try:
+        return wrap_rich(message_text(row, own_name, timestamps, channel), width, measure)
+    except Exception:
+        # Escape all rich-text delimiters. Never turn a failed formatter's input
+        # into an actionable item, player or external link.
+        plain = row[2].replace('|', '||').replace('\r', ' ').replace('\n', ' ')
+        return wrap_rich(plain, width, measure)
+
+
+def system_link_revision():
+    """Part of the rendered-line cache key: changes when a duel line's links do."""
+    return duelchallenge.challenges.Revision() if duelchallenge else None
 
 
 def format_outgoing(value, emoji_filter):
@@ -138,10 +163,14 @@ def message_text(row, own_name, timestamps, channel):
         prefix += '|cFFA49983[%s]|r ' % channel
     match = SENDER.match(raw) if network_player else None
     if match:
-        name, _, body = match.groups()
+        name, label, body = match.groups()
         kind, valid_name = link_target('chatplayer:' + quote(name, safe=''))
         if valid_name:
             sender = name if name.casefold() == own_name.casefold() else '|Hchatplayer:%s|h%s|h' % (quote(name, safe=''), name)
+            # The server supplies the current level inside the sender label.
+            level = re.fullmatch(r'(\[Lv\.[0-9]+\]) ' + re.escape(name), visible_text(label))
+            if level:
+                sender = level.group(1) + ' ' + sender
             return prefix + '|cFFE1C594' + sender + '|r: ' + linkify(body)
     return prefix + linkify(raw, system_links=not network_player)
 
@@ -151,6 +180,9 @@ def wrap_rich(value, width, measure):
 
     The native renderer supplies actual font/image widths. Splitting long links
     repeats the same destination, never fragments an item payload or image tag.
+    Every part of a link that fits on one line stays ONE hyperlink run: the
+    native renderer draws a space after each hyperlink run, so a run per word
+    turned "[Plátové brnění mnicha+9]" into "[Plátové   brnění   mnicha+9]".
     """
     width = max(8, width)
     lines, current, color = [], '', ''
@@ -161,30 +193,56 @@ def wrap_rich(value, width, measure):
             lines.append(current + ('|r' if color else ''))
         current = color
 
-    def append(piece, opening='', closing=''):
+    def append(piece):
+        # Images and the escaped "||" are atomic.
         nonlocal current
-        full = opening + piece + closing
-        if measure(current + full) <= width:
-            current += full
-            return
-        if visible_text(current).strip():
+        if measure(current + piece) > width and visible_text(current).strip():
             flush()
-        if measure(current + full) <= width or piece.startswith('|I'):
-            current += full
-            return
-        # An unbroken URL / item name can be wider than the viewport.
-        while piece:
-            low, high = 1, len(piece)
-            while low < high:
-                middle = (low + high + 1) // 2
-                if measure(current + opening + piece[:middle] + closing) <= width:
-                    low = middle
-                else:
-                    high = middle - 1
-            current += opening + piece[:low] + closing
-            piece = piece[low:]
-            if piece:
-                flush()
+        current += piece
+
+    def append_text(content, opening='', closing=''):
+        # Words of one text/link part accumulate in a single run per line.
+        nonlocal current
+        base, run, gap = current, '', ''
+
+        def line(text):
+            return base + (opening + text + closing if text else '')
+
+        def fits(text):
+            return measure(line(text)) <= width
+
+        def new_line():
+            nonlocal current, base, run, gap
+            current = line(run)
+            flush()
+            base, run, gap = current, '', ''
+
+        for piece in re.findall(r'\n|[^\S\n]+|[^\s]+', content):
+            if piece == '\n':
+                new_line()
+            elif piece.isspace():
+                if run or visible_text(base).strip():
+                    gap += piece
+            elif fits(run + gap + piece):
+                run, gap = run + gap + piece, ''
+            else:
+                if run or visible_text(base).strip():
+                    new_line()
+                # An unbroken URL / item name can be wider than the viewport.
+                while not fits(piece):
+                    low, high = 1, len(piece)
+                    while low < high:
+                        middle = (low + high + 1) // 2
+                        if fits(piece[:middle]):
+                            low = middle
+                        else:
+                            high = middle - 1
+                    run, piece = piece[:low], piece[low:]
+                    new_line()
+                run, gap = piece, ''
+        if gap and fits(run + gap):
+            run += gap
+        current = line(run)
 
     for part in RICH.split(value):
         if not part:
@@ -201,14 +259,7 @@ def wrap_rich(value, width, measure):
             match = LINK.match(part)
             opening, closing = ('|H' + match.group(1) + '|h', '|h') if match else ('', '')
             content = visible_text(match.group(2)) if match else part
-            content = content.replace('\\n', '\n')
-            for piece in re.findall(r'\n|[^\S\n]+|[^\s]+', content):
-                if piece == '\n':
-                    flush()
-                elif piece.isspace() and not visible_text(current).strip():
-                    continue
-                else:
-                    append(piece, opening, closing)
+            append_text(content.replace('\\n', '\n'), opening, closing)
     flush()
     return lines or ['']
 
@@ -255,15 +306,37 @@ def bounded_integer(value, low, high, default):
     return value if type(value) is int and low <= value <= high else default
 
 
-def chat_geometry(width, height, screen, anchor_x=None, anchor_bottom=None):
+TASKBAR_HEIGHT = 37             # TaskBar_Dominant_Orb.py: the bottom bar (quick slots, menu) at y = SCREEN_HEIGHT - 37
+MAX_TASKBAR_HEIGHT = 128        # a bar taller than this is not a bar: the authored height is used
+
+
+def taskbar_height(bar=None):
+    """Logical height of the bottom bar (the live TaskBar window, so a taller bar lifts the chat too), else the
+    authored 37. Every size is in the logical pixels of the interface scale (wndMgr.GetScreenHeight())."""
+    try:
+        height = int(bar.GetHeight())
+    except Exception:
+        return TASKBAR_HEIGHT
+    return height if 1 <= height <= MAX_TASKBAR_HEIGHT else TASKBAR_HEIGHT
+
+
+def chat_floor(screen, bar=TASKBAR_HEIGHT):
+    """The lowest edge the chat may reach: the top edge of the bottom bar. Neither the default place, nor a place
+    saved at another resolution or interface scale, nor a drag may put a chat row under the bar."""
+    return max(0, screen[1]-bar)
+
+
+def chat_geometry(width, height, screen, anchor_x=None, anchor_bottom=None, bar=TASKBAR_HEIGHT):
     sw, sh = screen
+    floor = chat_floor(screen, bar)
     if anchor_bottom is None:
-        baseline = max(0, sh-37)
+        baseline = floor
     else:
-        # Moving keeps the full window visible, including when dragged to the
-        # top edge or restored after a resolution change.
-        minimum = min(sh, max(180, min(height, 2160)))
-        baseline = max(minimum, min(anchor_bottom, sh))
+        # Moving keeps the full window visible above the bottom bar, including when dragged to the top edge or
+        # restored after a change of the resolution or the interface scale (the saved value stays untouched, so
+        # the old place comes back with the old screen).
+        minimum = min(floor, max(180, min(height, 2160)))
+        baseline = max(minimum, min(anchor_bottom, floor))
     width = max(min(MIN_CHAT_WIDTH, sw), min(width, sw, 3840))
     x = (sw-width)//2 if anchor_x is None else max(0, min(anchor_x, sw-min(MIN_CHAT_WIDTH, sw)))
     width = min(width, sw-x)

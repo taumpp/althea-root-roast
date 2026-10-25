@@ -19,6 +19,7 @@ import cube_renewal
 import uicrimsoncontrols
 import craftingmodel
 import dewcatalog
+import ownedcount
 import uicraftingcontrols as controls
 
 INK = 0xffe4d9c9
@@ -29,7 +30,28 @@ RED = 0xffefb197
 RULE = 0xff342d24
 WindowDestroy = getattr(ui, 'WindowDestroy', lambda function: function)
 GROUPS = {'WEAPON': 'Zbraně', 'ARMOR': 'Výzbroj', 'STONE': 'Kameny',
-          'BELT': 'Opasky', 'EVENT': 'Události', 'ETC': 'Ostatní'}
+          'BELT': 'Opasky', 'EVENT': 'Události', 'ETC': 'Ostatní',
+          'ACCESSORY': 'Šperky', 'PET': 'Mazlíčci'}
+# Font and colour of the original texts the R1 look restyles (root/uicraftingr1.py gives them back).
+LEGACY_LABELS = {'recipeCount': ('Tahoma:11', MUTED), 'name': ('Tahoma:14', INK), 'outputCount': ('Tahoma:12', MUTED),
+                 'materialCaption': ('Tahoma:12', GOLD), 'countCaption': ('Tahoma:11', MUTED),
+                 'chanceCaption': ('Tahoma:12', MUTED), 'chance': ('Tahoma:12', GOLD), 'cost': ('Tahoma:12', GOLD),
+                 'quantityLabel': ('Tahoma:11', MUTED), 'quantityCaption': ('Tahoma:12', MUTED)}
+
+
+def R1Safe(method):
+    """A redraw with the R1 look that raises falls back to the original look (traced) and runs again. The wrapper
+    takes *args: ui.__mem_func__ (which counts the arguments of the function) may wrap only a method without them."""
+    def run(self, *args, **kwargs):
+        if not getattr(self, 'r1', None):
+            return method(self, *args, **kwargs)
+        try:
+            return method(self, *args, **kwargs)
+        except Exception:
+            self._R1Failed()
+            return method(self, *args, **kwargs)
+    run.__name__ = method.__name__
+    return run
 
 
 class ChangeEdit(ui.EditLine):
@@ -45,6 +67,8 @@ class ChangeEdit(ui.EditLine):
 class MenuDismiss(ui.Window):
     def __init__(self, close):
         ui.Window.__init__(self, 'TOP_MOST')
+        # Native SetTop only raises windows carrying FLAG_FLOAT.
+        self.AddFlag('float')
         self.close = close
 
     def OnMouseLeftButtonDown(self):
@@ -56,7 +80,38 @@ class MenuDismiss(ui.Window):
         return True
 
 
+CURSOR_GAP = 24
+
+
+def RightOfCursor(mouse_x, mouse_y, width, height, screen_width, screen_height, gap=CURSOR_GAP):
+    """Top left of a crafting tooltip: right of the cursor (left of it when the screen ends), its top a little above
+    the cursor, kept on screen. The default item tooltip centres itself under the cursor, so over the recipe list it
+    lay on the very rows the player reads; its see-through R1 fill then mixed the row names into its own text."""
+    x = mouse_x + gap
+    if x + width > screen_width:
+        x = mouse_x - gap - width
+    y = mouse_y - 8
+    x = max(0, min(x, screen_width - width))
+    y = max(0, min(y, screen_height - height))
+    return int(x), int(y)
+
+
+class CraftingToolTip(uiToolTip.ItemToolTip):
+    """The item tooltip of the crafting window (result, recipe rows, materials): beside the cursor, not under it."""
+
+    def _UpdateFollowPosition(self):
+        if not self.followFlag:
+            return
+        mouse_x, mouse_y = wndMgr.GetMousePosition()
+        self.SetPosition(*RightOfCursor(mouse_x, mouse_y, self.GetWidth(), self.GetHeight(),
+                                        wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()))
+
+
 class CubeRenewalWindows(ui.ScriptWindow):
+    LEGACY_LABELS = LEGACY_LABELS
+    r1 = None
+    r1Failed = False
+
     def __init__(self):
         ui.ScriptWindow.__init__(self)
         self.AddFlag('movable')
@@ -97,11 +152,12 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.detailHeight = 304
         self.listContentHeight = 400
         self.detailContentHeight = 304
-        self.toolTip = uiToolTip.ItemToolTip()
+        self.toolTip = CraftingToolTip()
         self.toolTip.Hide()
         self.dismiss = MenuDismiss(ui.__mem_func__(self.CloseMenu))
         self.dismiss.Hide()
         self._Build()
+        self._LoadR1()
         cube_renewal.SetCubeRenewalHandler(self)
 
     def _Keep(self, child, parent, x, y, collection=None):
@@ -154,11 +210,11 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.board.SetSize(660, 556)
         self.board.SetTitleName(T('TITLE'))
         self.board.SetCloseEvent(ui.__mem_func__(self.Close))
-        self._Bar(self, 207, 35, 1, 501, RULE)
+        self.columnRule = self._Bar(self, 207, 35, 1, 501, RULE)
         self.categoryButton = self._FlatButton(self, 20, 36, 174, 25, T('ALL'),
                                                self.ToggleMenu, left=True)
         self.categoryButton.SetArrow(False)
-        self._Keep(controls.Field(174, 25), self, 20, 70)
+        self.searchBack = self._Keep(controls.Field(174, 25), self, 20, 70)
         self.search = self._Keep(ChangeEdit(ui.__mem_func__(self.Filter)), self, 28, 75)
         self.search.SetSize(158, 16)
         self.search.SetMax(40)
@@ -177,7 +233,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.listScroll.SetScrollEvent(ui.__mem_func__(self.ScrollList))
         self.listScroll.OnMouseWheel = ui.__mem_func__(self.OnListWheel)
         self.listScroll.Hide()
-        self._Bar(self, 20, 510, 174, 1, RULE)
+        self.listRule = self._Bar(self, 20, 510, 174, 1, RULE)
         self.recipeCount = self._Text(self, 20, 522, '', MUTED, 'Tahoma:11')
         self.heroBackground = self._Bar(self, 220, 36, 424, 56, 0xff11110f)
         self.name = self._Text(self, 272, 46, '', INK, 'Tahoma:14')
@@ -190,7 +246,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.checkArea.SetOnMouseLeftButtonUpEvent(ui.__mem_func__(self.ToggleUseAny))
         self.check = self._Keep(ui.Button(), self.checkArea, 0, 3)
         self.check.SetEvent(ui.__mem_func__(self.ToggleUseAny))
-        self._Text(self.checkArea, 21, 5, T('USE_ANY'))
+        self.checkLabel = self._Text(self.checkArea, 21, 5, T('USE_ANY'))
         self.checkArea.Hide()
         self.detailViewport = self._Keep(ui.Window(), self, 220, 129)
         self.detailViewport.SetSize(410, self.detailHeight)
@@ -204,18 +260,18 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.detailScroll.SetScrollEvent(ui.__mem_func__(self.ScrollDetail))
         self.detailScroll.OnMouseWheel = ui.__mem_func__(self.OnDetailWheel)
         self.detailScroll.Hide()
-        self._Bar(self, 220, 448, 424, 1, RULE)
+        self.footerRule = self._Bar(self, 220, 448, 424, 1, RULE)
         self.chanceCaption = self._Text(self, 220, 460, T('CHANCE'), MUTED)
         self.chance = self._Text(self, 263, 460, '', GOLD)
         self.cost = self._Text(self, 644, 460, '', GOLD)
         self.cost.SetHorizontalAlignRight()
         self.quantityLabel = self._Text(self, 220, 482, '', MUTED, 'Tahoma:11')
-        self._Text(self, 220, 513, T('QUANTITY'), MUTED)
-        self.minus = self._Button(self, 261, 507, '26x24', u'\u2212',
+        self.quantityCaption = self._Text(self, 220, 513, T('QUANTITY'), MUTED)
+        self.minus = self._Button(self, 261, 507, '26x24', u'-',
                                   lambda r=owner: r.SetAmount(r.amount-1))
         self.inputArea = self._Keep(ui.Window(), self, 290, 507)
         self.inputArea.SetSize(40, 24)
-        self._Keep(controls.Field(40, 24), self.inputArea, 0, 0)
+        self.inputBack = self._Keep(controls.Field(40, 24), self.inputArea, 0, 0)
         self.input = self._Keep(ChangeEdit(ui.__mem_func__(self.InputChanged)), self.inputArea, 4, 4)
         self.input.SetSize(32, 17)
         self.input.SetFontName('Tahoma:13')
@@ -232,8 +288,80 @@ class CubeRenewalWindows(ui.ScriptWindow):
                                       lambda r=owner: r.SetAmount(r.maximum))
         self.make = self._Button(self, 474, 507, '170x24', T('MAKE') % 1, self.Make)
         self.menu = self._Keep(ui.Window(), self.dismiss, 20, 62)
+        self.menu.AddFlag('float')
         self.CloseMenu()
         self._Controls()
+
+    # ------------------------------------------------------------------ the R1 look (root/uicraftingr1.py)
+    def _LoadR1(self):
+        """The R1 look drawn into this window unless Settings -> "Starý vzhled" chose the original look; a failure
+        traces to syserr and keeps the original look (not retried on every opening)."""
+        if self.r1 or self.r1Failed:
+            return
+        try:
+            import uir1
+            if not uir1.UseR1():
+                return
+            import uicraftingr1
+            self.r1 = uicraftingr1.CraftingSkin(self, controls.packed_color)
+        except Exception:
+            self.r1 = None
+            self.r1Failed = True
+            self._TraceR1()
+            return
+        self._Controls()
+        self.PaintCheckbox()
+
+    def _SyncLook(self):
+        """Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+        try:
+            import uir1
+            wanted = uir1.UseR1() and not self.r1Failed
+        except Exception:
+            wanted = False
+        if wanted and not self.r1:
+            self._LoadR1()
+        elif not wanted and self.r1:
+            self._DropR1()
+
+    def _DropR1(self):
+        r1, self.r1 = self.r1, None
+        if r1:
+            for collection in (self.rows, self.detail, self.menuRows):
+                self._Clear(collection)
+            r1.Restore()
+            self._Controls()
+            self.PaintCheckbox()
+
+    def _R1Failed(self):
+        self._TraceR1()
+        self.r1Failed = True
+        try:
+            self._DropR1()
+        except Exception:
+            self.r1 = None
+            self._TraceR1()
+
+    @staticmethod
+    def _TraceR1():
+        try:
+            import uir1
+            uir1.TraceFailure('the crafting window')
+        except Exception:
+            pass
+
+    def _SetTitle(self, title):
+        self.board.SetTitleName(title)
+        if self.r1:
+            self.r1.SetTitle(title)
+
+    def _Ink(self, color):
+        if self.r1:
+            return self.r1.Ink(color, (INK, MUTED, GOLD, GREEN, RED))
+        return controls.packed_color(color)
+
+    def _SlotBase(self, height=32):
+        return self.r1.SlotBase(height) if self.r1 else 'd:/ymir work/ui/slot.png'
 
     def _Clear(self, collection):
         # Native UI parenting requires a real window. Hide before releasing our
@@ -245,6 +373,9 @@ class CubeRenewalWindows(ui.ScriptWindow):
     def BINARY_CUBE_RENEWAL_LOADING(self):
         if self.destroyed:
             return
+        # A list resent under a request in flight replaces what that request named.
+        changed = self.IsShow() and bool(self.pending or self.quotePending)
+        capability = self._ResentCapability()
         # Invalidate the previous NPC before any rebuild can fail. Indices are
         # local to each NPC: index 0 at Soon is not index 0 at the alchemist.
         self._ResetCatalogue()
@@ -269,7 +400,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
                     getattr(item, 'USE_POTION_CONTINUE', -3)):
                 raw = 'POTION'
             recipe['group'] = dewcatalog.GROUPS.get(raw, {'POTION':'Lektvary'}.get(raw, GROUPS.get(raw, 'Ostatní')))
-            if raw in ('ARMOR','ETC') and item.GetItemType()==getattr(item,'ITEM_TYPE_ARMOR',-1):
+            if raw in ('ARMOR','ETC','ACCESSORY') and item.GetItemType()==getattr(item,'ITEM_TYPE_ARMOR',-1):
                 for subtype in ('BODY','HEAD','SHIELD','WRIST','FOOTS','NECK','EAR','GLOVE','PENDANT'):
                     if item.GetItemSubType()==getattr(item,'ARMOR_'+subtype,-1):
                         recipe['group']=T('ARMOR_'+subtype)
@@ -278,14 +409,40 @@ class CubeRenewalWindows(ui.ScriptWindow):
                 recipe['group']=T('COSTUMES')
             recipes.append(recipe)
         self.recipes = recipes
+        if capability and recipes and recipes[0]['npc'] == capability[0]:
+            self.selectionCapable = True
+            self.capNonce = capability[1]
         if self.IsDewCatalogue():
             # Open on every family the server sent (ALTHEA-627). Preselecting
             # the first family hid all other colours behind the menu.
-            self.board.SetTitleName('Výroba ros')
+            self._SetTitle('Výroba ros')
         else:
-            self.board.SetTitleName('Výroba • '+nonplayer.GetMonsterName(recipes[0]['npc'])
-                                    if recipes else 'Výroba')
+            self._SetTitle('Výroba | '+nonplayer.GetMonsterName(recipes[0]['npc'])
+                           if recipes else 'Výroba')
         self.Filter()
+        if changed:
+            self.resultUntil = app.GetTime()+4
+            self.resultText = T('LIST_CHANGED')
+            self._Controls()
+
+    @staticmethod
+    def ListAddressable():
+        ready = getattr(cube_renewal, 'IsListAddressable', None)
+        return ready is None or bool(ready())
+
+    @staticmethod
+    def IdList():
+        # CraftIdsV1: a list sent after the confirmation carries a generation and is addressed by
+        # recipe id; a list without one stays positional, also in an id-mode session.
+        return bool(hasattr(cube_renewal, 'GetIdMode') and hasattr(cube_renewal, 'GetGeneration')
+                    and cube_renewal.GetIdMode() and cube_renewal.GetGeneration())
+
+    def _ResentCapability(self):
+        # The server resends a changed id list into the open window without reopening it;
+        # the negotiated selection belongs to the NPC and survives. Otherwise Show negotiates again.
+        if self.IsShow() and self.selectionCapable and self.recipes and self.IdList():
+            return self.recipes[0]['npc'], self.capNonce
+        return None
 
     def IsDewCatalogue(self):
         return bool(self.recipes and self.recipes[0]['npc'] == dewcatalog.CATALOGUE)
@@ -316,13 +473,15 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.categoryButton.SetText(T('ALL'))
         self.search.SetText('')
         self.input.SetText('1')
-        self.board.SetTitleName('Výroba')
+        self._SetTitle('Výroba')
         for collection in (self.rows, self.detail, self.menuRows):
             self._Clear(collection)
         self.name.SetText(T('NO_RECIPES'))
         self.chance.SetText('')
         self.chanceCaption.Hide()
         self.cost.SetText('')
+        if self.r1:
+            self.r1.Cost(None)
         self.listScroll.Hide()
         self.detailScroll.Hide()
         self._Controls()
@@ -330,6 +489,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
     def Show(self):
         if self.destroyed:
             return
+        self._SyncLook()
         self.amount = 1
         self.input.SetText('1')
         self.pending = None
@@ -360,6 +520,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
             self.listScroll.SetPos(self.listScroll.GetPos()+delta*0.25)
             self.RenderList()
 
+    @R1Safe
     def RenderList(self, select_first=False):
         self._Clear(self.rows)
         needle = craftingmodel.search_key(self.search.GetText())
@@ -375,17 +536,26 @@ class CubeRenewalWindows(ui.ScriptWindow):
             row = self._Keep(ui.Window(), self.listContent, 0, y, self.rows)
             row.SetSize(160, height)
             row.OnMouseWheel = ui.__mem_func__(self.OnListWheel)
-            if self.selected and recipe['index']==self.selected['index']:
-                self._Bar(row, 0, 0, 160, height-2, 0xff302123, self.rows)
-                self._Bar(row, 0, 0, 2, height-2, 0xffa75059, self.rows)
+            selected = bool(self.selected and recipe['index']==self.selected['index'])
             callback = lambda value=recipe,r=owner: r.SelectRecipe(value)
-            self._Icon(row, recipe['vnum'], 6, 3, self.rows, callback)
-            text = self._Text(row, 46, (height-14)//2, '',
-                              INK if self.selected is recipe else MUTED, collection=self.rows)
-            self._Fit(text, recipe['name'], 110)
+            if self.r1:
+                band = self.r1.ListRow(row, recipe['name'], height, selected, self.rows)[0]
+                self._Icon(row, recipe['vnum'], 6, 3, self.rows, callback, band=band)
+            else:
+                if selected:
+                    self._Bar(row, 0, 0, 160, height-2, 0xff302123, self.rows)
+                    self._Bar(row, 0, 0, 2, height-2, 0xffa75059, self.rows)
+                self._Icon(row, recipe['vnum'], 6, 3, self.rows, callback)
+                text = self._Text(row, 46, (height-14)//2, '',
+                                  INK if self.selected is recipe else MUTED, collection=self.rows)
+                self._Fit(text, recipe['name'], 110)
             row.SetOnMouseLeftButtonUpEvent(callback)
-            row.OnMouseOverIn = lambda v=recipe['vnum'],r=owner: r.Tooltip(v)
-            row.OnMouseOverOut = ui.__mem_func__(self.HideTooltip)
+            if self.r1:
+                row.OnMouseOverIn = lambda v=recipe['vnum'],b=band,r=owner: r.HoverRow(b, True, v)
+                row.OnMouseOverOut = lambda b=band,r=owner: r.HoverRow(b, False)
+            else:
+                row.OnMouseOverIn = lambda v=recipe['vnum'],r=owner: r.Tooltip(v)
+                row.OnMouseOverOut = ui.__mem_func__(self.HideTooltip)
             y += height
         self.listContentHeight = max(self.listHeight,y)
         self.listContent.SetSize(160,self.listContentHeight)
@@ -395,21 +565,35 @@ class CubeRenewalWindows(ui.ScriptWindow):
             self.listScroll.SetPos(0)
         self.ScrollList()
 
-    def _Icon(self, parent, vnum, x, y, collection, selected=None, material_index=None):
+    def _Icon(self, parent, vnum, x, y, collection, selected=None, material_index=None, band=None):
         item.SelectItem(vnum)
         height = item.GetItemSize()[1]*32
         slot = self._Keep(ui.SlotWindow(), parent, x, y, collection)
         slot.SetSize(32, height)
         slot.AppendSlot(0, 0, 0, 32, height)
-        slot.SetSlotBaseImage('d:/ymir work/ui/slot.png', 1.0, 1.0, 1.0, 1.0)
+        slot.SetSlotBaseImage(self._SlotBase(height), 1.0, 1.0, 1.0, 1.0)
         slot.SetItemSlot(0, vnum, 0)
         owner = proxy(self)
-        slot.SetOverInItemEvent(lambda unused,r=owner: r.Tooltip(vnum, material_index))
-        slot.SetOverOutItemEvent(ui.__mem_func__(self.HideTooltip))
+        if band is not None:
+            # The R1 row keeps its hover band while the mouse is over its icon.
+            slot.SetOverInItemEvent(lambda unused,b=band,r=owner: r.HoverRow(b, True, vnum))
+            slot.SetOverOutItemEvent(lambda b=band,r=owner: r.HoverRow(b, False))  # OnOverOutItem passes no slot
+        else:
+            slot.SetOverInItemEvent(lambda unused,r=owner: r.Tooltip(vnum, material_index))
+            slot.SetOverOutItemEvent(ui.__mem_func__(self.HideTooltip))
         if selected:
             slot.SetSelectItemSlotEvent(lambda unused, callback=selected: callback())
         slot.RefreshSlot()
         return slot
+
+    def HoverRow(self, band, hovered, vnum=None):
+        """R1 recipe row under the mouse: the lighter band (the selected row keeps its well) and the tooltip."""
+        if band.state != 'selected':
+            band.SetState('hover' if hovered else 'normal')
+        if hovered:
+            self.Tooltip(vnum)
+        else:
+            self.HideTooltip()
 
     def SelectRecipe(self, recipe, redraw=True):
         if self.pending:
@@ -437,6 +621,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         if self.IsShow():
             self.RequestQuote()
 
+    @R1Safe
     def DrawDetail(self):
         self._Clear(self.detail)
         recipe = self.selected
@@ -445,6 +630,8 @@ class CubeRenewalWindows(ui.ScriptWindow):
             self.outputCount.SetText('')
             self.chance.SetText('')
             self.cost.SetText('')
+            if self.r1:
+                self.r1.Cost(None)
             self.chanceCaption.Hide()
             self.checkArea.Hide()
             self._Controls()
@@ -458,62 +645,87 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.heroBackground.SetSize(424,hero_height)
         self._Icon(self,recipe['vnum'],230,36+(hero_height-recipe['height'])//2,self.detail)
         self.outputCount.SetText(T('OUTPUT' if recipe['chance']==100 else 'OUTPUT_UPTO') % (recipe['count']*self.amount))
+        label = None
         if dew_info:
             dew,tier = dew_info
             value = dewcatalog.effective_value(dew['values'][tier],dewcatalog.player_rank())
-            label = self._Text(self,272,88,'',GOLD,'Tahoma:11',self.detail)
+            label = self.r1.DewLine(self.detail) if self.r1 else self._Text(self,272,88,'',GOLD,'Tahoma:11',self.detail)
             self._Fit(label,dew['effect']+' +%d%s' % (value,dew['unit']),362)
         top = 36+hero_height+37
-        self.materialCaption.SetPosition(220,top-23)
-        self.countCaption.SetPosition(628,top-21)
-        self.checkArea.SetPosition(335,top-26)
-        manual = any(self.ManualMaterial(i) for i,(v,n) in enumerate(recipe['materials']) if v and n)
-        self.checkArea.Show() if manual else self.checkArea.Hide()
-        self.PaintCheckbox()
-        self.countCaption.SetText(T('SELECTED_COUNTS') if manual and not self.useAny else T('COUNTS'))
-        self.detailHeight = 437-top
-        self.detailViewport.SetPosition(220,top)
-        self.detailViewport.SetSize(410,self.detailHeight)
-        self.detailScroll.SetPosition(632,top)
-        self.detailScroll.SetScrollBarSize(self.detailHeight)
-        y = 0
-        owner = proxy(self)
+        # the material rows are laid out first, so the R1 look knows whether they scroll before it
+        # sizes them (as wide as the result panel above, narrower only by the scroll bar).
+        self.detailHeight = (self.r1.DETAIL_BOTTOM if self.r1 else 437)-top
+        layout = []
         for index,(vnum,need) in enumerate(recipe['materials']):
             if not vnum or need<=0:
                 continue
             item.SelectItem(vnum)
             icon_height = item.GetItemSize()[1]*32
-            name = self.MaterialName(index,vnum)
             head = max(38,icon_height+6)
             rows = [row for row in self.basket.sources if row['material']==index]
             expanded = self.ManualMaterial(index) and not self.useAny
-            grid_rows = max(1,(len(rows)+1+5)//6)
+            # ALTHEA-688: expose the dust basket up front. This is a visual
+            # minimum; the negotiated server limit still owns selection capacity.
+            visible_sources = len(rows)+1
+            if stonecrafting.MaterialGroupKey(recipe['vnum'],vnum)=='STONE_CRAFT_OLD_LOW':
+                visible_sources = max(30,visible_sources)
+            grid_rows = max(1,(min(self.basket.limit,visible_sources)+5)//6)
             height = head+(grid_rows*(icon_height+4)+8 if expanded else 0)
+            layout.append((index,vnum,need,icon_height,head,rows,expanded,grid_rows,height))
+        row_width = self.r1.RowWidth(sum(entry[-1] for entry in layout),self.detailHeight) if self.r1 else 410
+        if self.r1:
+            self.r1.Hero(hero_height, label)
+            self.r1.Captions(top, row_width)
+        else:
+            self.materialCaption.SetPosition(220,top-23)
+            self.countCaption.SetPosition(628,top-21)
+            self.checkArea.SetPosition(335,top-26)
+        manual = any(self.ManualMaterial(i) for i,(v,n) in enumerate(recipe['materials']) if v and n)
+        self.checkArea.Show() if manual else self.checkArea.Hide()
+        self.PaintCheckbox()
+        self.countCaption.SetText(T('SELECTED_COUNTS') if manual and not self.useAny else T('COUNTS'))
+        self.detailViewport.SetPosition(220,top)
+        self.detailViewport.SetSize(row_width,self.detailHeight)
+        if not self.r1:
+            self.detailScroll.SetPosition(632,top)
+        self.detailScroll.SetScrollBarSize(self.detailHeight)
+        y = 0
+        owner = proxy(self)
+        icon_x = self.r1.ROW_ICON_X if self.r1 else 8
+        for index,vnum,need,icon_height,head,rows,expanded,grid_rows,height in layout:
+            item.SelectItem(vnum)
+            name = self.MaterialName(index,vnum)
             parent = self._Keep(ui.Window(),self.detailContent,0,y,self.detail)
-            parent.SetSize(410,height)
+            parent.SetSize(row_width,height)
             parent.OnMouseWheel = ui.__mem_func__(self.OnDetailWheel)
             have = self.owned[index]
             required = need*self.amount
-            self._Bar(parent,0,0,410,height-2,0xff11110f if have>=required else 0xff201510,self.detail)
+            if self.r1:
+                self.r1.MaterialRow(parent,row_width,height,head,self.detail)
+            else:
+                self._Bar(parent,0,0,410,height-2,0xff11110f if have>=required else 0xff201510,self.detail)
             drop = lambda i=index,r=owner: r.DropMaterial(i)
-            slot = self._Icon(parent,vnum,8,(head-icon_height)//2,self.detail,
+            slot = self._Icon(parent,vnum,icon_x,(head-icon_height)//2,self.detail,
                               drop if self.ManualMaterial(index) else None,index)
             if self.ManualMaterial(index):
                 slot.SetSelectEmptySlotEvent(lambda unused,i=index,r=owner:r.DropMaterial(i))
-            label = self._Text(parent,49,(head-14)//2,'',INK,collection=self.detail)
-            self._Fit(label,name,240)
-            count = self._Text(parent,400,(head-14)//2,
-                              self.ShortCount(have)+' / '+self.ShortCount(required),
-                              GREEN if have>=required else RED,collection=self.detail)
-            count.SetHorizontalAlignRight()
+            counts = ownedcount.Text(have, required)     # the one "owned / need" (root/ownedcount.py); have = the server's quote
+            if self.r1:
+                self.r1.MaterialTexts(parent,head,name,counts,have>=required,self.detail)
+            else:
+                label = self._Text(parent,49,(head-14)//2,'',INK,collection=self.detail)
+                self._Fit(label,name,240)
+                count = self._Text(parent,400,(head-14)//2,counts,
+                                  ownedcount.GREEN if have>=required else ownedcount.SHORT,collection=self.detail)
+                count.SetHorizontalAlignRight()
             if expanded:
-                for cell in range(grid_rows*6):
+                for cell in range(min(self.basket.limit,grid_rows*6)):
                     source = rows[cell] if cell<len(rows) else None
                     grid = self._Keep(ui.SlotWindow(),parent,10+(cell%6)*36,
                                      head+3+(cell//6)*(icon_height+4),self.detail)
                     grid.SetSize(32,icon_height)
                     grid.AppendSlot(0,0,0,32,icon_height)
-                    grid.SetSlotBaseImage('d:/ymir work/ui/slot.png',1.,1.,1.,1.)
+                    grid.SetSlotBaseImage(self._SlotBase(icon_height),1.,1.,1.,1.)
                     if source:
                         grid.SetItemSlot(0,source['vnum'],source['count'] if source['count']>1 else 0)
                         grid.SetSelectItemSlotEvent(lambda unused,row=source,i=index,r=owner:r.ClickSource(row,i))
@@ -525,12 +737,15 @@ class CubeRenewalWindows(ui.ScriptWindow):
                     grid.RefreshSlot()
             y += height
         self.detailContentHeight = max(self.detailHeight,y)
-        self.detailContent.SetSize(410,self.detailContentHeight)
+        self.detailContent.SetSize(row_width,self.detailContentHeight)
         self.LayoutScroll(self.detailScroll,self.detailContentHeight,self.detailHeight)
         self.ScrollDetail()
         self.chance.SetText('%d %%' % recipe['chance'])
         self.cost.SetText('{:,} Yang'.format(recipe['gold']*self.amount).replace(',', ' '))
-        self.cost.SetPackedFontColor(controls.packed_color(GOLD if recipe['gold']*self.amount<=self.gold else RED))
+        self.cost.SetPackedFontColor(self._Ink(GOLD if recipe['gold']*self.amount<=self.gold else RED))
+        if self.r1:
+            self.r1.Cost(recipe['gold']*self.amount, recipe['gold']*self.amount<=self.gold)
+            self.r1.PlaceChance()
         self._Controls()
 
     def _DrawExtendedDetail(self, recipe, materials):
@@ -538,11 +753,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
 
     @staticmethod
     def ShortCount(count):
-        if count >= 1000000:
-            return ('%.1fM' % (count/1000000.0)).replace('.', ',')
-        if count >= 10000:
-            return ('%.1fk' % (count/1000.0)).replace('.', ',')
-        return str(count)
+        return ownedcount.Short(count)
 
     def SetAmount(self, value):
         if self.pending:
@@ -566,7 +777,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.input.KillFocus()
 
     def RequestQuote(self):
-        if not self.selected or self.pending or self.quotePending or not self.IsShow():
+        if not self.ListAddressable() or not self.selected or self.pending or self.quotePending or not self.IsShow():
             return
         if self.basket.prune(self.InventorySource):
             self.selectionNonce = 0
@@ -578,7 +789,11 @@ class CubeRenewalWindows(ui.ScriptWindow):
         if self.selectionCapable and not self.useAny:
             if not self.selectionNonce:
                 self.selectionNonce = self.nonce
-                net.SendChatPacket('/cube select_begin %d %d' % (self.selected['wire_index'],self.selectionNonce))
+                if self.IdList():
+                    net.SendChatPacket('/cube select_begin %d %d %d' % (
+                        self.selected['wire_index'],self.selectionNonce,cube_renewal.GetGeneration()))
+                else:
+                    net.SendChatPacket('/cube select_begin %d %d' % (self.selected['wire_index'],self.selectionNonce))
                 for row in self.basket.sources:
                     net.SendChatPacket('/cube select_add %d %d %d %d %d %d' %
                         (self.selectionNonce,row['window'],row['cell'],row['vnum'],row['count'],row['id']))
@@ -613,7 +828,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self.input.SetPosition((40-width)//2, max(0,(24-self.input.GetTextSize()[1])//2))
         self.input.SetSize(max(1, width), 17)
         ready = self.selected is not None and self.quoteAt>0 and app.GetTime()-self.quoteAt<3 and not self.pending
-        self.maxButton.SetText('Max: %d' % self.maximum if self.quoteAt else 'Max: …')
+        self.maxButton.SetText('Max: %d' % self.maximum if self.quoteAt else 'Max: ...')
         self.make.SetText(T('WAIT') if self.pending else T('MAKE') % self.amount)
         for control, enabled in ((self.minus,ready and self.amount>1), (self.plus,ready and self.amount<self.maximum),
                                  (self.maxButton,ready and self.maximum>0)):
@@ -626,11 +841,11 @@ class CubeRenewalWindows(ui.ScriptWindow):
         if make_enabled != self.makeEnabled:
             self.make.Enable() if make_enabled else self.make.Disable()
             self.makeEnabled = make_enabled
-        if not self.selected:
-            self.quantityLabel.SetText('Počet kusů')
-            return
         if self.resultUntil > app.GetTime():
             label = self.resultText
+        elif not self.selected:
+            self.quantityLabel.SetText('Počet kusů')
+            return
         elif self.selected.get('level', 0) and player.GetStatus(player.LEVEL) < self.selected['level']:
             label = u'Vy\u017eaduje \u00farove\u0148 %d.' % self.selected['level']
         elif self.quoteAt and self.maximum == 0:
@@ -642,6 +857,8 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self._Fit(self.quantityLabel, label, 272)
 
     def Make(self):
+        if not self.ListAddressable():
+            return
         self.CommitInput()
         if self.pending or not self.selected or self.maximum<self.amount or not self.quoteAt or app.GetTime()-self.quoteAt>=3:
             return
@@ -677,6 +894,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
     def BINARY_CUBE_RENEWAL_UPDATE(self):
         self.nextQuote = 0
 
+    @R1Safe
     def ToggleMenu(self):
         if self.pending:
             return
@@ -686,13 +904,20 @@ class CubeRenewalWindows(ui.ScriptWindow):
         self._Clear(self.menuRows)
         groups = ['']+([d['name_cz'] for d in dewcatalog.DEWS] if self.IsDewCatalogue()
                        else sorted(set(r['group'] for r in self.recipes)))
+        if self.r1:
+            self._OpenMenu(self.r1.Menu(self.menu, groups, self.category,
+                                        [sum(not group or r['group']==group for r in self.recipes) for group in groups],
+                                        ui.__mem_func__(self.SelectCategory), self.menuRows))
+            return
         self.menu.SetSize(151, len(groups)*26+7)
         self._Bar(self.menu, 0, 0, 151, len(groups)*26+7, 0xff171410, self.menuRows)
         self.menuRows.extend(controls.border(self.menu, 151, len(groups)*26+7, 0xff806a48))
+        # ToggleMenu runs through __mem_func__, so self can already be a proxy.
+        select = ui.__mem_func__(self.SelectCategory)
         for i, group in enumerate(groups):
             count = sum(not group or r['group']==group for r in self.recipes)
             row = self._FlatButton(self.menu, 3, 4+i*26, 145, 25, '',
-                                   lambda g=group,r=proxy(self): r.SelectCategory(g), self.menuRows,
+                                   lambda g=group,select=select: select(g), self.menuRows,
                                    framed=False)
             row.SetSelected(group == self.category)
             self._Text(row, 21, 5, group or 'Vše', INK if group==self.category else MUTED,
@@ -702,12 +927,16 @@ class CubeRenewalWindows(ui.ScriptWindow):
             total.SetHorizontalAlignRight()
             if group == self.category:
                 self._Text(row, 4, 4, '✓', GOLD, collection=self.menuRows)
+        self._OpenMenu(len(groups)*26+7)
+
+    def _OpenMenu(self, height):
         self.dismiss.SetSize(wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight())
         self.dismiss.Show()
         self.dismiss.SetTop()
         x, y = self.GetGlobalPosition()
-        self.menu.SetPosition(max(0, min(x+20, wndMgr.GetScreenWidth()-151)),
-                              max(0, min(y+62, wndMgr.GetScreenHeight()-self.menu.GetHeight())))
+        width = self.menu.GetWidth()
+        self.menu.SetPosition(max(0, min(x+20, wndMgr.GetScreenWidth()-width)),
+                              max(0, min(y+62, wndMgr.GetScreenHeight()-height)))
         self.menu.Show()
         self.menu.SetTop()
         self.categoryButton.SetArrow(True)
@@ -733,9 +962,10 @@ class CubeRenewalWindows(ui.ScriptWindow):
             self.toolTip.AlignHorizonalCenter()
             self.toolTip.ShowToolTip()
         else:
-            self.toolTip.SetItemToolTip(vnum)
+            # Recipe results and materials are the player's own.
+            self.toolTip.SetItemToolTip(vnum, ownPreview=True)
         if self.selected and material_index is not None:
-            self.toolTip.AutoAppendTextLine('Mám %d / potřebuji %d' % (self.owned[material_index], self.selected['materials'][material_index][1]*self.amount))
+            self.toolTip.AutoAppendTextLine('Máš / potřeba: %s' % ownedcount.Tagged(self.owned[material_index], self.selected['materials'][material_index][1]*self.amount))
             self.toolTip.AlignTextLineHorizonalCenter()
             self.toolTip.ShowToolTip()
         elif self.selected and vnum == self.selected['vnum'] and self.selected['copy']:
@@ -753,7 +983,7 @@ class CubeRenewalWindows(ui.ScriptWindow):
         now = app.GetTime()
         if self.pending:
             if now-self.pending[1]>10:
-                self.quantityLabel.SetText('Čekám na výsledek. Znovu otevři výrobu.')
+                self.quantityLabel.SetText('Výsledek ještě nedorazil. Otevři výrobu znovu.')
             return
         if self.quotePending and now-self.quotePending[1]>4:
             self.quotePending = None
@@ -784,6 +1014,8 @@ class CubeRenewalWindows(ui.ScriptWindow):
             return
         self.Close()
         self.destroyed = True
+        if self.r1:
+            self._DropR1()
         self.listScroll.Destroy()
         self.detailScroll.Destroy()
         self.controlEnabled.clear()
@@ -853,6 +1085,9 @@ class CubeRenewalWindows(ui.ScriptWindow):
         return item.GetItemName()
 
     def PaintCheckbox(self):
+        if self.r1:
+            self.r1.PaintCheck(self.useAny, self.selectionCapable and not self.pending)
+            return
         path='d:/ymir work/ui/game/crimson_ember/gameoption/checkbox_'
         state='selected' if self.useAny else 'unselected'
         self.check.SetUpVisual(path+state+'.tga')
@@ -898,10 +1133,35 @@ class CubeRenewalWindows(ui.ScriptWindow):
         required=self.selected['materials'][index][0]
         if mouse.GetAttachedItemIndex()!=vnum or vnum not in stonecrafting.MaterialVnums(self.selected['vnum'],required):
             return
-        if self.basket.add(player.INVENTORY,cell,vnum,count,index):
-            self.useAny=False
+        if self.AddMaterialSource(index,cell,vnum,count):
             mouse.DeattachObject()
-            self.SelectionChanged()
+
+    def AddMaterialSource(self, index, cell, vnum, count):
+        if not self.basket.add(player.INVENTORY,cell,vnum,count,index):
+            return False
+        self.useAny=False
+        self.SelectionChanged()
+        return True
+
+    def TryAddInventoryItem(self, cell):
+        if self.destroyed or not self.IsShow() or not self.selected or not self.selectionCapable:
+            return False
+        if not IsInventorySource(player.SLOT_TYPE_INVENTORY,cell):
+            return False
+        vnum,count=self.InventorySource(player.INVENTORY,cell)
+        if not vnum or count<=0:
+            return False
+        for index,(required,need) in enumerate(self.selected['materials']):
+            if self.ManualMaterial(index) and vnum in stonecrafting.MaterialVnums(self.selected['vnum'],required):
+                # A duplicate/full basket or an in-flight craft consumes the
+                # click as well, so it cannot fall through to item use.
+                if not self.pending:
+                    self.AddMaterialSource(index,cell,vnum,count)
+                return True
+        # ManualMaterial selects a prototype; preserve the caller's item-use
+        # context when this click is not a crafting ingredient.
+        item.SelectItem(vnum)
+        return False
 
     def ClickSource(self, row, index):
         if mouseModule.mouseController.isAttached():

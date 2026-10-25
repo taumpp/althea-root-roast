@@ -4,17 +4,27 @@ import dbg
 import grp
 import item
 import itembonuspresentation
+import characterbonuses
+import bonussources
 import resonanceuihelpers
 import background
 import miniMap
 import chr
 import chrmgr
 import player
+import servergamedata
+import dungeonequipmentbinding
 import snd
 import chat
-from switchbotoptions import options as switchbotOptions, instantOptions
+from switchbotoptions import options as switchbotOptions, instantOptions, memory as switchbotMemory
 from bonuscatalog import receiver as bonusCatalog
 import featureavailability
+import npcsellprice
+import attrchangecount
+import growthpetpresentation
+import duelchallenge
+import meteorpresentation
+import dropsort
 import textTail
 import snd
 import net
@@ -39,6 +49,7 @@ import uiScriptLocale
 import uiCommon
 import uiPhaseCurtain
 import uiMapNameShower
+import maparrivalnames
 import uiAffectShower
 import uiPvMPersonal
 import uiPlayerGauge
@@ -58,9 +69,13 @@ import playerSettingModule
 import interfaceModule
 import skilltreeruntime
 import dungeonobjectivemodel
+import inputguardapi
 import petalbumstate
 import keybindings
 import uiwarpstate
+import uidungeonrejoin
+import uiguildportallobby
+import uiunstuck
 
 import musicInfo
 import debugInfo
@@ -88,6 +103,10 @@ if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 if app.ENABLE_DROP_INFO_WINDOW:
 	import uiDropInfo
 
+# Show consumed dungeon tickets in the R1 notice.
+import ticketnoticemodel
+import uiticketnotice
+
 from _weakref import proxy
 
 # TEXTTAIL_LIVINGTIME_CONTROL
@@ -103,9 +122,16 @@ cameraHeight = 100.0
 testAlignment = 0
 
 class GameWindow(ui.ScriptWindow):
+	# Wall-clock length of the arrival reveal once the main actor exists. The
+	# former 0.03 alpha per frame took ~0.55 s at 60 FPS and longer when slow.
+	INITIAL_WORLD_REVEAL_SECONDS = 0.15
+
 	def __init__(self, stream):
+		dropsort.ResetOrder()
 		ui.ScriptWindow.__init__(self, "GAME")
 		self.SetWindowName("game")
+		self.level104PassageClosed = False
+		self.level104PassageHud = None
 		self.AddFlag("game_surface")
 		net.SetPhaseWindow(net.PHASE_WINDOW_GAME, self)
 		if app.ENABLE_OFFLINE_SHOP:
@@ -114,6 +140,8 @@ class GameWindow(ui.ScriptWindow):
 		resonanceuihelpers.ClearSealValues()
 		# The phase router constructs us before closing a pending old window.
 		# Do not touch that window's live album or send requests until Open.
+		self.meteorProtection = meteorpresentation.ProtectionState()
+		self.meteorToolTip = None
 		self.petAlbumOwner = object()
 		self.petAlbumReady = False
 		self.petAlbumOffer = None
@@ -131,6 +159,7 @@ class GameWindow(ui.ScriptWindow):
 
 		self.guildWarQuestionDialog = None
 		self.dungeonRejoinDialog = None
+		self.guildPortal = None
 		self.interface = None
 		self.keybindingManager = None
 		self.skillTreeRuntime = None
@@ -140,6 +169,17 @@ class GameWindow(ui.ScriptWindow):
 		self.warpUIRestoreLoaded = False
 		self.warpUIRestoreState = None
 		self.warpUIRestoreDeadline = 0.0
+		# Seamless warp: this window survives the reconnect (see
+		# OnSeamlessWarpLeave/OnSeamlessWarpArrive); True until the
+		# destination's ENTERGAME was sent.
+		self.seamlessWarping = False
+		self.dungeonBindingOwner = object()
+		self.dungeonBindingClosed = False
+		self.dungeonBindingReady = False
+		self.dungeonBindingOffered = False
+		self.craftIdsOffered = False
+		self.craftIdsAnswered = False
+		self.craftIdsRequested = False
 
 		self.console = None
 		self.mapNameShower = None
@@ -169,6 +209,9 @@ class GameWindow(ui.ScriptWindow):
 
 		if app.ENABLE_QUEST_OPTION:
 			interfaceModule.IsQBHide = not systemSetting.GetQuestModeOption()
+		# The persistent letters (Trvalé / Denní úkoly) were made in
+		# MakeInterface, before the saved Ctrl+Q state was read.
+		self.interface.ApplyQuestButtonVisibility()
 
 		self.curtain = uiPhaseCurtain.PhaseCurtain()
 		self.curtain.speed = 0.03
@@ -176,6 +219,12 @@ class GameWindow(ui.ScriptWindow):
 		self.initialWorldRevealPending = False
 		self.initialWorldRevealStableUpdates = 0
 		self.initialWorldRevealDayMode = None
+		# Temporary restriction and sanctioned-automation flags
+		# (docs/FEATURE_INVARIANTS.md, "InputGuard v1").
+		self.inputGuardSyncFailed = False
+		self.inputGuardHoverProbe = inputguardapi.HoverProbe(wndMgr.GetMousePosition)
+		self.inputGuardSwitchbotProbe = self.__CreateSwitchbotProbe()
+		self.__BindInputGuard()
 
 		self.targetBoard = uiTarget.TargetBoard()
 		self.targetBoard.SetWhisperEvent(ui.__mem_func__(self.interface.OpenWhisperDialog))
@@ -221,12 +270,12 @@ class GameWindow(ui.ScriptWindow):
 
 		if app.ENABLE_DROP_INFO_WINDOW:
 			self.wndDropInfo = None
+		self.ticketNotice = None
 
 		self.partyRequestQuestionDialog = None
 		self.partyInviteQuestionDialog = None
 		if app.ENABLE_AUTO_PICKUP:
 			self.lastAutoPickupTime = 0
-			osfInfo.LoadPickupConfig()
 
 	def __del__(self):
 		player.SetGameWindow(0)
@@ -259,6 +308,13 @@ class GameWindow(ui.ScriptWindow):
 			self.initialWorldRevealStableUpdates = 0
 			return
 
+		# A created actor may still be waiting for its streamed ground height.
+		# Older executables retain the existing actor-presence fallback.
+		groundReady = getattr(player, "IsMainCharacterGroundReady", None)
+		if groundReady and not groundReady():
+			self.initialWorldRevealStableUpdates = 0
+			return
+
 		self.initialWorldRevealStableUpdates += 1
 		if self.initialWorldRevealStableUpdates < 2:
 			return
@@ -268,11 +324,27 @@ class GameWindow(ui.ScriptWindow):
 		self.initialWorldRevealDayMode = None
 		if pendingDayMode is not None:
 			self.__PRESERVE_DayMode_Update(pendingDayMode)
-		self.curtain.FadeIn()
+		self.curtain.FadeIn(self.INITIAL_WORLD_REVEAL_SECONDS)
 
 	def Open(self):
+		growthpetpresentation.ClearGrowthPreview()
+		# The server replays every duel state on entering the game.
+		duelchallenge.challenges.EnterGame()
+		# A new game session forgets the AFK pause cause and zone list of the previous server.
+		import uiafkrewardshop
+		uiafkrewardshop.SetCause(0)
+		uiafkrewardshop.SetZones(None)
+		self.__ResetCraftIdsOffer()
+		# The server of this session sends its own sale terms (EconomyViewV1).
+		npcsellprice.Reset()
+		attrchangecount.Reset()
+		if app.ENABLE_AUTO_PICKUP:
+			osfInfo.LoadPickupConfig()
 		itembonuspresentation.totals.BeginSession(app.GetTime, net.SendChatPacket)
+		characterbonuses.totals.BeginSession(app.GetTime, net.SendChatPacket)
+		bonussources.server.BeginSession(app.GetTime, net.SendChatPacket)
 		itembonuspresentation.SetTalentWeaponPercent(0)
+		itembonuspresentation.SetTalentDurationPercents(0, 0)
 		app.SetFrameSkip(1)
 
 		self.SetSize(wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight())
@@ -339,7 +411,9 @@ class GameWindow(ui.ScriptWindow):
 		exchange.InitTrading()
 		# END_OF_UNKNOWN_UPDATE
 
-		if debugInfo.IsDebugMode() or osfInfo.IsDebugMode():
+		# The engine debug overlay (coordinates, FPS, "MousePosition" at the top right) only with the explicit
+		# osfInfo.DEBUG_MODE switch: a non-_DISTRIBUTE build (__DEBUG__) showed it to testers over the windows.
+		if osfInfo.IsDebugMode():
 			self.ToggleDebugInfo()
 
 		## Sound
@@ -361,6 +435,10 @@ class GameWindow(ui.ScriptWindow):
 		app.ShowCursor()
 
 		net.SendEnterGamePacket()
+		if self.interface:
+			# craft contracts of the Denní úkoly window: only after ENTERGAME, the server drops them before
+			self.interface.RequestCraftContractsAfterEnter()
+		self.__StartDungeonEquipmentBindingSession()
 		self.__OpenPetAlbumSession()
 		self.dungeonObjectiveSubscription.start()
 		self.skillTreeRuntime.Start()
@@ -407,9 +485,27 @@ class GameWindow(ui.ScriptWindow):
 		mouseModule.mouseController.CreateNumberLine()
 
 	def Close(self):
+		dropsort.ResetOrder()
+		uiunstuck.controller.Reset()
+		self.level104PassageClosed = True
+		if getattr(self, "level104PassageHud", None) is not None:
+			self.level104PassageHud.Destroy()
+			self.level104PassageHud = None
+		if getattr(self, "serviceItemWindow", None):
+			self.serviceItemWindow.Destroy()
+			self.serviceItemWindow = None
+		self.dungeonBindingClosed = True
+		self.__StopDungeonEquipmentBindingSession()
+		self.meteorProtection.clear()
+		if self.meteorToolTip:
+			self.meteorToolTip.Destroy()
+			self.meteorToolTip = None
 		self.__ClosePetAlbumSession()
 		itembonuspresentation.totals.EndSession()
+		characterbonuses.totals.EndSession()
+		bonussources.server.EndSession()
 		itembonuspresentation.SetTalentWeaponPercent(0)
+		itembonuspresentation.SetTalentDurationPercents(0, 0)
 		self.Hide()
 		self.dungeonObjectiveSubscription.stop()
 		if self.pvmPersonal:
@@ -454,6 +550,7 @@ class GameWindow(ui.ScriptWindow):
 		if self.guildWarQuestionDialog:
 			self.guildWarQuestionDialog.Close()
 		self.__CloseDungeonRejoinDialog()
+		self.__DestroyGuildPortal()
 		if self.buffiNameInputDialog:
 			self.buffiNameInputDialog.Close()
 			self.buffiNameInputDialog = None
@@ -506,6 +603,9 @@ class GameWindow(ui.ScriptWindow):
 		self.keybindingManager = None
 		keybindings.SetManager(None)
 
+		self.inputGuardHoverProbe.Disable()
+		inputguardapi.ClearAutomation()
+
 		if self.interface:
 			self.interface.HideAllWindows()
 			self.interface.Close()
@@ -532,6 +632,9 @@ class GameWindow(ui.ScriptWindow):
 			if self.wndDropInfo:
 				self.wndDropInfo.Hide()
 			del self.wndDropInfo
+		if self.ticketNotice:
+			self.ticketNotice.Destroy()
+			self.ticketNotice = None
 
 		if app.ENABLE_BIOLOG_SYSTEM:
 			self.loopList = []
@@ -551,6 +654,406 @@ class GameWindow(ui.ScriptWindow):
 
 		mouseModule.mouseController.Destroy()
 		#print "---------------------------------------------------------------------------- CLOSE GAME WINDOW"
+
+	################################
+	# Seamless warp (networkModule.MainStream hooks)
+	#
+	# The legacy warp destroys this window in Close() and builds a new one in
+	# the destination's game phase. With the server warp curtain the EXE keeps
+	# it: Leave runs the per-session half of Close() and Arrive the per-session
+	# half of Open(), while the curtain covers the world. Windows the player
+	# had open come back through the same uiwarpstate allowlist as before.
+	# Every step is isolated: a failing window must not stop the warp.
+
+	def __SeamlessStep(self, name, function, *args):
+		try:
+			function(*args)
+		except Exception as error:
+			dbg.TraceError("[SeamlessWarp] %s failed: %s" % (name, error))
+
+	def IsSeamlessWarping(self):
+		return self.seamlessWarping
+
+	def __IsWarpInputLocked(self):
+		if self.seamlessWarping:
+			return True
+		locked = getattr(self.stream, "IsWarpCurtainInputLocked", None)
+		return bool(locked and locked())
+
+	# InputGuard v1 ---------------------------------------------------------
+	# The server alone opens and closes the temporary restriction through
+	# BINARY_InputGuardPenalty; nothing here remembers it across a warp.
+
+	def __InputGuardSystem(self):
+		interface = self.interface
+		return getattr(interface, "inputGuardSystem", None) if interface else None
+
+	def __BindInputGuard(self):
+		system = self.__InputGuardSystem()
+		if system:
+			system.BindGameWindow(ui.__mem_func__(self.__IsOtherCurtainActive),
+				ui.__mem_func__(self.__OnInputGuardLock))
+
+	def __IsOtherCurtainActive(self):
+		# One curtain at a time: the warp curtain, the phase curtain and
+		# this window's own reveal/day-mode curtain all go first.
+		stream = self.stream
+		warpActive = getattr(stream, "IsWarpCurtainActive", None)
+		if warpActive and warpActive():
+			return True
+		if self.curtain and self.curtain.IsShow():
+			return True
+		phaseCurtain = getattr(stream, "curtain", None)
+		return bool(phaseCurtain and phaseCurtain.IsShow())
+
+	def __IsInputGuardLocked(self):
+		system = self.__InputGuardSystem()
+		return bool(system and system.IsInputLocked())
+
+	def __OnInputGuardLock(self, locked):
+		if not locked:
+			return
+		# Same release as a warp: nothing stays held under the curtain.
+		self.__ReleaseWarpKeys()
+		mouseModule.mouseController.DeattachObject()
+		interface = self.interface
+		if not interface:
+			return
+		if interface.wndChat and interface.wndChat.IsEditMode():
+			interface.wndChat.CloseChat()
+		if interface.dlgSystem:
+			interface.dlgSystem.Close()
+
+	def __CreateSwitchbotProbe(self):
+		if not getattr(app, "ENABLE_SWITCHBOT_SYSTEM", 0):
+			return None
+		try:
+			import switchbot
+			return inputguardapi.SwitchbotProbe(switchbot.IsActive, switchbot.SLOT_COUNT,
+				instantOptions.IsActive)
+		except Exception:
+			return None
+
+	def __IsAutoAttackActive(self):
+		interface = self.interface
+		for name in ("wndAutoHunting", "wndAutoWindow"):
+			window = getattr(interface, name, None)
+			if window and window.GetAutoStartonoff():
+				return True
+		return False
+
+	def __UpdateInputGuard(self):
+		"""Mark the sanctioned automations content can see for the EXE."""
+		if self.inputGuardSyncFailed or not inputguardapi.HasAutomationApi():
+			return
+		try:
+			now = app.GetTime()
+			interface = self.interface
+			setAutomation = inputguardapi.SetAutomation
+			queueCount = getattr(player, "GetMetinQueueCount", None)
+			setAutomation(inputguardapi.AUTOMATION_METIN_QUEUE,
+				bool(queueCount and queueCount() > 0))
+			setAutomation(inputguardapi.AUTOMATION_AUTO_PICKUP,
+				bool(app.ENABLE_AUTO_PICKUP and osfInfo.AUTOPICKUP_ENABLED))
+			setAutomation(inputguardapi.AUTOMATION_QUICK_BUFF,
+				bool(interface and interface.IsQuickBuffBusy()))
+			setAutomation(inputguardapi.AUTOMATION_AUTO_ATTACK, self.__IsAutoAttackActive())
+			probe = self.inputGuardSwitchbotProbe
+			if probe:
+				setAutomation(inputguardapi.AUTOMATION_SWITCHBOT, probe.Update(now))
+			self.inputGuardHoverProbe.Update(now, interface)
+		except Exception as error:
+			self.inputGuardSyncFailed = True
+			inputguardapi.ClearAutomation()
+			dbg.TraceError("[IG1] automation flags disabled: %s" % error)
+
+	def __InputGuardOffer(self, version):
+		# Capability handshake: answer with the content caps. An EXE without
+		# the declare packet stays silent, exactly like an older root pack.
+		try:
+			if inputguardapi.Declare(net, version):
+				inputguardapi.ResendAutomation()
+				self.inputGuardHoverProbe.Enable()
+		except Exception as error:
+			dbg.TraceError("[IG1] declare failed: %s" % error)
+
+	def __InputGuardWatchState(self, pid, watchId, captureId, deadline, gap):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchState(pid, watchId, captureId, deadline, gap)
+
+	def __InputGuardLegend(self, row):
+		# One row of the GM watch viewer's legend: a single field whose parts
+		# vary by row and are validated by the viewer's model.
+		try:
+			system = self.__InputGuardSystem()
+			if system:
+				system.OnWatchLegend(row)
+		except Exception as error:
+			dbg.TraceError("[IG1] legend row failed: %s" % error)
+
+	def BINARY_InputGuardPenalty(self, remainingSec, reason):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnPenalty(remainingSec, reason)
+
+	def BINARY_InputGuardWatchBegin(self, pid, captureId, name):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchBegin(pid, captureId, name)
+
+	def BINARY_InputGuardWatchTrace(self, pid, clientW, clientH, samples):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchTrace(pid, clientW, clientH, samples)
+
+	def BINARY_InputGuardWatchVerdict(self, pid, verdict):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchVerdict(pid, verdict)
+
+	def BINARY_InputGuardWatchAction(self, pid, tMs, kind, cover):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchAction(pid, tMs, kind, cover)
+
+	def BINARY_InputGuardWatchEnd(self, pid, reason):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchEnd(pid, reason)
+
+	def BINARY_InputGuardWatchStatus(self, pid, report, secondsSinceReport,
+			missedHeartbeats, penaltyActive):
+		system = self.__InputGuardSystem()
+		if system:
+			system.OnWatchStatus(pid, report, secondsSinceReport,
+				missedHeartbeats, penaltyActive)
+
+	def OnSeamlessMapWarpLeave(self):
+		self.meteorProtection.clear()
+		if self.meteorToolTip:
+			self.meteorToolTip.Hide()
+		self.seamlessWarping = True
+		step = self.__SeamlessStep
+		# The server re-acquires the talent owner with a fresh request nonce.
+		if self.skillTreeRuntime:
+			step("skill tree", self.skillTreeRuntime.Destroy)
+			self.skillTreeRuntime = None
+		step("dialogs", self.__CloseSessionDialogs)
+		step("keys", self.__ReleaseWarpKeys)
+		step("drag", mouseModule.mouseController.DeattachObject)
+		if self.targetBoard:
+			step("target board", self.__ResetTargetBoardForWarp)
+		if self.interface:
+			step("map windows", self.interface.OnSeamlessMapWarpLeave)
+		step("unlock", wndMgr.Unlock)
+		if musicInfo.fieldMusic != "":
+			step("music", snd.FadeOutMusic, "BGM/" + musicInfo.fieldMusic)
+		step("sounds", snd.StopAllSound)
+
+	def OnSeamlessMapWarpArrive(self):
+		self.seamlessWarping = False
+		self.PickingCharacterIndex = -1
+		self.PickingItemIndex = -1
+		if not self.skillTreeRuntime and self.interface:
+			self.__SeamlessStep("skill tree", self.__CreateSkillTreeRuntime)
+		if self.skillTreeRuntime:
+			self.__SeamlessStep("skill tree start", self.skillTreeRuntime.Start)
+			self.__SeamlessStep("skill tree refresh", self.skillTreeRuntime.Open)
+		self.__SeamlessStep("music", self.__StartFieldMusic)
+		self.__SeamlessStep("refresh", self.StartGame)
+
+	def OnSeamlessWarpLeave(self):
+		self.meteorProtection.clear()
+		if self.meteorToolTip:
+			self.meteorToolTip.Hide()
+		self.seamlessWarping = True
+		# The destination session receives its own CraftIdsV1 offer.
+		self.__ResetCraftIdsOffer()
+		npcsellprice.Reset()
+		attrchangecount.Reset()
+		self.warpUITransition = True
+		self.warpUIRestoreLoaded = False
+		self.warpUIRestoreState = None
+		step = self.__SeamlessStep
+
+		if self.interface:
+			try:
+				self.interface.CaptureWarpUIState()
+			except Exception:
+				uiwarpstate.Clear()
+				dbg.TraceError("[WarpUI] snapshot failed; continuing without restore")
+		# Records the album notices into the snapshot while warpUITransition.
+		step("dungeon equipment binding", self.__StopDungeonEquipmentBindingSession)
+		step("pet album", self.__ClosePetAlbumSession)
+		step("bonus totals", itembonuspresentation.totals.EndSession)
+		step("character totals", characterbonuses.totals.EndSession)
+		step("bonus sources", bonussources.server.EndSession)
+		step("talent weapon", itembonuspresentation.SetTalentWeaponPercent, 0)
+		step("talent durations", itembonuspresentation.SetTalentDurationPercents, 0, 0)
+		step("dungeon objective", self.dungeonObjectiveSubscription.stop)
+		if self.skillTreeRuntime:
+			step("skill tree", self.skillTreeRuntime.Destroy)
+			self.skillTreeRuntime = None
+		if self.pvmPersonal:
+			step("pvm personal", self.pvmPersonal.Destroy, True)
+			self.pvmPersonal = None
+		if self.interface:
+			step("interface", self.interface.OnSeamlessWarpLeave)
+		if self.targetBoard:
+			step("target board", self.__ResetTargetBoardForWarp)
+		if self.interface:
+			step("quick buff effects", self.interface.OnQuickBuffAffectsCleared)
+		if self.affectShower:
+			step("affects", self.affectShower.ClearAllAffects)
+
+		step("dialogs", self.__CloseSessionDialogs)
+		step("keys", self.__ReleaseWarpKeys)
+		step("drag", mouseModule.mouseController.DeattachObject)
+		step("unlock", wndMgr.Unlock)
+		if musicInfo.fieldMusic != "":
+			step("music", snd.FadeOutMusic, "BGM/" + musicInfo.fieldMusic)
+		step("sounds", snd.StopAllSound)
+		step("screen effect", grp.InitScreenEffect)
+		# The destination re-sends quests, guild and messenger data; the
+		# native modules must not merge it into the source core's state.
+		step("quest", quest.Clear)
+		step("guild", guild.Destroy)
+		step("messenger", messenger.Destroy)
+		step("skill data", skill.ClearSkillData)
+		step("skill dict", player.ClearSkillDict)
+		step("bonus catalog", bonusCatalog.ClearPending)
+
+	def OnSeamlessWarpArrive(self):
+		step = self.__SeamlessStep
+		if app.ENABLE_AUTO_PICKUP:
+			step("pickup preferences", osfInfo.LoadPickupConfig)
+		self.seamlessWarping = False
+		self.warpUITransition = False
+		# __RestoreWarpUIState consumes the snapshot for this character.
+		self.warpUIRestoreLoaded = False
+		self.warpUIRestoreState = None
+
+		step("bonus totals", itembonuspresentation.totals.BeginSession, app.GetTime, net.SendChatPacket)
+		step("character totals", characterbonuses.totals.BeginSession, app.GetTime, net.SendChatPacket)
+		step("bonus sources", bonussources.server.BeginSession, app.GetTime, net.SendChatPacket)
+		step("talent weapon", itembonuspresentation.SetTalentWeaponPercent, 0)
+		step("talent durations", itembonuspresentation.SetTalentDurationPercents, 0, 0)
+		self.PickingCharacterIndex = -1
+		self.PickingItemIndex = -1
+		step("private shop", uiPrivateShopBuilder.Clear)
+		step("trading", exchange.InitTrading)
+		step("music", self.__StartFieldMusic)
+		step("quick slots", self.__SelectQuickPage, self.quickSlotPageIndex)
+		if self.interface:
+			step("interface", self.interface.OnSeamlessWarpArrive)
+		if not self.pvmPersonal:
+			step("pvm personal", self.__CreatePvmPersonal)
+		if not self.skillTreeRuntime and self.interface:
+			step("skill tree", self.__CreateSkillTreeRuntime)
+		step("dungeon equipment binding", self.__StartDungeonEquipmentBindingSession)
+		step("pet album", self.__OpenPetAlbumSession)
+		step("dungeon objective", self.dungeonObjectiveSubscription.start)
+		if self.skillTreeRuntime:
+			step("skill tree start", self.skillTreeRuntime.Start)
+		step("refresh", self.StartGame)
+		self.cubeInformation = {}
+		self.currentCubeNPC = 0
+		step("visibility options", self.__SendVisibilityOptions)
+		self.SetFocus()
+		self.Show()
+		app.ShowCursor()
+
+	def __ResetTargetBoardForWarp(self):
+		reset = getattr(self.targetBoard, "ResetTargetBoard", None)
+		if reset:
+			reset()
+		self.targetBoard.Close()
+
+	def __CloseSessionDialogs(self):
+		uiunstuck.controller.Reset()
+		if self.guildWarQuestionDialog:
+			self.guildWarQuestionDialog.Close()
+		self.guildWarQuestionDialog = None
+		self.__CloseDungeonRejoinDialog()
+		self.__DestroyGuildPortal()
+		if self.buffiNameInputDialog:
+			self.buffiNameInputDialog.Close()
+			self.buffiNameInputDialog = None
+		for name in ("partyRequestQuestionDialog", "partyInviteQuestionDialog", "guildInviteQuestionDialog"):
+			dialog = getattr(self, name, None)
+			if dialog:
+				dialog.Close()
+			setattr(self, name, None)
+		self.__ClearFriendRequests()
+		if self.itemDropQuestionDialog:
+			self.itemDropQuestionDialog.Close()
+		self.itemDropQuestionDialog = None
+		if self.itemDestroyConfirmDialog:
+			self.itemDestroyConfirmDialog.Close()
+		self.itemDestroyConfirmDialog = None
+		self.itemDestroyPending = None
+		confirm = getattr(self, "confirmDialog", None)
+		if confirm:
+			confirm.Close()
+		self.confirmDialog = None
+		constInfo.SET_ITEM_QUESTION_DIALOG_STATUS(0)
+
+	def __ReleaseWarpKeys(self):
+		if self.keybindingManager:
+			self.keybindingManager.clear_pressed()
+
+	def __StartFieldMusic(self):
+		snd.SetMusicVolume(systemSetting.GetMusicVolume()*net.GetFieldMusicVolume())
+		snd.SetSoundVolume(systemSetting.GetSoundVolume())
+		netFieldMusicFileName = net.GetFieldMusicFileName()
+		if netFieldMusicFileName:
+			snd.FadeInMusic("BGM/" + netFieldMusicFileName)
+		elif musicInfo.fieldMusic != "":
+			snd.FadeInMusic("BGM/" + musicInfo.fieldMusic)
+
+	def __CreatePvmPersonal(self):
+		self.pvmPersonal = uiPvMPersonal.PersonalBonuses(self, self.affectShower, self.interface)
+
+	def __CreateSkillTreeRuntime(self):
+		self.skillTreeRuntime = skilltreeruntime.SkillTreeRuntime(
+			self.interface.wndSkillTree, net, app.GetTime,
+		)
+		self.skillTreeRuntime.SetPresentationObserver(ui.__mem_func__(self.__OnSkillTreePresentation))
+
+	def __SendVisibilityOptions(self):
+		if not app.ENABLE_NEW_GAMEOPTION:
+			return
+		net.SendChatPacket("/show_hide_pet %d" % (1 if systemSetting.IsShowPet() else 0))
+		net.SendChatPacket("/show_hide_support %d" % (1 if systemSetting.IsShowSupport() else 0))
+		net.SendChatPacket("/show_hide_mount %d" % (1 if systemSetting.IsShowMount() else 0))
+		net.SendChatPacket("/show_hide_shop %d" % (1 if systemSetting.IsShowShop() else 0))
+
+	def __PvmPersonalSnapshot(self, version, server_time, wire_job, wire_group, serial,
+			attack_skill, attack_hud, attack_learned, attack_activated,
+			attack_revision, attack_end, attack_value, attack_power,
+			attack_notice, attack_status,
+			defense_skill, defense_hud, defense_learned, defense_activated,
+			defense_revision, defense_end, defense_value, defense_power,
+			defense_notice, defense_status,
+			reduction_skill, reduction_hud, reduction_learned, reduction_activated,
+			reduction_revision, reduction_end, reduction_value, reduction_power,
+			reduction_notice, reduction_status):
+		# The analyzer truncates to declared positional arguments: keep all 35
+		# wire fields and route them to the HUD recreated on seamless arrival.
+		if self.pvmPersonal:
+			return self.pvmPersonal.Snapshot(
+				version, server_time, wire_job, wire_group, serial,
+				attack_skill, attack_hud, attack_learned, attack_activated,
+				attack_revision, attack_end, attack_value, attack_power,
+				attack_notice, attack_status,
+				defense_skill, defense_hud, defense_learned, defense_activated,
+				defense_revision, defense_end, defense_value, defense_power,
+				defense_notice, defense_status,
+				reduction_skill, reduction_hud, reduction_learned, reduction_activated,
+				reduction_revision, reduction_end, reduction_value, reduction_power,
+				reduction_notice, reduction_status)
+		return False
 
 	def __BuildKeyDict(self):
 		onPressKeyDict = {}
@@ -740,19 +1243,13 @@ class GameWindow(ui.ScriptWindow):
 		app.PitchCamera(app.CAMERA_STOP)
 
 	def __PressQKey(self):
+		# Hiding the letters on the left is the rebindable keybinding
+		# "information.quest_letters" (default Ctrl+Q, Interface.ToggleQuestLetters),
+		# dispatched by keybindings.Manager before this dictionary. Ctrl+Q
+		# that no binding owns does nothing here (no camera turn).
 		if app.IsPressed(app.DIK_LCONTROL) or app.IsPressed(app.DIK_RCONTROL):
-			if 0 == interfaceModule.IsQBHide:
-				interfaceModule.IsQBHide = 1
-				if app.ENABLE_QUEST_OPTION:
-					systemSetting.SetQuestModeOption(0)
-				self.interface.HideAllQuestButton()
-			else:
-				interfaceModule.IsQBHide = 0
-				if app.ENABLE_QUEST_OPTION:
-					systemSetting.SetQuestModeOption(1)
-				self.interface.ShowAllQuestButton()
-		else:
-			app.RotateCamera(app.CAMERA_TO_NEGATIVE)
+			return
+		app.RotateCamera(app.CAMERA_TO_NEGATIVE)
 
 	def __PressEKey(self):
 		if app.IsPressed(app.DIK_LCONTROL) or app.IsPressed(app.DIK_RCONTROL):
@@ -906,8 +1403,6 @@ class GameWindow(ui.ScriptWindow):
 		print("/PKMode " + str(nextPKMode))
 
 	def OnChangePKMode(self):
-		if app.ENABLE_AUTO_PICKUP:
-			osfInfo.LoadPickupConfig()
 		self.interface.OnChangePKMode()
 
 		try:
@@ -930,6 +1425,8 @@ class GameWindow(ui.ScriptWindow):
 
 	# Start
 	def StartGame(self):
+		if self.affectShower:
+			self.affectShower.RefreshPenetrationOverflow()
 		self.RefreshInventory()
 		self.RefreshEquipment()
 		self.RefreshCharacter()
@@ -941,14 +1438,31 @@ class GameWindow(ui.ScriptWindow):
 		except:
 			dbg.TraceError("[Graphics] ApplyGraphicsConfig() failed at boot")
 
+		try:
+			import settingsbackend
+			settingsbackend.load_tree_shadow()
+		except:
+			dbg.TraceError("[Graphics] tree shadow distance failed at boot")
+
+		try:
+			import settingsbackend
+			settingsbackend.load_effect_switches()
+		except:
+			dbg.TraceError("[Graphics] effect switches failed at boot")
+
 	if app.ENABLE_MAP_LOCATION_APP_NAME:
 		def SetApplicationText(self):
 			try:
-				mapName = background.GetCurrentMapName()
-				if mapName in localeInfo.MINIMAP_ZONE_NAME_DICT:
-					app.SetText(localeInfo.APP_TITLE + " - " + localeInfo.MINIMAP_ZONE_NAME_DICT[background.GetCurrentMapName()])
+				title = maparrivalnames.resolve(background.GetCurrentMapName())
+				app.SetText(localeInfo.APP_TITLE + (" - " + title if title else ""))
 			except:
 				pass
+			# Discord Rich Presence shows the same map title.
+			if hasattr(net, "SetDiscordLocation"):
+				try:
+					net.SetDiscordLocation(title or "")
+				except:
+					pass
 
 	# Refresh
 	def CheckGameButton(self):
@@ -964,6 +1478,10 @@ class GameWindow(ui.ScriptWindow):
 		weapon = nodes.get(2107, {}).get("current_total", 0) if active else 0
 		player.SetSkillTreeBonuses(queue, weapon)
 		itembonuspresentation.SetTalentWeaponPercent(weapon)
+		# item tooltips show the real ore and dew time while the tree runs.
+		jewelry = nodes.get(2124, {}).get("current_total", 0) if active else 0
+		dew = nodes.get(2141, {}).get("current_total", 0) if active else 0
+		itembonuspresentation.SetTalentDurationPercents(jewelry, dew)
 		if self.interface and self.interface.wndDailyTasks:
 			dailyBonus = nodes.get(2121, {}).get("current_total", 0) if active else 0
 			self.interface.wndDailyTasks.SetCompletionLimit(3 + dailyBonus)
@@ -976,8 +1494,12 @@ class GameWindow(ui.ScriptWindow):
 
 	def RefreshStatus(self):
 		self.CheckGameButton()
+		if self.affectShower and not self.seamlessWarping:
+			self.affectShower.RefreshPenetrationOverflow()
 
 		if self.interface:
+			if getattr(app, "ENABLE_WIKI", False) and not self.seamlessWarping:
+				self.interface.WarmWiki()
 			self.interface.RefreshStatus()
 
 		if self.playerGauge:
@@ -990,6 +1512,9 @@ class GameWindow(ui.ScriptWindow):
 		self.CheckGameButton()
 		if self.interface:
 			self.interface.RefreshSkill()
+		if self.affectShower:
+			# Skill affects show the skill window's tile of the current grade.
+			self.affectShower.RefreshSkillIcons()
 
 	def RefreshQuest(self):
 		self.interface.RefreshQuest()
@@ -1102,6 +1627,8 @@ class GameWindow(ui.ScriptWindow):
 
 	# UNKNOWN_UPDATE
 	def BINARY_NEW_AddAffect(self, type, pointIdx, value, duration):
+		if self.interface:
+			self.interface.OnQuickBuffAffectAdded(type, pointIdx, value, duration)
 		try:
 			self.affectShower.BINARY_NEW_AddAffect(type, pointIdx, value, duration)
 			if chr.NEW_AFFECT_DRAGON_SOUL_DECK1 == type or chr.NEW_AFFECT_DRAGON_SOUL_DECK2 == type:
@@ -1131,6 +1658,8 @@ class GameWindow(ui.ScriptWindow):
 			pass
 
 	def BINARY_NEW_RemoveAffect(self, type, pointIdx):
+		if self.interface:
+			self.interface.OnQuickBuffAffectRemoved(type, pointIdx)
 		self.affectShower.BINARY_NEW_RemoveAffect(type, pointIdx)
 		if chr.NEW_AFFECT_DRAGON_SOUL_DECK1 == type or chr.NEW_AFFECT_DRAGON_SOUL_DECK2 == type:
 			self.interface.DragonSoulDeactivate()
@@ -1204,6 +1733,20 @@ class GameWindow(ui.ScriptWindow):
 			self.interface.OpenWhisperDialog(name)
 
 	def RefreshTargetBoardByVID(self, vid):
+		# The native PVP packet refreshes both sides by VID: its flags drive
+		# the duel rows of the chat and Messages (challenged / my request
+		# waiting / fight / who won), see duelchallenge.Observe.
+		try:
+			if not player.IsMainCharacterIndex(vid):
+				events = duelchallenge.challenges.Observe(vid, chr.GetNameByVID(vid),
+					bool(player.IsChallengeInstance(vid)),
+					bool(player.IsCantFightInstance(vid)),
+					bool(player.IsRevengeInstance(vid)),
+					bool(player.IsPVPInstance(vid)))
+				if events and self.interface:
+					self.interface.OnDuelEvents(events)
+		except Exception as error:
+			dbg.TraceError("duel state from the PVP packet failed: %s" % error)
 		if self.targetBoard:
 			self.targetBoard.RefreshByVID(vid)
 
@@ -1228,8 +1771,11 @@ class GameWindow(ui.ScriptWindow):
 				return
 
 			if vid != self.targetBoard.GetTargetVID():
-				self.targetBoard.ResetTargetBoard()
-				self.targetBoard.SetEnemyVID(vid)
+				if chr.GetInstanceType(vid) == chr.INSTANCE_TYPE_PLAYER:
+					self.targetBoard.Open(vid, chr.GetNameByVID(vid))
+				else:
+					self.targetBoard.ResetTargetBoard()
+					self.targetBoard.SetEnemyVID(vid)
 
 			self.targetBoard.SetHP(hpPercentage, iMinHP, iMaxHP)
 			self.targetBoard.Show()
@@ -1239,8 +1785,11 @@ class GameWindow(ui.ScriptWindow):
 				return
 
 			if vid != self.targetBoard.GetTargetVID():
-				self.targetBoard.ResetTargetBoard()
-				self.targetBoard.SetEnemyVID(vid)
+				if chr.GetInstanceType(vid) == chr.INSTANCE_TYPE_PLAYER:
+					self.targetBoard.Open(vid, chr.GetNameByVID(vid))
+				else:
+					self.targetBoard.ResetTargetBoard()
+					self.targetBoard.SetEnemyVID(vid)
 
 			self.targetBoard.SetHP(hpPercentage)
 			self.targetBoard.Show()
@@ -1301,8 +1850,8 @@ class GameWindow(ui.ScriptWindow):
 		chat.AppendWhisper(mode, name, line)
 		# The executable imports chat/GM whispers into Unified Messenger history
 		# and calls this only for lines it could not import. The text exists in
-		# the native whisper buffer alone, so keep it in the classic dialog.
-		self.interface.RecvLegacyWhisper(name)
+		# the native whisper buffer alone, so Messages keeps it for the session.
+		self.interface.RecvLegacyWhisper(name, line, mode == chat.WHISPER_TYPE_GM)
 		if app.ENABLE_DISCORD_STUFF:
 			if self.interface:
 				if self.interface.CheckWhisperIsOpen(name) == False:
@@ -1310,20 +1859,27 @@ class GameWindow(ui.ScriptWindow):
 
 	def OnRecvWhisperSystemMessage(self, mode, name, line):
 		if mode == chat.WHISPER_TYPE_SYSTEM and name == "[Switchbot]":
+			from systemnotificationlocale import SwitchbotMessage, WithClientItemName
+			line = WithClientItemName(line)
 			if self.interface.PushSwitchbotSystemNotification(line):
 				return
-			from systemnotificationlocale import SwitchbotMessage
 			line = SwitchbotMessage(line)
+		if mode == chat.WHISPER_TYPE_SYSTEM and self.interface.RecvDuelChallenge(name, line):
+			# A duel challenge is one chat line with [Přijmout] [Odmítnout]:
+			# no whisper window and no Messages letter (it could be spammed).
+			return
 		chat.AppendWhisper(chat.WHISPER_TYPE_SYSTEM, name, line)
-		# Duel invitations and other system whispers are not Messenger history.
-		self.interface.RecvLegacyWhisper(name)
+		# Other system whispers are not Messenger history; their letter opens
+		# Messages with this line.
+		self.interface.RecvLegacyWhisper(name, line)
 
 	def OnRecvWhisperError(self, mode, name, line):
 		if mode in localeInfo.WHISPER_ERROR:
-			chat.AppendWhisper(chat.WHISPER_TYPE_SYSTEM, name, localeInfo.WHISPER_ERROR[mode](name))
+			line = localeInfo.WHISPER_ERROR[mode](name)
 		else:
-			chat.AppendWhisper(chat.WHISPER_TYPE_SYSTEM, name, "Whisper Unknown Error(mode=%d, name=%s)" % (mode, name))
-		self.interface.RecvLegacyWhisper(name)
+			line = "Whisper Unknown Error(mode=%d, name=%s)" % (mode, name)
+		chat.AppendWhisper(chat.WHISPER_TYPE_SYSTEM, name, line)
+		self.interface.RecvLegacyWhisper(name, line)
 
 	def RecvWhisper(self, name):
 		self.interface.RecvWhisper(name)
@@ -1411,7 +1967,9 @@ class GameWindow(ui.ScriptWindow):
 			self.interface.OpenSpecialInventoryWindow(int(category))
 
 	def OpenCostumeWindow(self):
-		self.interface.OpenCostumeWindow()
+		# Equipment notifications can arrive after warp UI restoration.
+		# Refresh slots without overriding the player's tab or window visibility.
+		self.RefreshEquipment()
 
 	def OpenInventoryWindow(self):
 		self.interface.OpenInventoryWindow()
@@ -1525,6 +2083,9 @@ class GameWindow(ui.ScriptWindow):
 		self.PopupMessage(localeInfo.SAFEBOX_ERROR)
 
 	def OnFishingSuccess(self, isFish, fishName):
+		# The catch arrives as a tracker row whose line has the count.
+		if self.interface and self.interface.IsDropTrackerGatherClient():
+			return
 		chat.AppendChatWithDelay(chat.CHAT_TYPE_INFO, localeInfo.FISHING_SUCCESS(isFish, fishName), 2000)
 
 	# ADD_FISHING_MESSAGE
@@ -1840,7 +2401,30 @@ class GameWindow(ui.ScriptWindow):
 		self.interface.HideMouseImage()
 
 	def StartAttack(self):
+		if self.__StartMiningOnTargetVein():
+			return
 		player.SetAttackKeyState(True)
+
+	def __StartMiningOnTargetVein(self):
+		# Space (the attack key) with a pick in hand and a mining vein as the target starts the mining the way a
+		# click on the vein does (the same click packet, like Space by a tree starts woodcutting in the client).
+		# The veins are servergamedata.MINING_VEINS (share/conf/mining_v1.json), the pick is ITEM_TYPE_PICK as on
+		# the server. The keyboard is edge-polled: one press is one request, a held key never repeats it; the server
+		# keeps a running session at the same vein, checks the distance and runs the skill check and its tempo.
+		vid = player.GetTargetVID()
+		if not vid or chr.GetVirtualNumber(vid) not in servergamedata.MINING_VEINS:
+			return False
+		weapon = player.GetItemIndex(player.EQUIPMENT, item.EQUIPMENT_WEAPON)
+		if not weapon:
+			return False
+		item.SelectItem(weapon)
+		if item.GetItemType() != item.ITEM_TYPE_PICK:
+			return False
+		if player.IsMountingHorse():
+			self.OnCannotMining()
+			return True
+		net.SendOnClickPacket(vid)
+		return True
 
 	def EndAttack(self):
 		player.SetAttackKeyState(False)
@@ -1901,19 +2485,31 @@ class GameWindow(ui.ScriptWindow):
 	## Event Handler
 
 	def OnKeyDown(self, key):
+		if self.__IsWarpInputLocked():
+			return True
+		if self.__IsInputGuardLocked():
+			return True
+
 		if self.interface.wndWeb and self.interface.wndWeb.IsShow():
 			return
 
 		if self.keybindingManager and self.keybindingManager.is_capture_active():
 			return True
 
+		# The arrows / WASD while the woodcutting bar is up are the directions of its strikes, not a step
+		# (a step would cancel the cut): taken before the keybindings and the movement keys.
+		if self.interface and getattr(self.interface, 'MinigameDirectionKey', lambda key: False)(key):
+			return True
+
 		if self.keybindingManager and self.keybindingManager.dispatch_key_down(key):
 			return True
 
-		if key == app.DIK_ESC:
-			self.RequestDropItem(False)
-			constInfo.SET_ITEM_QUESTION_DIALOG_STATUS(0)
+		# Space while a minigame quick-time event is up (the mining ring, the fishing game) is its hit, not an attack.
+		if key == app.DIK_SPACE and self.interface.MinigameSpaceHit():
+			return True
 
+		# Native OnKeyDown dispatches OnPressEscapeKey first. The top dialog
+		# owns cancellation; a second cancel here would also close its parent.
 		try:
 			self.onPressKeyDict[key]()
 		except KeyError:
@@ -1927,6 +2523,10 @@ class GameWindow(ui.ScriptWindow):
 		if self.keybindingManager:
 			self.keybindingManager.release_key(key)
 
+		# the key up of an arrow / WASD the woodcutting bar took: it never started a step
+		if self.interface and getattr(self.interface, 'MinigameDirectionKeyUp', lambda key: False)(key):
+			return True
+
 		if self.onClickKeyDict:
 			try:
 				self.onClickKeyDict[key]()
@@ -1938,6 +2538,9 @@ class GameWindow(ui.ScriptWindow):
 		return True
 
 	def OnMouseLeftButtonDown(self):
+		if self.__IsInputGuardLocked():
+			return True
+
 		if self.interface.BUILD_OnMouseLeftButtonDown():
 			return
 
@@ -1968,6 +2571,12 @@ class GameWindow(ui.ScriptWindow):
 			## QuickSlot
 			if player.SLOT_TYPE_QUICK_SLOT == attachedType:
 				player.RequestDeleteGlobalQuickSlot(attachedItemSlotPos)
+
+			## picked up from the Instaswitchbot slot: like an item picked up from a switchbot slot, the
+			## ground / a character does nothing (no drop or destroy question, no exchange); the item stays put
+			elif getattr(getattr(mouseModule.mouseController, 'GetAttachedOwner', lambda: None)(),
+					'KEEPS_ITEM_ON_GROUND_DROP', False):
+				pass
 
 			## Inventory
 			elif player.SLOT_TYPE_INVENTORY == attachedType:
@@ -2302,6 +2911,9 @@ class GameWindow(ui.ScriptWindow):
 	# END_OF_PRIVATESHOP_DISABLE_ITEM_DROP
 
 	def OnMouseRightButtonDown(self):
+		if self.__IsInputGuardLocked():
+			return True
+
 		self.CheckFocus()
 
 		if True == mouseModule.mouseController.isAttached():
@@ -2325,17 +2937,41 @@ class GameWindow(ui.ScriptWindow):
 		player.SetMouseMiddleButtonState(player.MBS_CLICK)
 
 	def OnUpdate(self):
+		if (dungeonequipmentbinding.receiver.Owns(getattr(self, "dungeonBindingOwner", None))
+				and dungeonequipmentbinding.receiver.Expire()):
+			self.__RefreshDungeonEquipmentBindingView()
+		if self.keybindingManager:
+			self.keybindingManager.release_unpressed()
+		if self.seamlessWarping:
+			# The world, the main actor and the session belong to no server
+			# until the destination's ENTERGAME; the curtain covers it all.
+			return
+		if ticketnoticemodel.STATE.Pending():
+			self.__PollTicketNotice()
+		noteFrame = getattr(self.stream, "NoteWarpCurtainFrame", None)
+		if noteFrame:
+			noteFrame()
 		app.UpdateGame()
+		bonusCatalog.Tick()
+		# Tooltip work must not interrupt the world-to-interface render state.
+		x, y = app.GetCursorPosition()
+		self.__UpdateMeteorToolTip(chr.Pick() if wndMgr.IsPickedWindow(self.hWnd) else -1, x, y)
 		self.__UpdatePetAlbumSession()
+		if self.craftIdsOffered:
+			self.__AnswerCraftIdsOffer()
 		self.__ShowNextFriendRequest()
 		if self.interface:
 			self.interface.FlushItemMetadataRefresh()
+			if getattr(app, "ENABLE_WIKI", False):
+				self.interface.UpdateWiki()
 		self.dungeonObjectiveSubscription.update()
 		self.__UpdateInitialWorldReveal()
 		if self.interface:
 			self.interface.UpdateAfkSystem()
 			self.interface.UpdateQuickBuffSystem()
 			self.interface.UpdateCountdownHUD()
+			self.interface.UpdateMiningCheck()
+			self.interface.UpdateWoodCheck()
 			self.interface.UpdateGuildInvitations(not self.initialWorldRevealPending)
 		if self.skillTreeRuntime:
 			self.skillTreeRuntime.Update()
@@ -2363,8 +2999,10 @@ class GameWindow(ui.ScriptWindow):
 
 		if app.ENABLE_AUTO_PICKUP and osfInfo.AUTOPICKUP_ENABLED:
 			if app.GetTime() >= self.lastAutoPickupTime:
-				player.PickAllCloseItems()
+				getattr(player, "AutoPickCloseItems", player.PickAllCloseItems)()
 				self.lastAutoPickupTime = app.GetTime() + 0.2
+
+		self.__UpdateInputGuard()
 
 		if osfInfo.AffectIconState == 1 and app.ENABLE_HIDE_AFFECT_ICONS:
 			self.AffectIconState()
@@ -2458,13 +3096,16 @@ class GameWindow(ui.ScriptWindow):
 			return
 		# Loading can still receive an offer after Open, before native Game phase.
 		self.__ProcessPreservedServerCommand()
-		if (album.available or not hasattr(net, "SendPetAlbumRequest") or
-			not hasattr(chr, "AlbumMarker")):
+		if not hasattr(net, "SendPetAlbumRequest") or not hasattr(chr, "AlbumMarker"):
+			return
+		# Pending hunts refresh their authoritative calendar bounds; the UI
+		# remains read-only and a closed presentation owner never sends requests.
+		if album.available and not any(row["phase"] == 1 for row in album.pets.values()):
 			return
 		now = app.GetTime()
 		if now < self.petAlbumSyncAt:
 			return
-		self.petAlbumSyncAt = now + 2.0
+		self.petAlbumSyncAt = now + (30.0 if album.available else 2.0)
 		# The legacy read command is safe before any capability is advertised.
 		# SendChatPacket waits for native Game phase; later updates retry it.
 		net.SendChatPacket("/pet_album_sync")
@@ -2615,6 +3256,15 @@ class GameWindow(ui.ScriptWindow):
 				code, messageKey, bool(refreshRequired)
 			)
 
+	def __GMPanelCatalog(self, row):
+		# One row of what the server lets this session's GM panel show: a
+		# single field whose parts vary by row and are validated on receipt.
+		try:
+			if self.interface:
+				self.interface.OnGMPanelCatalog(row)
+		except Exception as error:
+			dbg.TraceError("[GM panel] catalogue row failed: %s" % error)
+
 	def BINARY_GMPanelResult(self, requestID, action, status, gmLevel, maskLow, maskHigh, message):
 		if self.interface:
 			self.interface.OnGMPanelResult(requestID, action, status, gmLevel, maskLow, maskHigh, message)
@@ -2634,6 +3284,16 @@ class GameWindow(ui.ScriptWindow):
 	def OnAfkSystemChanged(self):
 		if self.interface:
 			self.interface.OnAfkSystemChanged()
+
+	def OnAfkRewardCause(self, code):
+		import uiafkrewardshop
+		if uiafkrewardshop.SetCause(code):
+			self.OnAfkRewardsChanged()
+
+	def OnAfkRewardZones(self, maps):
+		import uiafkrewardshop
+		if uiafkrewardshop.SetZones(maps):
+			self.OnAfkRewardsChanged()
 
 	def OnAfkRewardsChanged(self):
 		if self.interface:
@@ -2688,7 +3348,26 @@ class GameWindow(ui.ScriptWindow):
 		# self.ObjectNum.SetText("GTI : %d, CRC : %d" % (dwRenderedThing, dwRenderedCRC))
 		self.ViewDistance.SetText("Num : %d, FS : %f, FE : %f, FC : %f" % (iNum, fFogStart, fFogEnd, fFarCilp))
 
+	def __UpdateMeteorToolTip(self, vid, x, y):
+		presentation = self.meteorProtection.presentation(vid, app.GetGlobalTimeStamp())
+		if (presentation is None or not self.IsShow() or self.seamlessWarping
+				or self.__IsOtherCurtainActive() or not chr.HasInstance(vid)):
+			if self.meteorToolTip:
+				self.meteorToolTip.Hide()
+			return
+		if not self.meteorToolTip:
+			import uimeteortooltip
+			self.meteorToolTip = uimeteortooltip.MeteorToolTip()
+		self.meteorToolTip.Present(chr.GetNameByVID(vid), presentation[0], presentation[1],
+			x, y, wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight())
+
 	def OnRender(self):
+		# Behind an opaque warp curtain the reconnecting world is not drawn;
+		# while it still fades in, the old world keeps rendering.
+		if self.seamlessWarping:
+			covered = getattr(self.stream, "IsWarpCurtainCovering", None)
+			if covered and covered():
+				return
 		app.RenderGame()
 
 		if self.console.Console.collision:
@@ -2706,7 +3385,10 @@ class GameWindow(ui.ScriptWindow):
 			self.PickingCharacterIndex = chr.Pick()
 
 			if -1 != self.PickingCharacterIndex:
-				textTail.ShowCharacterTextTail(self.PickingCharacterIndex)
+				if callable(getattr(systemSetting, 'GetNameVisibility', None)):
+					textTail.ShowCharacterTextTail(self.PickingCharacterIndex, 1)
+				else:
+					textTail.ShowCharacterTextTail(self.PickingCharacterIndex)
 			if 0 != self.targetBoard.GetTargetVID():
 				textTail.ShowCharacterTextTail(self.targetBoard.GetTargetVID())
 
@@ -2747,6 +3429,11 @@ class GameWindow(ui.ScriptWindow):
 			grp.SetInterfaceRenderState()
 
 	def OnPressEscapeKey(self):
+		if self.__IsWarpInputLocked():
+			return True
+		if self.__IsInputGuardLocked():
+			return True
+
 		if app.TARGET == app.GetCursor():
 			app.SetCursor(app.NORMAL)
 
@@ -2758,13 +3445,23 @@ class GameWindow(ui.ScriptWindow):
 		return True
 
 	def OnIMEReturn(self):
+		if self.__IsWarpInputLocked():
+			return True
+		if self.__IsInputGuardLocked():
+			return True
+
 		if app.IsPressed(app.DIK_LSHIFT):
-			self.interface.OpenWhisperDialogWithoutTarget()
+			self.interface.OpenMessagesNewConversation()
 		else:
 			self.interface.ToggleChat()
 		return True
 
 	def OnPressExitKey(self):
+		if self.__IsWarpInputLocked():
+			return True
+		if self.__IsInputGuardLocked():
+			return True
+
 		self.interface.ToggleSystemDialog()
 		return True
 
@@ -2788,6 +3485,10 @@ class GameWindow(ui.ScriptWindow):
 	if app.ENABLE_SEND_TARGET_INFO:
 		def BINARY_RefreshTargetMonsterDropInfo(self, raceNum):
 			self.targetBoard.RefreshMonsterInfoBoard(raceNum)
+
+		def __TargetDropLevelGap(self, raceNum, blocked):
+			# arrives before the drop list it describes (the target-info response).
+			uiTarget.SetDropLevelGap(raceNum, blocked)
 
 	# QUEST_CONFIRM
 	def BINARY_OnQuestConfirm(self, msg, timeout, pid):
@@ -3150,38 +3851,59 @@ class GameWindow(ui.ScriptWindow):
 			"channel" : channel,
 		}
 		self.interface.RefreshDungeons()
+		self.__OpenDungeonRejoinDialog(osfInfo.dungeonRejoinOffer)
 
+	def __OpenDungeonRejoinDialog(self, offer):
+		self.__CloseDungeonRejoinDialog()
+		if offer["expiresAt"] <= app.GetGlobalTimeStamp():
+			return None
+
+		bossVnum = offer["bossVnum"]
 		dungeonName = localeInfo.DUNGEON_REJOIN_UNKNOWN
 		if app.ENABLE_DUNGEON_INFO:
 			dungeonInfo = interfaceModule.uiDungeonTrack.dungeonData.get(bossVnum)
 			if dungeonInfo:
 				dungeonName = dungeonInfo["name"]
 
-		dialog = uiCommon.QuestionDialog2()
+		# the window survives temporary refusals and closes itself
+		# only when the offer expires (or on a final DungeonRejoinResult).
+		dialog = uidungeonrejoin.DungeonRejoinDialog()
 		dialog.SetWidth(430)
 		dialog.SetText1(localeInfo.DUNGEON_REJOIN_QUESTION % dungeonName)
-		dialog.SetText2(
-			localeInfo.DUNGEON_REJOIN_REMAINING
-			% localeInfo.SecondToDHM(leftTime)
-		)
+		dialog.SetExpiresAt(offer["expiresAt"])
+		dialog.SetExpireEvent(ui.__mem_func__(self.__DungeonRejoinExpired))
 		dialog.SetAcceptEvent(ui.__mem_func__(self.__DungeonRejoinAccept))
 		dialog.SetCancelEvent(ui.__mem_func__(self.__CloseDungeonRejoinDialog))
 		dialog.OnPressEscapeKey = ui.__mem_func__(self.__DungeonRejoinEscape)
-		dialog.questIdx = questIdx
-		dialog.token = token
-		dialog.channel = channel
+		dialog.questIdx = offer["questIdx"]
+		dialog.token = offer["token"]
+		dialog.channel = offer["channel"]
+		dialog.Refresh()
 		dialog.Open()
 		self.dungeonRejoinDialog = dialog
+		return dialog
+
+	def __DungeonRejoinExpired(self):
+		self.__CloseDungeonRejoinDialog()
+		osfInfo.dungeonRejoinOffer = None
+		self.interface.RefreshDungeons()
+		chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.DUNGEON_REJOIN_EXPIRED)
 
 	def __DungeonRejoinRespond(self, action):
 		offer = osfInfo.dungeonRejoinOffer
 		if not offer:
 			return
 
+		dialog = self.dungeonRejoinDialog
+		if dialog:
+			if not dialog.CanAccept():
+				return
+			# Keep the window until the server answers: a temporary refusal
+			# (DungeonRejoinRetry) must not lose the offer.
+			dialog.BeginAccept()
+
 		questIdx = offer["questIdx"]
 		token = offer["token"]
-		self.__CloseDungeonRejoinDialog()
-
 		osfInfo.dungeonRejoinCMD = "{}#{}".format(action, token)
 		event.QuestButtonClick(questIdx)
 
@@ -3192,9 +3914,77 @@ class GameWindow(ui.ScriptWindow):
 		self.__CloseDungeonRejoinDialog()
 		return True
 
+	# Guild portal lobby (root/uiguildportallobby.py): the quest of the portal sends the
+	# state as cmdchat, the buttons answer through the quest like the dungeon rejoin
+	# (pending action + event.QuestButtonClick, then "guild_portal_cmd" asks for it).
+	def __GuildPortal(self):
+		if not self.guildPortal:
+			def guild_model():
+				router = getattr(self.interface, "wndGuild", None) if self.interface else None
+				window = getattr(router, "window", None) if router else None
+				return window.model if window else None
+
+			def guild_snapshot():
+				router = getattr(self.interface, "wndGuild", None) if self.interface else None
+				window = router._window() if router and hasattr(router, "_window") else None
+				if window and hasattr(window, "request") and not window.pending:
+					import guildv2model
+					window.request(guildv2model.SNAPSHOT)
+
+			def notify(text):
+				chat.AppendChat(chat.CHAT_TYPE_INFO, text)
+
+			self.guildPortal = uiguildportallobby.PortalController(event.QuestButtonClick,
+				net.SendQuestInputStringPacket, uiguildportallobby.GuildMembers(guild_model, guild_snapshot), notify)
+		return self.guildPortal
+
+	def __DestroyGuildPortal(self):
+		if self.guildPortal:
+			self.guildPortal.Destroy()
+			self.guildPortal = None
+
+	def __GuildPortalQuest(self, questIdx):
+		self.__GuildPortal().Quest(questIdx)
+
+	def __GuildPortalLobby(self, portalId, element, mapIndex, channel, lockLeftSec, joined, need, canJoin, isJoined,
+			canStart, pids, guildName):
+		self.__GuildPortal().Lobby(portalId, element, mapIndex, channel, lockLeftSec, joined, need, canJoin, isJoined,
+			canStart, pids, guildName)
+
+	def __GuildPortalLobbyOpen(self):
+		self.__GuildPortal().Open()
+
+	def __GuildPortalGolem(self, strength):
+		self.__GuildPortal().Golem(strength)
+
+	def __GuildPortalPopup(self, element, finderName, joined, need, lockLeftSec, canJoin):
+		self.__GuildPortal().Popup(element, finderName, joined, need, lockLeftSec, canJoin)
+
+	def __GuildPortalLobbyClose(self, reason):
+		if self.guildPortal:
+			self.guildPortal.Close(reason)
+
+	def __GuildPortalQuestCMD(self):
+		self.__GuildPortal().Command()
+
 	def __DungeonRejoinQuestCMD(self):
 		net.SendQuestInputStringPacket(osfInfo.dungeonRejoinCMD)
 		osfInfo.dungeonRejoinCMD = ""
+
+	def __DungeonRejoinRetry(self, reason, seconds):
+		# a temporary refusal (trade/shop/storage cooldown, open
+		# window, transfer in progress). The server kept the receipt, so the
+		# offer stays and the window shows the reason with a countdown.
+		offer = osfInfo.dungeonRejoinOffer
+		if not offer:
+			self.__CloseDungeonRejoinDialog()
+			return
+
+		dialog = self.dungeonRejoinDialog
+		if not dialog:
+			dialog = self.__OpenDungeonRejoinDialog(offer)
+		if dialog:
+			dialog.Refuse(reason, seconds)
 
 	def __DungeonRejoinResult(self, resultCode, channel):
 		self.__CloseDungeonRejoinDialog()
@@ -3232,10 +4022,130 @@ class GameWindow(ui.ScriptWindow):
 		if window:
 			window.BINARY_CRAFTING_SELECTION_SOURCE_V1(nonce, windowType, cell, identity, vnum, count)
 
+	def __CraftIdsOffer(self, action, version):
+		# CraftIdsV1: the server offers recipe ids at every entry into the game
+		# phase. One answer per entry; the EXE enters id mode only when the
+		# server confirms that answer, so both sides stay positional without it.
+		if version != "1":
+			return
+		if action == "offer" and not self.craftIdsAnswered:
+			self.craftIdsOffered = True
+			self.__AnswerCraftIdsOffer()
+		elif action == "on" and self.craftIdsRequested:
+			self.craftIdsRequested = False
+			try:
+				import cube_renewal
+				cube_renewal.SetIdMode(1)
+			except Exception as error:
+				dbg.TraceError("[CraftIds] confirm failed: %s" % error)
+
+	def __AnswerCraftIdsOffer(self):
+		# SendChatPacket drops a command before the native game phase.
+		ready = getattr(net, "IsGamePhase", None)
+		if not self.craftIdsOffered or (ready and not ready()):
+			return
+		self.craftIdsOffered = False
+		self.craftIdsAnswered = True
+		try:
+			import cube_renewal
+			# An EXE without the id API stays silent, like an older root pack.
+			if hasattr(cube_renewal, 'SetIdMode'):
+				net.SendChatPacket("/cube ids 1")
+				self.craftIdsRequested = True
+		except Exception as error:
+			dbg.TraceError("[CraftIds] answer failed: %s" % error)
+
+	def __ResetCraftIdsOffer(self):
+		self.craftIdsOffered = False
+		self.craftIdsAnswered = False
+		self.craftIdsRequested = False
+
+	def __ServiceItemOpen(self, kind, cell, *choices):
+		import uiserviceitem
+		if not getattr(self, "serviceItemWindow", None):
+			self.serviceItemWindow = uiserviceitem.ServiceItemWindow()
+		self.serviceItemWindow.Open(kind, cell, *choices)
+
+	def __ServiceItemRefused(self):
+		if getattr(self, "serviceItemWindow", None):
+			self.serviceItemWindow.Refused()
+
+	def __ServiceItemResult(self, code, *details):
+		if getattr(self, "serviceItemWindow", None):
+			self.serviceItemWindow.Result(code, *details)
+
+	def __Level104PassageOffer(self):
+		if not self.level104PassageClosed:
+			net.SendChatPacket("/level104_passage_ui 1")
+
+	def __Level104Passage(self, phase, count, goal, remaining):
+		if self.level104PassageClosed:
+			return
+		if self.level104PassageHud is None:
+			import uilevel104passage
+			self.level104PassageHud = uilevel104passage.TrialHud()
+		self.level104PassageHud.Receive(phase, count, goal, remaining)
+
+	def __StartDungeonEquipmentBindingSession(self):
+		if self.dungeonBindingClosed:
+			return
+		self.dungeonBindingReady = True
+		dungeonequipmentbinding.receiver.BeginSession(self.dungeonBindingOwner)
+		if self.dungeonBindingOffered:
+			self.__AnswerDungeonEquipmentBindingOffer()
+		else:
+			self.__RefreshDungeonEquipmentBindingView()
+
+	def __StopDungeonEquipmentBindingSession(self):
+		self.dungeonBindingReady = False
+		self.dungeonBindingOffered = False
+		dungeonequipmentbinding.receiver.EndSession(getattr(self, "dungeonBindingOwner", None))
+
+	def __DungeonEquipmentBindingOffer(self):
+		if self.dungeonBindingClosed:
+			return
+		self.dungeonBindingOffered = True
+		self.__AnswerDungeonEquipmentBindingOffer()
+
+	def __AnswerDungeonEquipmentBindingOffer(self):
+		if (self.dungeonBindingClosed or not self.dungeonBindingReady or not self.dungeonBindingOffered
+				or not dungeonequipmentbinding.receiver.Owns(self.dungeonBindingOwner)):
+			return
+		self.dungeonBindingOffered = False
+		dungeonequipmentbinding.receiver.Offer()
+		self.__RefreshDungeonEquipmentBindingView()
+
+	def __DungeonEquipmentBindingEnd(self, serial):
+		if (dungeonequipmentbinding.receiver.Owns(self.dungeonBindingOwner)
+				and dungeonequipmentbinding.receiver.End(serial)):
+			self.__RefreshDungeonEquipmentBindingView()
+
+	def __RefreshDungeonEquipmentBindingView(self):
+		if self.interface:
+			self.interface.RefreshInventory()
+			tooltip = self.interface.tooltipItem
+			view = getattr(tooltip, "dungeonBindingView", None)
+			if tooltip and tooltip.IsShow() and view:
+				tooltip.SetInventoryItem(view[1], view[0])
+
 	def __ServerCommand_Build(self):
 		serverCommandList = {
+			"ServiceItemOpenV1": self.__ServiceItemOpen,
+			"ServiceItemRefusedV1": self.__ServiceItemRefused,
+			"ServiceItemResultV1": self.__ServiceItemResult,
+			"Level104PassageOfferV1": self.__Level104PassageOffer,
+			"Level104PassageV1": self.__Level104Passage,
+			"DungeonEquipmentBindingOfferV1": self.__DungeonEquipmentBindingOffer,
+			"DungeonEquipmentBindingBeginV1": dungeonequipmentbinding.receiver.Begin,
+			"DungeonEquipmentBindingSlotV1": dungeonequipmentbinding.receiver.Slot,
+			"DungeonEquipmentBindingEndV1": self.__DungeonEquipmentBindingEnd,
 			"PetAlbumCapabilityV1": self.__PetAlbumCapability,
+			"AchievementNoticeV1": self.interface.ShowAchievementNotice,
 			"FeatureAvailabilityV1": featureavailability.receiver.Receive,
+			"EconomyViewV1": npcsellprice.receiver.Receive,
+			"AltheaMeteorLockV1": self.meteorProtection.receive,
+			"AltheaMeteorLockRemoveV1": self.meteorProtection.remove,
+			"AltheaMeteorNoticeV1": self.interface.ShowAltheaMeteorNotice,
 			"MissionBookStateV1": self.__MissionBookState,
 			"MissionBookErrorV1": self.__MissionBookError,
 			"MissionBookRewardV1": self.__MissionBookReward,
@@ -3246,7 +4156,8 @@ class GameWindow(ui.ScriptWindow):
 			"SwitchbotInstantResultV1": self.SwitchbotInstantResult,
 			"SwitchbotRarityV1": switchbotOptions.ReceiveMetadata,
 			"SwitchbotRefusedV1": self.__SwitchbotRefused,
-			"PvmPersonalV1": self.pvmPersonal.Snapshot,
+			"PvmPersonalV1": self.__PvmPersonalSnapshot,
+			"DuelResultV1": self.__DuelResult,
 			"ResonanceSealValuesV1": self.__ReceiveResonanceSealValues,
 			"CaptchaV4Stage" : self.CaptchaV4Stage,
 			"ConsoleEnable" : self.__Console_Enable,
@@ -3276,6 +4187,14 @@ class GameWindow(ui.ScriptWindow):
 			"horse_state" : self.__Horse_UpdateState,
 			"hide_horse_state" : self.__Horse_HideState,
 			"GuildV2Disband" : self.interface.OpenGuildDisband,
+			"GuildV2Leave" : self.interface.OpenGuildLeave,
+			"GuildPortalQuest" : self.__GuildPortalQuest,
+			"GuildPortalLobby" : self.__GuildPortalLobby,
+			"GuildPortalLobbyOpen" : self.__GuildPortalLobbyOpen,
+			"GuildPortalGolem" : self.__GuildPortalGolem,
+			"GuildPortalPopup" : self.__GuildPortalPopup,
+			"GuildPortalLobbyClose" : self.__GuildPortalLobbyClose,
+			"guild_portal_cmd" : self.__GuildPortalQuestCMD,
 			"WarUC" : self.__GuildWar_UpdateMemberCount,
 			"test_server" : self.__EnableTestServerFlag,
 			"mall" : self.__InGameShop_Show,
@@ -3403,11 +4322,26 @@ class GameWindow(ui.ScriptWindow):
 				"BiologRow2" : self.SetBioRow2,
 				"BiologRow3" : self.SetBioRow3,
 				"BiologEnd2" : self.SetBioEnd2,
+				"BiologRequestV1" : self.SetBioRequestV1,
+				"BiologRevisionV1" : self.SetBioRevisionV1,
+				"BiologResultV1" : self.SetBioResultV1,
 				"BiologData" : self.SetBioData,
 				"BiologStone" : self.SetBioStone,
 				"BiologReward" : self.SetBioGift,
 				"BiologEmpty" : self.SetBioEmpty,				
 			})
+
+		if app.ENABLE_WIKI:
+			serverCommandList["WikiCatalogV1"] = self.interface.OnWikiCatalog
+			serverCommandList["LiveCatalogV1"] = self.interface.OnLiveCatalog
+
+		# Guild catalogue applications (root/uiguildv2katalog.py).
+		serverCommandList["GuildAppV1"] = self.interface.OnGuildApplication
+
+		# Craft book (uicraftbook): the answer to "/craft state", one snapshot of CraftBeginV1 ... CraftEndV1 lines.
+		serverCommandList.update({
+		})
+
 
 		if app.ENABLE_WHEEL_OF_FORTUNE:
 			serverCommandList.update({"SetItemData" : self.interface.SetItemData})
@@ -3425,6 +4359,9 @@ class GameWindow(ui.ScriptWindow):
 
 		if app.ENABLE_PLAYER_RANKING:
 			serverCommandList.update({"SetRankingResetInfo" : self.SetRankingResetInfo,
+                "GlobalRankingBeginV1": self.interface.GlobalRankingBegin,
+                "GlobalRankingRowV1": self.interface.GlobalRankingRow,
+                "GlobalRankingEndV1": self.interface.GlobalRankingEnd,
 			})
 
 		if app.ENABLE_DESTROY_ITEM_RESTORE:
@@ -3441,6 +4378,7 @@ class GameWindow(ui.ScriptWindow):
 				"dungeon_log_info" : self.interface.LoadServerData,
 				"DungeonRejoinOffer" : self.__DungeonRejoinOffer,
 				"DungeonRejoinResult" : self.__DungeonRejoinResult,
+				"DungeonRejoinRetry" : self.__DungeonRejoinRetry,
 				"DungeonBossDropsBeginV1" : self.interface.DungeonBossDropsBegin,
 				"DungeonBossDropsItemV1" : self.interface.DungeonBossDropsItem,
 				"DungeonBossDropsEndV1" : self.interface.DungeonBossDropsEnd,
@@ -3450,9 +4388,23 @@ class GameWindow(ui.ScriptWindow):
 		if app.ENABLE_ITEMSHOP:
 			serverCommandList.update({"SetDragonCoin" : self.ItemShopSetDragonCoin})
 			serverCommandList["ItemShopClosed"] = self.ItemShopClosed
+			serverCommandList["ItemShopMaxCount"] = self.ItemShopMaxCount
+			serverCommandList["ItemShopCostumeExchangeRules"] = self.ItemShopCostumeExchangeRules
+			serverCommandList["ItemShopCostumeExchangeDone"] = self.ItemShopCostumeExchangeDone
 
+		serverCommandList["AfkRewardCauseV1"] = self.OnAfkRewardCause
+		serverCommandList["AfkRewardZonesV1"] = self.OnAfkRewardZones
+		serverCommandList["TargetDropOrderV1"] = self.__TargetDropOrder
+		if app.ENABLE_VIEW_EQUIPMENT_SYSTEM:
+			serverCommandList["ViewEquipInfoV1"] = self.__ViewEquipInfo
 		serverCommandList["DungeonObjectiveV1"] = self.__DungeonObjective
+		serverCommandList["InputGuardV1"] = self.__InputGuardOffer
+		serverCommandList["InputGuardLegendV1"] = self.__InputGuardLegend
+		serverCommandList["InputGuardWatchState"] = self.__InputGuardWatchState
+		serverCommandList["GMPanelCatalogV1"] = self.__GMPanelCatalog
 		serverCommandList["EquipmentBonusesV1"] = itembonuspresentation.totals.Receive
+		serverCommandList["CharacterBonusesV1"] = characterbonuses.totals.Receive
+		serverCommandList["BonusSourcesV1"] = bonussources.server.Receive
 		serverCommandList["QuickEquipReset"] = self.interface.QuickEquipReset
 		serverCommandList["QuickEquipSet"] = self.interface.QuickEquipSet
 		serverCommandList["QuickEquipItem"] = self.interface.QuickEquipItem
@@ -3460,8 +4412,16 @@ class GameWindow(ui.ScriptWindow):
 		serverCommandList["QuickEquipStatus"] = self.interface.QuickEquipStatus
 		serverCommandList["CraftSelectionV1"] = self.__CraftSelectionCapability
 		serverCommandList["CraftSelectionSourceV1"] = self.__CraftSelectionSource
+		serverCommandList["CraftIdsV1"] = self.__CraftIdsOffer
+		serverCommandList["CraftToolShopV1"] = self.__CraftToolShop
+		serverCommandList["CraftToolOpenV1"] = self.__CraftToolOpen
+		serverCommandList["CraftToolV1"] = self.__CraftToolState
 		serverCommandList["TalismanSet5V1"] = self.__TalismanSetCapability
 		serverCommandList["TalismanSetError"] = self.__TalismanSetError
+		# Unstuck countdown, cancel reason and result (root/uiunstuck.py)
+		serverCommandList["UnstuckCountdown"] = uiunstuck.controller.OnCountdown
+		serverCommandList["UnstuckCancel"] = uiunstuck.controller.OnCancel
+		serverCommandList["UnstuckDone"] = uiunstuck.controller.OnDone
 
 		if app.ENABLE_REWARD_SYSTEM:
 			serverCommandList.update({"RewardInfo" : self.SetRewardPlayers})
@@ -3488,6 +4448,7 @@ class GameWindow(ui.ScriptWindow):
 		if app.ENABLE_BUFF_SYSTEM:
 			serverCommandList.update({
 			"samanboard" : self.OpenSupportGui,
+			"OpenSupportUpgrade" : self.OpenSupportUpgrade,
 			"BuffiNameRequest" : self.OpenBuffiNameDialog,
 			"SupportName" : self.SetSupportName,
 			"BuffiVisual" : self.SetBuffiVisual,
@@ -3521,8 +4482,8 @@ class GameWindow(ui.ScriptWindow):
 			serverCommandList["clear_guild_reddragonlair_ranking"] = self.__ClearGuildRedDragonLairRanking
 			serverCommandList["check_reddragonlairranking_board"] = self.__CheckRedDragonLairRanking
 
-		if app.ENABLE_BOSS_TRACK:
-			serverCommandList["SetBossTrack"] = self.interface.SetBossTrack
+		# ALTHEA-626: ignore old tracker pushes without constructing a window.
+		serverCommandList["SetBossTrack"] = self.interface.SetBossTrack
 
 		if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 			serverCommandList["auto_off"] = self.__AutoOff
@@ -3531,21 +4492,139 @@ class GameWindow(ui.ScriptWindow):
 
 		if app.ENABLE_DROP_INFO_WINDOW:
 			serverCommandList["DropInfo"] = self.RecvDropInfo
+		if getattr(app, "ENABLE_DROP_TRACKER", 0):
+			serverCommandList["DropTrackerGatherV1"] = self.__DropTrackerGatherOffer
+		serverCommandList["DungeonTicketUsed"] = self.__DungeonTicketUsed
+		serverCommandList["AttrChangeCountV1"] = self.__AttrChangeCount
+
+		if app.ENABLE_SEND_TARGET_INFO:
+			serverCommandList["TargetDropLevelGapV1"] = self.__TargetDropLevelGap
 
 		if app.ENABLE_NEW_DROP_DIALOG:
 			serverCommandList["ItemDestroyResultV1"] = self.__ItemDestroyResult
 
+		if app.ENABLE_MAINTENANCE_SYSTEM:
+			serverCommandList["maintenance_reason"] = self.__MaintenanceReason
+
 		self.serverCommander = stringCommander.Analyzer()
 		for serverCommandItem in serverCommandList.items():
 			self.serverCommander.SAFE_RegisterCallBack(
-				serverCommandItem[0], serverCommandItem[1]
+				serverCommandItem[0], serverCommandItem[1],
+				# Fixed arity drops surplus tokens; these lines keep every token.
+				variadic=serverCommandItem[0] in ("WikiCatalogV1", "EconomyViewV1", "LiveCatalogV1", "GuildAppV1",
+					"CraftToolShopV1", "CraftToolOpenV1", "CraftToolV1",
+					"UnstuckCountdown", "UnstuckCancel", "UnstuckDone",
+					"ServiceItemOpenV1", "ServiceItemResultV1")
 			)
 
 	if app.ENABLE_CHANGE_LOOK_SYSTEM:
 		def __ChangeWindowOpen(self, type):
 			self.interface.ChangeWindowOpen(type)
 
+	def __DuelResult(self, winner, loser, winnerDamage, loserDamage, winnerHP, winnerMaxHP, durationMs):
+		# Server-src feat/duel-result-20261009: the result of a duel death.
+		if self.interface:
+			self.interface.RecvDuelServerResult(winner, loser, winnerDamage, loserDamage,
+				winnerHP, winnerMaxHP, durationMs)
+
+	# Keep the complete record: fixed-arity stringCommander drops excess fields.
+	def __CraftBookLine(self, command, *args):
+		if self.interface:
+			self.interface.CraftBookServerLine(command, args)
+
+	# Preserve variadic tool records for crafttoolmodel validation.
+	def __CraftToolShop(self, *args):
+		if self.interface:
+			self.interface.CraftToolServerLine("CraftToolShopV1", args)
+
+	def __CraftToolOpen(self, *args):
+		if self.interface:
+			self.interface.CraftToolServerLine("CraftToolOpenV1", args)
+
+	def __CraftToolState(self, *args):
+		if self.interface:
+			self.interface.CraftToolServerLine("CraftToolV1", args)
+
+	def __TargetDropOrder(self, race, append, vnums):
+		dropsort.ReceiveOrder(race, append, vnums)
+
+	def __ViewEquipInfo(self, vid, level, race, special3, special4):
+		# the viewed player's level and race and the vnums of the
+		# special items 3 / 4, sent right after the view-equipment packet; the R1 Vyzbroj shows them.
+		if not self.interface:
+			return
+		try:
+			values = [int(value) for value in (vid, level, race, special3, special4)]
+		except ValueError:
+			return
+		self.interface.SetEquipmentDialogInfo(*values)
+
 	def BINARY_ServerCommand_Run(self, line):
+		if line.split()[:1] == ["EventBoxV1"]:
+			import eventboxmodel
+			eventboxmodel.ServerLine(line)
+			return 1
+		if line.lstrip().startswith("GuildArena"):
+			# guild wars / guild arena state for the tab Cechy of the arena window (the server's /guild_arena)
+			try:
+				import guildarena
+				tokens = line.split()
+				if tokens[0] == "GuildArenaWarriorsV1":
+					guildarena.ReceiveWarriors(tokens[1:])
+				else:
+					guildarena.Receive(tokens[1:])
+			except Exception:
+				dbg.TraceError("GuildArenaV1: %s" % line)
+		if line.startswith("MarketSalesV1"):
+			# Sale history of "Můj obchod" (root/marketsaleshistory.py, server /market_sales).
+			import marketsaleshistory
+			marketsaleshistory.ServerLine(line)
+			return 1
+		if line.startswith("GuildCosmV1"):
+			# guild cosmetics / DM treasury (root/guildcosmetic.py, server game/src/guild_cosmetic.cpp)
+			import guildcosmetic
+			guildcosmetic.ServerLine(line)
+			return 1
+		if line.lstrip().startswith("MiningCheck"):
+			tokens = line.split()
+			if tokens[0] in ("MiningCheckV1", "MiningCheckResultV1", "MiningCheckModeV1"):
+				if self.interface:
+					self.interface.MiningCheckServerLine(tokens[0], tokens[1:])
+				return
+		if line.lstrip().startswith("CraftMastery"):
+			# craft mastery tree (root/craftmasterymodel.py)
+			tokens = line.split()
+			if self.interface:
+				self.interface.CraftMasteryServerLine(tokens[0], tokens[1:])
+			return 1
+		if line.lstrip().startswith("CraftContract"):
+			# craft contracts in the Denní úkoly window (root/craftcontractmodel.py)
+			tokens = line.split()
+			if self.interface:
+				self.interface.CraftContractServerLine(tokens[0], tokens[1:])
+			return 1
+		if line.lstrip().startswith("CraftTitle"):
+			# own craft titles and tool looks (root/crafttitlesmodel.py, the book's Tituly a vzhled page)
+			tokens = line.split()
+			if self.interface:
+				self.interface.CraftTitlesServerLine(tokens[0], tokens[1:])
+			return 1
+		if line.lstrip().startswith("WoodCheck"):
+			tokens = line.split()
+			if tokens[0] in ("WoodCheckV3", "WoodCheckV2", "WoodCheckResultV1", "WoodCheckEndV1", "WoodCheckModeV1"):
+				if self.interface:
+					self.interface.WoodCheckServerLine(tokens[0], tokens[1:])
+				return
+		if line.lstrip().startswith("Craft"):
+			import craftbookmodel
+			tokens = line.split()
+			if tokens[0] == "CraftChangedV1":
+				if self.interface:
+					self.interface.CraftBookChanged()
+				return 1
+			if tokens[0] in craftbookmodel.ARITY:
+				self.__CraftBookLine(tokens[0], *tokens[1:])
+				return 1
 		#dbg.TraceError(line)
 		try:
 			#print " BINARY_ServerCommand_Run", line
@@ -3553,6 +4632,33 @@ class GameWindow(ui.ScriptWindow):
 		except RuntimeError as msg:
 			dbg.TraceError(msg)
 			return 0
+
+	def __TicketNoticeWindow(self):
+		if self.ticketNotice is None:
+			self.ticketNotice = uiticketnotice.TicketNotice()
+		return self.ticketNotice
+
+	def __ShowTicketNotice(self, notice):
+		if notice:
+			vnum, count, context = notice
+			self.__TicketNoticeWindow().Push(vnum, count, context)
+
+	def __PollTicketNotice(self):
+		try:
+			mapName = background.GetCurrentMapName()
+		except Exception:
+			return
+		for notice in ticketnoticemodel.STATE.Poll(player.GetItemCountByVnum, mapName, app.GetTime(), player.GetName()):
+			self.__ShowTicketNotice(notice)
+
+	def __DungeonTicketUsed(self, vnum, count):
+		self.__ShowTicketNotice(ticketnoticemodel.STATE.OnServerUsed(vnum, count, app.GetTime()))
+
+	def __AttrChangeCount(self, windowType, cell, count):
+		try:
+			attrchangecount.Set(int(windowType), int(cell), int(count))
+		except (TypeError, ValueError):
+			pass
 
 	def __MissionBookState(self, book, mission, p1, p2, p3, ready):
 		if self.interface:
@@ -3569,6 +4675,8 @@ class GameWindow(ui.ScriptWindow):
 			chat.AppendChat(chat.CHAT_TYPE_INFO, Text("REWARD_RECEIVED"))
 
 	def __DungeonObjective(self, sequence, instance, boss, phase, phases, key, current, target, status):
+		if self.seamlessWarping:
+			return
 		# stringCommander dispatches co_argcount positional fields; *args loses them.
 		arguments = (sequence, instance, boss, phase, phases, key, current, target, status)
 		if self.interface and self.interface.wndMiniMap:
@@ -3672,6 +4780,13 @@ class GameWindow(ui.ScriptWindow):
 
 	def __SwitchbotRefused(self, mode, index, code, first, second):
 		# ALTHEA-647: the server says why a switchbot start was refused.
+		# a start of an item that already has the bonuses is not told but asked: roll it anyway?
+		if mode == "slot" and code == "SLOT_MATCHED" and self.interface:
+			try:
+				if self.interface.AskSwitchbotReroll(int(index)):
+					return
+			except ValueError:
+				pass
 		import switchbotrefusals
 		chat.AppendChat(chat.CHAT_TYPE_INFO, switchbotrefusals.Message(code, first, second))
 
@@ -3921,6 +5036,12 @@ class GameWindow(ui.ScriptWindow):
 			background.SetEnvironmentData(1)
 
 	def __DayMode_Update(self, mode):
+		# One curtain at a time: under the warp curtain apply it directly.
+		warpLocked = getattr(getattr(self, "stream", None), "IsWarpCurtainInputLocked", None)
+		if getattr(self, "seamlessWarping", False) or (warpLocked and warpLocked()):
+			self.__PRESERVE_DayMode_Update(mode)
+			return
+
 		if self.initialWorldRevealPending:
 			self.initialWorldRevealDayMode = mode
 			return
@@ -4106,8 +5227,8 @@ class GameWindow(ui.ScriptWindow):
 	if app.ENABLE_ITEMSHOP:
 		def ItemShopClear(self, updateTime):
 			uiItemShop.ItemShopClear(int(updateTime))
-		def ItemShopAppendItem(self, categoryIndex, categorySubIndex, itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount):
-			uiItemShop.ItemShopAppendItem(int(categoryIndex), int(categorySubIndex), int(itemID), int(itemVnum), int(itemPrice), int(itemDiscount), int(itemOffertime), int(itemTopSelling), int(itemAddedTime), int(itemSellingCount))
+		def ItemShopAppendItem(self, categoryIndex, categorySubIndex, itemID, itemVnum, itemPrice, itemDiscount, itemOffertime, itemTopSelling, itemAddedTime, itemSellingCount, itemCount=1):
+			uiItemShop.ItemShopAppendItem(int(categoryIndex), int(categorySubIndex), int(itemID), int(itemVnum), int(itemPrice), int(itemDiscount), int(itemOffertime), int(itemTopSelling), int(itemAddedTime), int(itemSellingCount), int(itemCount))
 		def ItemShopHideLoading(self):
 			self.interface.ItemShopHideLoading()
 		def ItemShopOpenMainPage(self):
@@ -4122,11 +5243,21 @@ class GameWindow(ui.ScriptWindow):
 			self.interface.ItemShopSetDragonCoin(int(dragonCoin))
 		def ItemShopSetReaction(self, itemID, likes, dislikes, myVote):
 			uiItemShop.ItemShopSetReaction(int(itemID), int(likes), int(dislikes), int(myVote))
+		def ItemShopMaxCount(self, maxCount):
+			uiItemShop.ItemShopSetMaxCount(int(maxCount))
 		def ItemShopClosed(self):
 			# The server refused the request: its item_shop_open gate is off
 			# (owner request 2026-10-03). The server stays the authority.
 			self.interface.ItemShopClosed()
 			self.PopupMessage(getattr(localeInfo, "ITEMSHOP_CLOSED", "The Item Shop is temporarily closed."))
+		def ItemShopCostumeExchangeRules(self, count, chests):
+			import uiitemshopcostumeexchange
+			uiitemshopcostumeexchange.SetRules(count, chests)
+		def ItemShopCostumeExchangeDone(self, chest):
+			import uiitemshopcostumeexchange
+			uiitemshopcostumeexchange.OnDone(int(chest))
+			item.SelectItem(int(chest))
+			self.PopupMessage(localeInfo.ITEMSHOP_COSTUME_EXCHANGE_DONE % item.GetItemName())
 
 	if app.ENABLE_SKILL_SELECT_GUI:
 		def OPEN_SKILL_SELECT(self):
@@ -4340,6 +5471,11 @@ class GameWindow(ui.ScriptWindow):
 				osfInfo.msgname=""
 
 	if app.ENABLE_MAINTENANCE_SYSTEM:
+		def __MaintenanceReason(self, reason):
+			# maintenance_reason <id>: the preset the GM chose (1 update, 2 fixes, 3 restart; 0 none), for the hint of the label.
+			if self.interface:
+				self.interface.SetMaintenanceReason(reason)
+
 		def BINARY_ShowMaintenanceSign(self, timeLeft, duration):
 			self.interface.ShowMaintenanceSign(timeLeft, duration)
 
@@ -4425,6 +5561,15 @@ class GameWindow(ui.ScriptWindow):
 				type2, value2, type3, value3, type4, value4, type5, value5,
 				type6, value6, count, due, done, alarm, chosen)
 
+		def SetBioRequestV1(self, version):
+			self.interface.wndBio.RequestCapability(version)
+
+		def SetBioRevisionV1(self, index, revision):
+			self.interface.wndBio.SnapshotRevision(index, revision)
+
+		def SetBioResultV1(self, index, revision, status):
+			self.interface.wndBio.RequestResult(index, revision, status)
+
 		def SetBioEnd2(self):
 			self.interface.wndBio.EndSnapshot()
 
@@ -4476,7 +5621,7 @@ class GameWindow(ui.ScriptWindow):
 				content = content.replace("$", " ")
 				self.interface.RegisterGameMasterName("[SYSTEM]")
 				chat.AppendWhisper(chat.WHISPER_TYPE_CHAT, "[SYSTEM]", content)
-				self.interface.RecvLegacyWhisper("[SYSTEM]")
+				self.interface.RecvLegacyWhisper("[SYSTEM]", content)
 
 	if app.ENABLE_AURA_SYSTEM:
 		def AuraWindowOpen(self, type):
@@ -4728,7 +5873,7 @@ class GameWindow(ui.ScriptWindow):
 			content = content.replace("$", " ")
 			self.interface.RegisterGameMasterName("[Dungeon Info]")
 			chat.AppendWhisper(chat.WHISPER_TYPE_CHAT, "[Dungeon Info]", content)
-			self.interface.RecvLegacyWhisper("[Dungeon Info]")
+			self.interface.RecvLegacyWhisper("[Dungeon Info]", content)
 
 	if app.ENABLE_BRAVE_CAPE_RENEWAL:
 		def SetBraveCapeStatus(self, status):
@@ -4746,6 +5891,12 @@ class GameWindow(ui.ScriptWindow):
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.QUEUE_MAX)
 		elif notice == 4:
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.QUEUE_TRIMMED)
+		elif notice == 6:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, getattr(localeInfo, "QUEUE_EXPIRED",
+				u"[Fronta meteorů] Fronta zrušena kvůli neaktivitě."))
+		elif notice == 7:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, getattr(localeInfo, "QUEUE_RESERVED",
+				u"[Fronta meteorů] Vybrané cíle už jsou v jiné frontě."))
 		elif notice == 5:
 			message = getattr(
 				localeInfo,
@@ -4869,6 +6020,10 @@ class GameWindow(ui.ScriptWindow):
 
 		def OpenSupportGui(self):
 			self.interface.OpenSupportGui()
+
+		def OpenSupportUpgrade(self, skillID):
+			# the server, when a Buffi skill book or the Buffi soul stone (skillID 0) is used
+			self.interface.OpenSupportUpgrade(int(skillID))
 			
 		def SetBuffiVisual(self, enabled, vid="0", race="0"):
 			# Server notice of the elf-form outfit race; the races are registered at start.
@@ -4918,6 +6073,9 @@ class GameWindow(ui.ScriptWindow):
 
 	if app.ENABLE_SWITCHBOT_SYSTEM:
 		def RefreshSwitchbotWindow(self):
+			# The EXE calls this right after the server's switchbot table replaced the client's, with or without
+			# the window (a warp enters a core with the table of the last starts): put the player's bonuses back.
+			switchbotMemory.Apply()
 			if self.interface:
 				self.interface.RefreshSwitchbotWindow()
 			
@@ -4966,6 +6124,9 @@ class GameWindow(ui.ScriptWindow):
 			self.interface.wndBattlePass.SetExperience(int(EXP), int(totalEXP))
 			self.interface.wndBattlePass.SetLevel(int(level))
 			self.interface.wndBattlePass.SetSeasonEndTime(int(seasonEndUnix))
+			# Activation month (1-12): rewards are collectable only in that month
+			# (server CollectBattlePassRewards); the panel badge reads it.
+			self.interface.wndBattlePass.monthBattlePass = int(monthBattlePass)
 			
 			# constInfo.BATTLE_PASS_COINS = int(coins)
 
@@ -5046,6 +6207,10 @@ class GameWindow(ui.ScriptWindow):
 			if self.interface:
 				self.interface.SetDropTrackerCapability(bool(available))
 
+		def __DropTrackerGatherOffer(self, version):
+			if self.interface:
+				self.interface.OfferDropTrackerGather(version)
+
 		def BINARY_DropTrackerBatch(self, rows):
 			if self.interface:
 				self.interface.AddDropTrackerBatch(rows)
@@ -5056,6 +6221,9 @@ class GameWindow(ui.ScriptWindow):
 				self.wndDropInfo = uiDropInfo.Window()
 
 		def RecvDropInfo(self, vnum, count):
+			# The auto ticket of a dungeon entry is no pickup: the entry tells the used ticket instead.
+			if ticketnoticemodel.STATE.OnGain(vnum, count, app.GetTime()):
+				return
 			if (
 				getattr(app, "ENABLE_DROP_TRACKER", 0) and
 				self.interface and
@@ -5134,3 +6302,17 @@ def _CrimsonGameProfile(self, token, status, pid, name, race):
 GameWindow.BINARY_UnifiedMessengerPlayerProfileCapability = _CrimsonGameProfileCapability
 GameWindow.BINARY_UnifiedMessengerPlayerProfile = _CrimsonGameProfile
 # CRIMSON_EMBER_PROFILE_GAME_V1_END
+
+
+def _UnifiedMessengerPresenceCapability(self, enabled):
+	if self.interface:
+		self.interface.UnifiedMessengerPresenceCapability(bool(enabled))
+
+
+def _UnifiedMessengerPresence(self, token, name, state):
+	if self.interface:
+		self.interface.UnifiedMessengerPresence(int(token), str(name), int(state))
+
+
+GameWindow.BINARY_UnifiedMessengerPresenceCapability = _UnifiedMessengerPresenceCapability
+GameWindow.BINARY_UnifiedMessengerPresence = _UnifiedMessengerPresence

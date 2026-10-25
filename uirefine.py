@@ -14,15 +14,18 @@ import osfInfo
 import wiki
 import wndMgr
 import talismanrefine
+import ownedcount
+import gloverefine
+import crafttoolmodel
 
 if app.WJ_ENABLE_TRADABLE_ICON:
 	INVENTORY_PAGE_SIZE = player.INVENTORY_PAGE_SIZE
 
 class RefineDialog(ui.ScriptWindow):
-	makeSocketSuccessPercentage = ( 100, 33, 20, 15, 10, 5, 0 )
-
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.__LoadScript()
 
 		self.scrollItemPos = 0
@@ -68,24 +71,13 @@ class RefineDialog(ui.ScriptWindow):
 		ui.ScriptWindow.__del__(self)
 
 	def __LoadQuestionDialog(self):
-		self.dlgQuestion = ui.ScriptWindow()
-
-		try:
-			pyScrLoader = ui.PythonScriptLoader()
-			pyScrLoader.LoadScriptFile(self.dlgQuestion, "uiscript/questiondialog2.py")
-		except:
-			import exception
-			exception.Abort("RefineDialog.__LoadQuestionDialog.LoadScript")
-
-		try:
-			GetObject=self.dlgQuestion.GetChild
-			GetObject("message1").SetText(localeInfo.REFINE_DESTROY_WARNING)
-			GetObject("message2").SetText(localeInfo.REFINE_WARNING2)
-			GetObject("accept").SetEvent(ui.__mem_func__(self.Accept))
-			GetObject("cancel").SetEvent(ui.__mem_func__(self.dlgQuestion.Hide))
-		except:
-			import exception
-			exception.Abort("SelectCharacterWindow.__LoadQuestionDialog.BindObject")
+		# uiCommon.QuestionDialog2 (the same uiscript questiondialog2.py, two lines + Ano / Ne): the R1 look of the
+		# common dialogs (uir1dialog) and its Esc close come with it, "Starý vzhled" keeps the original.
+		self.dlgQuestion = uiCommon.QuestionDialog2()
+		self.dlgQuestion.SetText1(localeInfo.REFINE_DESTROY_WARNING)
+		self.dlgQuestion.SetText2(localeInfo.REFINE_WARNING2)
+		self.dlgQuestion.SetAcceptEvent(ui.__mem_func__(self.Accept))
+		self.dlgQuestion.SetCancelEvent(ui.__mem_func__(self.dlgQuestion.Close))
 
 	def Destroy(self):
 		self.ClearDictionary()
@@ -95,35 +87,15 @@ class RefineDialog(ui.ScriptWindow):
 		self.toolTip = 0
 		self.dlgQuestion = 0
 
-	def GetRefineSuccessPercentage(self, scrollSlotIndex, itemSlotIndex):
-		# Grade scrolls: the server rolls refine_proto.prob of the item's refine
-		# set, adjusted by the scroll type (server-src GetScrollRefinePct). The
-		# client keeps no copy of that rule, so it shows no preliminary number.
-		if -1 != scrollSlotIndex and player.IsRefineGradeScroll(scrollSlotIndex):
-			return None
-
-		for i in range(player.METIN_SOCKET_MAX_NUM+1):
-			if 0 == player.GetItemMetinSocket(itemSlotIndex, i):
-				break
-
-		return self.makeSocketSuccessPercentage[i]
-
 	def Open(self, scrollItemPos, targetItemPos):
 		self.weaponEnhancement = None
 		self.scrollItemPos = scrollItemPos
 		self.targetItemPos = targetItemPos
-		if not osfInfo.SHOW_REFINE_PERCENTAGE:
-			self.successPercentage.Hide()
-
-		percentage = self.GetRefineSuccessPercentage(scrollItemPos, targetItemPos)
-		if 0 == percentage:
-			return
-		if percentage is None:
-			self.successPercentage.Hide()
-		else:
-			self.successPercentage.SetText(localeInfo.REFINE_SUCCESS_PROBALITY % (percentage))
-			if osfInfo.SHOW_REFINE_PERCENTAGE:
-				self.successPercentage.Show()
+		# Every USE_TUNING scroll is an ordinary refine: the server rolls
+		# refine_proto.prob of the item's refine set, adjusted by the scroll type,
+		# and sends it only with the refine
+		# window that follows. This step knows no chance, so it shows none.
+		self.successPercentage.Hide()
 
 		itemIndex = player.GetItemIndex(targetItemPos)
 		self.toolTip.ClearToolTip()
@@ -181,13 +153,7 @@ class RefineDialog(ui.ScriptWindow):
 		if self.weaponEnhancement:
 			self.Accept()
 			return
-		percentage = self.GetRefineSuccessPercentage(-1, self.targetItemPos)
-		if 100 == percentage:
-			self.Accept()
-			return
-
-		self.dlgQuestion.SetTop()
-		self.dlgQuestion.Show()
+		self.dlgQuestion.Open()
 
 	def Accept(self):
 		if self.weaponEnhancement:
@@ -201,7 +167,8 @@ class RefineDialog(ui.ScriptWindow):
 
 	def Close(self):
 		self.weaponEnhancement = None
-		self.dlgQuestion.Hide()
+		if self.dlgQuestion:
+			self.dlgQuestion.Close()
 		self.Hide()
 
 	def OnPressEscapeKey(self):
@@ -209,8 +176,10 @@ class RefineDialog(ui.ScriptWindow):
 		return True
 
 class RefineDialogNew(ui.ScriptWindow):
-	MATERIAL_AVAILABLE_COLOR = grp.GenerateColor(0.46, 0.85, 0.55, 1.0)
-	MATERIAL_MISSING_COLOR = grp.GenerateColor(0.91, 0.43, 0.43, 1.0)
+	# the material name stays neutral, only "owned / need" is green / red (root/ownedcount.py)
+	MATERIAL_NAME_COLOR = ownedcount._Signed(0xFFEEE6D8)
+	MATERIAL_AVAILABLE_COLOR = ownedcount.Color(1, 1)
+	MATERIAL_MISSING_COLOR = ownedcount.Color(0, 1)
 	WINDOW_WIDTH = 284
 	MATERIALS_Y = 166
 	MATERIAL_ROW_HEIGHT = 34
@@ -233,13 +202,38 @@ class RefineDialogNew(ui.ScriptWindow):
 	ACTION_BOTTOM = 275
 	MATERIALS_PER_COLUMN = 7
 	SECOND_COLUMN_X = 260
+	# R1 look (): the R1 price (root/uir1price.py) in an R1 well instead of the footer strip and the R1
+	# OK / Zrušit row (26 px buttons, 10 px above the bottom edge: the dialog grows by R1_BUTTON_EXTRA)
+	R1_PRICE_X = MATERIAL_ROW_X			# the R1 price well spans the material rows (slot + name frame)
+	R1_PRICE_W = MATERIAL_TEXT_X + 214
+	R1_BUTTON_EXTRA = 12
+	r1Price = None
+	r1Buttons = None
+	r1Checks = ()		# uir1price.CheckBoxTwin of "Zrychlit vylepšování" (box, gap, label; left margin of the rows)
+	# Tool mode: the rod, the pickaxe and the axe
+	# are upgraded in this window. The same slots, rows, chance line, price and buttons; the first row is the practice
+	# (a material row with the practice bar of the Biolog in its name frame, R1 look only), the seal and the material
+	# rows are ordinary rows with the server's counts. The texts are locale_game CRAFT_TOOL_* (root/crafttoolmodel.py).
+	PRACTICE_TEXT_Y = 11			# the name and "mám / potřeba" of the practice row: their Tahoma 12 cell ends on the bar
+	PRACTICE_BAR_BOTTOM = 3			# the bar's bottom edge above the name frame's bottom edge
+	toolYang = None
+	toolMode = False
+	toolState = None			# crafttoolmodel.ToolState of the tool in the window, None = empty
+	toolIds = ()				# the tools of the NPC (CraftToolShopV1): the empty hint names them
+	toolCell = None				# the cell asked for (a drop, CraftToolOpenV1); its state replaces the shown one
+	toolAsking = False			# an info / up request is on its way (the inventory refresh asks only then not)
+	toolBar = None				# the practice bar (uir1price.ProgressBar: track, fill) on the name frame of row 0
+	toolLossText = None			# "[–10 % cviku]" right on the chance line (band A)
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.interface = None
 		self.isLoaded = False
 		self.materialRows = []
 		self.materialCount = 0
+		self.materials = []
 		self.toolTipItem = None
 		self.checkBox = None
 		self.yangParts = []
@@ -304,10 +298,16 @@ class RefineDialogNew(ui.ScriptWindow):
 		self.currentItemSlot.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
 		self.resultItemSlot.SetOverInItemEvent(ui.__mem_func__(self.OverInResultItem))
 		self.resultItemSlot.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
+		# tool mode: a tool dragged from the inventory into "Před vylepšením" (the blacksmith mode ignores drops)
+		self.currentItemSlot.SetSelectEmptySlotEvent(ui.__mem_func__(self.__SelectToolSlot))
+		self.currentItemSlot.SetSelectItemSlotEvent(ui.__mem_func__(self.__SelectToolSlot))
+		self.blacksmithTitle = self.GetChild("TitleName").GetText()
+		self.blacksmithAccept = self.acceptButton.GetText()
 
 		self.toolTipItem = uiToolTip.ItemToolTip()
 		self.toolTipItem.HideToolTip()
 		self.__CreateYangRow()
+		self.__BuildR1()
 
 		if app.ENABLE_AUTO_REFINE:
 			self.checkBox = self.GetChild("AutoRefineCheckBox")
@@ -363,6 +363,53 @@ class RefineDialogNew(ui.ScriptWindow):
 
 		self.yangParts = [background, moneyIcon]
 		self.costText = costText
+
+	def __BuildR1(self):
+		"""R1 look (the board dressed by root/uir1frame.py): the shared R1 price in an R1 well and the R1 OK / Zrušit
+		row (root/uir1price.py). The original yang strip and buttons stay for "Starý vzhled"; a failure here or a
+		later frame failure gives them back."""
+		if self.__dict__.get("r1frame") is None:
+			return
+		try:
+			import uir1price
+			self.r1Price = uir1price.PriceField(self.yangPanel, self.R1_PRICE_X, 0, self.R1_PRICE_W)
+			self.r1Buttons = uir1price.ConfirmButtons(self.board, self.acceptButton, self.cancelButton)
+			self.r1Buttons.Place(self.board.GetWidth(), self.board.GetHeight() - uir1price.BUTTON_BOTTOM)
+			if app.ENABLE_AUTO_REFINE:
+				native = self.GetChild("AutoRefineCheckBox")
+				self.r1Checks = (uir1price.CheckBoxTwin(self.board, native, self.R1_PRICE_X - 42),)
+			for part in self.yangParts + [self.costText]:
+				part.Hide()
+			# a later failure of the frame (uir1frame.FrameSkin.Undo) gives the original row and buttons back too
+			self.r1frame.undo.append(ui.__mem_func__(self.__DropR1))
+		except Exception:
+			try:
+				import uir1price
+				uir1price.TraceFailure("the refine dialog price and buttons")
+			except Exception:
+				pass
+			self.__DropR1()
+
+	def __DropR1(self):
+		checks, self.r1Checks = self.r1Checks, ()
+		for check in checks:
+			check.Restore()
+		if self.r1Buttons is not None:
+			self.r1Buttons.Restore()
+		if self.r1Price is not None:
+			self.r1Price.Destroy()
+		self.r1Price = None
+		self.r1Buttons = None
+		for part in self.yangParts + ([self.costText] if self.costText else []):
+			part.Show()
+
+	def __IsR1(self):
+		if self.r1Price is None:
+			return False
+		if self.__dict__.get("r1frame") is None:	# the frame failed after it was built: the original look
+			self.__DropR1()
+			return False
+		return True
 
 	def __ClearComparisonSlots(self):
 		for slot in (self.currentItemSlot, self.resultItemSlot):
@@ -423,6 +470,10 @@ class RefineDialogNew(ui.ScriptWindow):
 		slot.SetPosition(0, self.MATERIAL_SLOT_Y)
 		slot.SetSize(32, 32)
 		slot.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		r1frame = self.__dict__.get("r1frame")
+		if r1frame is not None:
+			# R1 (root/uir1frame.py): the item slot C; a frame failure puts the original back
+			r1frame.SetSlot(slot, "d:/ymir work/ui/public/Slot_Base.sub")
 		slot.AppendSlot(index, 0, 0, 32, 32)
 		slot.AddFlag("not_pick")
 		slot.RefreshSlot()
@@ -475,10 +526,24 @@ class RefineDialogNew(ui.ScriptWindow):
 			countLine.SetText("")
 			row.Hide()
 		self.materialCount = 0
+		self.materials = []
+		if self.toolBar is not None:
+			for layer in self.toolBar:
+				layer.Hide()
 
 	def Destroy(self):
 		self.OverOutItem()
 		self.__ClearMaterials()
+		if self.r1Price is not None:
+			self.r1Price.Destroy()
+		self.r1Price = None
+		if self.toolBar is not None:
+			for layer in self.toolBar:
+				layer.Destroy()
+		self.toolBar = None
+		self.toolLossText = None
+		self.toolState = None
+		self.r1Buttons = None
 		self.interface = None
 		self.ClearDictionary()
 		self.dlgQuestion = None
@@ -498,11 +563,13 @@ class RefineDialogNew(ui.ScriptWindow):
 		self.yangParts = []
 		self.materialRows = []
 		self.materialCount = 0
+		self.materials = []
 
 	def Open(self, targetItemPos, nextGradeItemVnum, cost, prob, type, apply_random_list, src_vnum, bonus=0):
 		if False == self.isLoaded:
 			self.__LoadScript()
 
+		self.__LeaveToolMode()
 		self.__ClearMaterials()
 		self.__Initialize()
 
@@ -513,33 +580,14 @@ class RefineDialogNew(ui.ScriptWindow):
 		self.type = type
 		self.apply_random_list = apply_random_list
 		self.src_vnum = src_vnum
-		self.currentItemVnum = player.GetItemIndex(targetItemPos)
-		self.currentMetinSlots = [
-			player.GetItemMetinSocket(targetItemPos, i)
-			for i in range(player.METIN_SOCKET_MAX_NUM)
-		]
-		self.currentAttrSlots = [
-			player.GetItemAttribute(targetItemPos, i)
-			for i in range(player.ATTRIBUTE_SLOT_MAX_NUM)
-		]
-		self.currentRefineElement = player.GetItemRefineElement(targetItemPos) if app.ENABLE_REFINE_ELEMENT_SYSTEM else None
-		self.currentApplyRandomList = [
-			player.GetItemApplyRandom(targetItemPos, i)
-			for i in range(player.APPLY_RANDOM_SLOT_MAX_NUM)
-		] if app.ENABLE_APPLY_RANDOM else None
-		self.currentSetValue = player.GetItemSetValue(targetItemPos) if getattr(app, "ENABLE_SET_ITEM", False) else 0
+		self.__ReadTarget(targetItemPos)
 
 		self.probText.SetText(localeInfo.REFINE_SUCCESS_PROBALITY % (self.percentage))
 		bonusFormat = u"[Bonus +%d%%]"
 		if app.GetLocalePath().replace("\\", "/").rsplit("/", 1)[-1].lower() == "cz":
 			bonusFormat = u"[Nav\u00edc +%d%%]"
 		self.bonusText.SetText(bonusFormat % bonus)
-		self.costText.SetText(
-			"%s %s" % (
-				localeInfo.NumberToString(self.cost),
-				localeInfo.CHEQUE_SYSTEM_UNIT_YANG,
-			)
-		)
+		self.__SetCost(self.cost)
 		if app.ENABLE_AUTO_REFINE:
 			if osfInfo.IS_AUTO_REFINE:
 				self.checkBox.Down()
@@ -561,8 +609,42 @@ class RefineDialogNew(ui.ScriptWindow):
 
 		self.Show()
 
+	def __ReadTarget(self, targetItemPos):
+		"""The item in ``targetItemPos`` with its sockets, bonuses and set (the tooltips of both slots)."""
+		self.currentItemVnum = player.GetItemIndex(targetItemPos)
+		self.currentMetinSlots = [
+			player.GetItemMetinSocket(targetItemPos, i)
+			for i in range(player.METIN_SOCKET_MAX_NUM)
+		]
+		self.currentAttrSlots = [
+			player.GetItemAttribute(targetItemPos, i)
+			for i in range(player.ATTRIBUTE_SLOT_MAX_NUM)
+		]
+		self.currentRefineElement = player.GetItemRefineElement(targetItemPos) if app.ENABLE_REFINE_ELEMENT_SYSTEM else None
+		self.currentApplyRandomList = [
+			player.GetItemApplyRandom(targetItemPos, i)
+			for i in range(player.APPLY_RANDOM_SLOT_MAX_NUM)
+		] if app.ENABLE_APPLY_RANDOM else None
+		self.currentSetValue = player.GetItemSetValue(targetItemPos) if getattr(app, "ENABLE_SET_ITEM", False) else 0
+
+	def __SetCost(self, cost):
+		"""The price row: the original strip's text and the R1 price (red when the player cannot pay it)."""
+		self.costText.SetText(
+			"%s %s" % (
+				localeInfo.NumberToString(cost),
+				localeInfo.CHEQUE_SYSTEM_UNIT_YANG,
+			)
+		)
+		if self.r1Price is not None:
+			import uir1price
+			self.r1Price.SetPrice(cost, uir1price.CanAfford(cost))
+
 	def Close(self):
 		self.dlgQuestion = None
+		if self.toolMode:
+			self.__ReleaseToolCell()
+			self.toolCell = None
+			self.toolAsking = False
 		self.__ClearMaterials()
 		if self.toolTipItem:
 			self.toolTipItem.HideToolTip()
@@ -582,13 +664,10 @@ class RefineDialogNew(ui.ScriptWindow):
 		slot.SetItemSlot(index, vnum, count)
 		slot.RefreshSlot()
 		item.SelectItem(vnum)
-		ownedCount = player.GetItemCountByVnum(vnum)
-		hasEnoughMaterial = ownedCount >= count
-		textColor = self.MATERIAL_AVAILABLE_COLOR if hasEnoughMaterial else self.MATERIAL_MISSING_COLOR
-		textLine.SetPackedFontColor(textColor)
-		countLine.SetPackedFontColor(textColor)
-		textLine.SetText("%s x%d" % (item.GetItemName(), count))
-		countLine.SetText("[%d]" % ownedCount)
+		textLine.SetPackedFontColor(self.MATERIAL_NAME_COLOR)
+		textLine.SetText(item.GetItemName())
+		ownedcount.Paint(countLine, ownedcount.Owned(vnum), count)
+		self.materials.append((vnum, count))
 
 		if localeInfo.IsARABIC():
 			textLine.SetPosition(
@@ -611,13 +690,244 @@ class RefineDialogNew(ui.ScriptWindow):
 		self.materialCount += 1
 		self.UpdateDialog()
 
+	def RefreshOwnedCounts(self):
+		"""The "owned / need" of every material again (the interface calls it when the inventory changes)."""
+		if self.toolMode:
+			# the server counts a seal or material row over several items: its state again, one request at a time
+			if self.toolState is not None and not self.toolAsking:
+				self.__AskTool(self.toolState.cell)
+			return
+		for index, (vnum, count) in enumerate(getattr(self, "materials", [])):
+			if index < len(self.materialRows):
+				ownedcount.Paint(self.materialRows[index][4], ownedcount.Owned(vnum), count)
+
+	# ---------------------------------------------------------------------------------------------- tool mode
+	def RefreshToolYang(self):
+		if not self.toolMode or not self.IsShow():
+			return
+		yang = player.GetElk()
+		if yang != self.toolYang and self.toolState is not None and not self.toolAsking:
+			self.toolYang = yang
+			self.__AskTool(self.toolState.cell)
+
+	def IsToolMode(self):
+		return self.toolMode
+
+	def OpenTool(self, toolIds=(), cell=None):
+		"""The tool mode: the window opens empty (the shop's "Vylepšit nástroj", ``toolIds`` = the NPC's tools) or for
+		the tool in ``cell`` (a tool dragged onto the NPC, CraftToolOpenV1: its CraftToolV1 state follows)."""
+		if False == self.isLoaded:
+			self.__LoadScript()
+		if self.IsShow() and not self.toolMode:
+			net.SendRefinePacket(255, 255)		# a blacksmith refine was waiting: cancelled like Zrušit
+		self.dlgQuestion = None
+		if not self.toolMode:
+			self.toolMode = True
+			self.GetChild("TitleName").SetText(crafttoolmodel.Text("TITLE"))
+			self.__SetAcceptText(crafttoolmodel.Text("UPGRADE"))
+			if app.ENABLE_AUTO_REFINE:
+				self.checkBox.Hide()
+		self.toolYang = player.GetElk()
+		self.toolIds = tuple(toolIds or ())
+		self.__ShowTool(None)
+		self.toolCell = cell
+		self.toolAsking = cell is not None
+		self.SetTop()
+		self.Show()
+
+	def SetToolState(self, state):
+		"""A CraftToolV1 answer (crafttoolmodel.ToolState): shown when it is about the cell the window asked for, else
+		about the tool it shows."""
+		if not self.toolMode or state is None:
+			return
+		wanted = self.toolCell if self.toolCell is not None else (
+			self.toolState.cell if self.toolState is not None else None)
+		if state.cell != wanted:
+			return
+		self.toolCell = None
+		self.toolAsking = False
+		self.__ShowTool(state)
+
+	def __LeaveToolMode(self):
+		"""The blacksmith mode again (Open of a refine): the original title, OK, chance line and price row."""
+		if not self.toolMode:
+			return
+		self.__ReleaseToolCell()
+		self.toolYang = None
+		self.toolMode = False
+		self.toolState = None
+		self.toolCell = None
+		self.toolAsking = False
+		self.toolIds = ()
+		self.GetChild("TitleName").SetText(self.blacksmithTitle)
+		self.__SetAcceptText(self.blacksmithAccept)
+		self.acceptButton.Enable()
+		self.yangPanel.Show()
+		if self.toolLossText is not None:
+			self.toolLossText.Hide()
+		if osfInfo.SHOW_REFINE_PERCENTAGE == True:
+			self.successPercentage.Show()
+			self.bonusText.Show()
+		else:
+			self.successPercentage.Hide()
+			self.bonusText.Hide()
+
+	def __SetAcceptText(self, text):
+		self.acceptButton.SetText(text)
+		if self.r1Buttons is not None:
+			self.r1Buttons.Buttons()[0].SetText(text)
+
+	def __ReleaseToolCell(self):
+		"""The inventory cell of the shown tool clickable again (WJ_ENABLE_TRADABLE_ICON locks it while it is in here)."""
+		if app.WJ_ENABLE_TRADABLE_ICON and self.targetItemPos >= 0 and getattr(self, "inven", None):
+			self.SetCanMouseEventSlot(self.targetItemPos)
+
+	def __AskTool(self, cell, verb="info"):
+		self.toolCell = cell
+		self.toolAsking = True
+		net.SendChatPacket("/craft_tool %s %d" % (verb, cell))
+
+	def __SelectToolSlot(self, slotIndex):
+		"""A tool dragged from the inventory into "Před vylepšením" (tool mode): the server says what it is."""
+		if not self.toolMode or not mouseModule.mouseController.isAttached():
+			return
+		if mouseModule.mouseController.GetAttachedType() != player.SLOT_TYPE_INVENTORY:
+			return
+		cell = mouseModule.mouseController.GetAttachedSlotNumber()
+		mouseModule.mouseController.DeattachObject()
+		self.__AskTool(cell)
+
+	def __ShowTool(self, state):
+		"""One state of the tool mode: None = no tool in the slot, a state of a cell without a tool = its hint."""
+		tool = state if state is not None and state.IsTool() else None
+		if tool is None or tool.cell != self.targetItemPos:
+			self.__ReleaseToolCell()
+		self.__ClearMaterials()
+		self.__Initialize()
+		self.toolState = tool
+		self.targetItemPos = tool.cell if tool is not None else -1
+		self.__ClearComparisonSlots()
+		if tool is not None:
+			self.__ReadTarget(tool.cell)
+			self.currentItemVnum = tool.vnum
+			self.vnum = tool.next
+			self.percentage = tool.chance
+			self.cost = tool.price
+			self.currentItemSlot.SetItemSlot(0, self.currentItemVnum, 0)
+			if self.vnum:
+				self.resultItemSlot.SetItemSlot(0, self.vnum, 0)
+			self.currentItemSlot.RefreshSlot()
+			self.resultItemSlot.RefreshSlot()
+			if not tool.IsTop():
+				self.__AppendPractice(tool)
+				if tool.seal:
+					self.__AppendCounted(tool.seal, crafttoolmodel.SEAL_NEED, tool.sealsHeld)
+				for vnum, need, held in tool.materials:
+					self.__AppendCounted(vnum, need, held)
+
+		hint = crafttoolmodel.Hint(state, self.toolIds, self.__ToolGrade(tool))
+		self.successPercentage.Show()
+		self.bonusText.Hide()
+		self.probText.SetText(hint or localeInfo.REFINE_SUCCESS_PROBALITY % (self.percentage))
+		loss = self.__ToolLossText()
+		if not hint and tool.ShowsLoss():
+			loss.SetText(crafttoolmodel.LossText(tool))
+			loss.Show()
+		else:
+			loss.Hide()
+		if tool is not None and tool.price > 0 and not tool.IsTop():
+			self.__SetCost(tool.price)
+			self.yangPanel.Show()
+		else:
+			self.yangPanel.Hide()			# no tool, the top grade or free: no price row
+		if tool is not None and tool.CanUpgrade():
+			self.acceptButton.Enable()
+		else:
+			self.acceptButton.Disable()
+		self.UpdateDialog()
+
+	def __ToolGrade(self, tool):
+		"""The "+N" of a tool at the top grade (its item name), for the hint."""
+		if tool is None or not tool.IsTop():
+			return None
+		item.SelectItem(tool.vnum)
+		return crafttoolmodel.GradeOf(item.GetItemName())
+
+	def __AppendPractice(self, tool):
+		"""The practice row: a material row (the craft's practice item in the slot, "Cvik", practice / need green or
+		red) with the practice bar of the Biolog under the name (R1 look). Not a price: self.materials keeps it out."""
+		index = self.materialCount
+		if index >= len(self.materialRows):
+			row, slot, frame, textLine, countLine = self.__CreateMaterialRow(index)
+		else:
+			row, slot, frame, textLine, countLine = self.materialRows[index]
+		row.SetItem(0)
+		slot.SetItemSlot(index, tool.icon, 0)
+		slot.RefreshSlot()
+		textLine.SetPackedFontColor(self.MATERIAL_NAME_COLOR)
+		textLine.SetText(crafttoolmodel.Text("PRACTICE"))
+		ownedcount.Paint(countLine, tool.practice, tool.need)
+		if index == 0 and self.__IsR1():
+			self.__PracticeBar(frame, tool.practice, tool.need)
+		row.Show()
+		self.materialCount += 1
+
+	def __PracticeBar(self, frame, practice, need):
+		"""The practice bar of the Biolog (root/uir1price.ProgressBar) in the name frame of row 0."""
+		try:
+			import uir1price
+			import uir1tokens
+			if self.toolBar is None:
+				width = frame.GetWidth() - 2 * self.MATERIAL_TEXT_PADDING
+				y = self.MATERIAL_ROW_CONTENT_HEIGHT - self.PRACTICE_BAR_BOTTOM - uir1tokens.SLIDER_H
+				self.toolBar = uir1price.ProgressBar(frame, self.MATERIAL_TEXT_PADDING, y, width)
+			self.toolBar.SetRatio(float(practice) / max(1, need))
+			self.toolBar.Show()
+		except Exception:
+			import uir1price
+			uir1price.TraceFailure("the practice bar of the tool upgrade")
+
+	def __HasPracticeBar(self, rowIndex):
+		return rowIndex == 0 and self.toolBar is not None and self.toolBar.track.IsShow()
+
+	def __AppendCounted(self, vnum, need, held):
+		"""An ordinary material row with the server's count (a seal or material row takes any of several items)."""
+		index = self.materialCount
+		self.AppendMaterial(vnum, need)
+		group = crafttoolmodel.MaterialGroup(self.toolState.toolId, vnum)
+		if group:
+			title, members = group
+			names = []
+			for member in members:
+				item.SelectItem(member)
+				names.append(item.GetItemName())
+			row, slot, frame, textLine, countLine = self.materialRows[index]
+			textLine.SetText(title)
+			row.SetDescription(title, names)
+		ownedcount.Paint(self.materialRows[index][4], held, need)
+
+	def __ToolLossText(self):
+		"""The practice loss of a failure (band A) right on the chance line, where the blacksmith shows its bonus."""
+		if self.toolLossText is None:
+			line = ui.TextLine()
+			line.SetParent(self.board)
+			line.SetHorizontalAlignRight()
+			line.SetPackedFontColor(self.MATERIAL_MISSING_COLOR)
+			line.SetOutline()
+			line.AddFlag("not_pick")
+			self.toolLossText = line
+		return self.toolLossText
+
 	def UpdateDialog(self):
 		twoColumns = self.materialCount > self.MATERIALS_PER_COLUMN
 		rowsPerColumn = (self.materialCount + 1) // 2 if twoColumns else self.materialCount
 		newWidth = self.WINDOW_WIDTH + (self.SECOND_COLUMN_X if twoColumns else 0)
 		newHeight = self.ACTION_BOTTOM + rowsPerColumn * self.MATERIAL_ROW_HEIGHT
-		if not app.ENABLE_AUTO_REFINE:
+		if not app.ENABLE_AUTO_REFINE or self.toolMode:
 			newHeight -= self.AUTO_REFINE_ROW_HEIGHT
+		isR1 = self.__IsR1()
+		if isR1:
+			newHeight += self.R1_BUTTON_EXTRA
 
 		chanceY = self.MATERIALS_Y + rowsPerColumn * self.MATERIAL_ROW_HEIGHT + self.CHANCE_GAP
 		footerOffset = (newWidth - self.WINDOW_WIDTH) // 2
@@ -630,17 +940,18 @@ class RefineDialogNew(ui.ScriptWindow):
 			rowInColumn = rowIndex % rowsPerColumn if twoColumns else rowIndex
 			row.SetPosition(self.MATERIAL_ROW_X + column * self.SECOND_COLUMN_X,
 				self.MATERIALS_Y + rowInColumn * self.MATERIAL_ROW_HEIGHT)
+			textY = self.PRACTICE_TEXT_Y if self.__HasPracticeBar(rowIndex) else self.MATERIAL_TEXT_CENTER_Y
 			if localeInfo.IsARABIC():
 				textLine.SetPosition(
 					frame.GetWidth() - self.MATERIAL_TEXT_PADDING,
-					self.MATERIAL_TEXT_CENTER_Y,
+					textY,
 				)
-				countLine.SetPosition(self.MATERIAL_TEXT_PADDING, self.MATERIAL_TEXT_CENTER_Y)
+				countLine.SetPosition(self.MATERIAL_TEXT_PADDING, textY)
 			else:
-				textLine.SetPosition(self.MATERIAL_TEXT_PADDING, self.MATERIAL_TEXT_CENTER_Y)
+				textLine.SetPosition(self.MATERIAL_TEXT_PADDING, textY)
 				countLine.SetPosition(
 					frame.GetWidth() - self.MATERIAL_TEXT_PADDING,
-					self.MATERIAL_TEXT_CENTER_Y,
+					textY,
 				)
 
 		previewOffset = footerOffset if twoColumns else 0
@@ -651,9 +962,14 @@ class RefineDialogNew(ui.ScriptWindow):
 			self.GetChild(name).SetPosition(x + previewOffset, y)
 		self.probText.SetPosition(39 + footerOffset, chanceY)
 		self.bonusText.SetPosition(264 + footerOffset, chanceY)
+		if self.toolLossText is not None:
+			self.toolLossText.SetPosition(*self.bonusText.GetLocalPosition())
 		self.yangPanel.SetPosition(footerOffset, yangY)
 		self.acceptButton.SetPosition(75 + footerOffset, buttonY)
 		self.cancelButton.SetPosition(148 + footerOffset, buttonY)
+		if isR1:
+			import uir1price
+			self.r1Buttons.Place(newWidth, newHeight - uir1price.BUTTON_BOTTOM)
 		if app.ENABLE_AUTO_REFINE:
 			self.checkBox.SetPosition(42 + footerOffset, yangY + self.AUTO_REFINE_GAP)
 
@@ -666,6 +982,12 @@ class RefineDialogNew(ui.ScriptWindow):
 			max(0, min(y, wndMgr.GetScreenHeight() - newHeight - 4)))
 
 	def OpenQuestionDialog(self):
+		if self.toolMode:
+			# Vylepšit: the server checks everything again; the window stays open for the new state
+			if not self.toolAsking and self.toolState is not None and self.toolState.CanUpgrade():
+				self.__AskTool(self.toolState.cell, "up")
+			return
+
 		if app.ENABLE_AUTO_REFINE and osfInfo.IS_AUTO_REFINE:
 			self.Accept()
 			return
@@ -710,6 +1032,9 @@ class RefineDialogNew(ui.ScriptWindow):
 				dlgQuestion.SetText2(localeInfo.REFINE_DESTROY_WARNING_WITH_BONUS_PERCENT_2)
 		elif 2 == self.type:
 			dlgQuestion.SetText1(localeInfo.REFINE_DOWN_GRADE_WARNING)
+		elif gloverefine.KeepsItemOnFailure(self.src_vnum):
+			# The server keeps these gloves after a failed refine.
+			dlgQuestion.SetText1(localeInfo.GLOVE_REFINE_KEEP_GRADE)
 		else:
 			dlgQuestion.SetText1(localeInfo.REFINE_DESTROY_WARNING)
 
@@ -724,6 +1049,10 @@ class RefineDialogNew(ui.ScriptWindow):
 			self.Close()
 
 	def CancelRefine(self):
+		if self.toolMode:
+			self.Close()			# no blacksmith refine is waiting on the server
+			return
+
 		net.SendRefinePacket(255, 255)
 		self.Close()
 
@@ -743,6 +1072,8 @@ class RefineDialogNew(ui.ScriptWindow):
 			osfInfo.IS_AUTO_REFINE = autoFlag
 
 		def CheckRefine(self, isFail):
+			if self.toolMode:
+				return				# the tool window stays open: the server sends the new state
 			if osfInfo.IS_AUTO_REFINE:
 				if osfInfo.AUTO_REFINE_TYPE == 1:
 					if osfInfo.AUTO_REFINE_DATA["ITEM"][0] != -1 and osfInfo.AUTO_REFINE_DATA["ITEM"][1] != -1:
@@ -894,6 +1225,8 @@ if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 
 		def __init__(self):
 			ui.ScriptWindow.__init__(self)
+			import uiconfirm
+			uiconfirm.Bind(self, 'AcceptButton', child=True)
 			self.is_loaded = False
 
 			self.tabButtonDict = {}
@@ -1215,6 +1548,8 @@ if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 
 		def __init__(self):
 			ui.ScriptWindow.__init__(self)
+			import uiconfirm
+			uiconfirm.Bind(self, 'AcceptButton', child=True)
 			self.is_loaded = False
 
 			self.board = None

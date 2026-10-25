@@ -23,6 +23,8 @@ class CaptchaDialog(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.isLoaded = False
 		self.captchaTime = None
 		self.toolTip = None

@@ -179,8 +179,14 @@ class LoginWindow(ui.ScriptWindow):
 		self.__RequestServerStateList()
 
 		if musicInfo.loginMusic != "":
-			snd.SetMusicVolume(systemSetting.GetMusicVolume())
-			snd.FadeInMusic("BGM/" + musicInfo.loginMusic)
+			# the login music alone (root/pregamemusic.py): the engine does not fade before the game, so the select's
+			# track coming back here (a failed / closed connection) played on next to it
+			try:
+				import pregamemusic
+				pregamemusic.Only("BGM/" + musicInfo.loginMusic)
+			except Exception:
+				snd.SetMusicVolume(systemSetting.GetMusicVolume())
+				snd.FadeInMusic("BGM/" + musicInfo.loginMusic)
 		
 		self.ChannelButtonArray(int(channelID)) ##CH Load
 		self.Username.SetFocus()

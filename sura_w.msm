@@ -1722,7 +1722,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			900
-		Model				"pc/althea_is623/royal_atlantis/sura_w_hair.gr2"
+		Model				"pc/althea_style/royal_atlantis/sura_w_hair.gr2"
 		SourceSkin			"pc2/killua/royal_atlantis/textures/royal_atlantis_w_hair.dds"
 		TargetSkin			"pc2/killua/royal_atlantis/textures/royal_atlantis_w_hair.dds"
 	}
@@ -1730,7 +1730,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			901
-		Model				"pc/althea_is623/steampunk/sura_w_hair.gr2"
+		Model				"pc/althea_style/steampunk/sura_w_hair.gr2"
 		SourceSkin			"pc2/killua/steampunk/textures/killua_steampunk_hair_w.dds"
 		TargetSkin			"pc2/killua/steampunk/textures/killua_steampunk_hair_w.dds"
 	}
@@ -1738,7 +1738,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			902
-		Model				"pc/althea_is623/golden_noble/sura_w_hair.gr2"
+		Model				"pc/althea_style/golden_noble/sura_w_hair.gr2"
 		SourceSkin			"vandaa/custom_set_4/female_su.dds"
 		TargetSkin			"vandaa/custom_set_4/female_su.dds"
 	}
@@ -1746,7 +1746,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			903
-		Model				"pc/althea_is623/silver_paladin/sura_w_hair.gr2"
+		Model				"pc/althea_style/silver_paladin/sura_w_hair.gr2"
 		SourceSkin			"vandaa/custom_set_5/female_su.dds"
 		TargetSkin			"vandaa/custom_set_5/female_su.dds"
 	}
@@ -1754,7 +1754,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			904
-		Model				"pc/althea_is623/bone_of_glory/sura_w_hair.gr2"
+		Model				"pc/althea_style/bone_of_glory/sura_w_hair.gr2"
 		SourceSkin			"dane_tex/bone_of_glory_tex/hair_f.dds"
 		TargetSkin			"dane_tex/bone_of_glory_tex/hair_f.dds"
 	}
@@ -1762,7 +1762,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			905
-		Model				"pc/althea_is623/wandering_soul/sura_w_hair.gr2"
+		Model				"pc/althea_style/wandering_soul/sura_w_hair.gr2"
 		SourceSkin			"pc/sama_work/world_6/warrior_f_h.dds"
 		TargetSkin			"pc/sama_work/world_6/warrior_f_h.dds"
 	}
@@ -1770,7 +1770,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			906
-		Model				"pc/althea_is623/stars_guardian/sura_w_hair.gr2"
+		Model				"pc/althea_style/stars_guardian/sura_w_hair.gr2"
 		SourceSkin			"pc2/killua/stars_guardian/textures/stars_guardian_crown_w.dds"
 		TargetSkin			"pc2/killua/stars_guardian/textures/stars_guardian_crown_w.dds"
 	}
@@ -1778,7 +1778,7 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			907
-		Model				"pc/althea_is623/doctor_death/sura_w_hair.gr2"
+		Model				"pc/althea_style/doctor_death/sura_w_hair.gr2"
 		SourceSkin			"pc/plechito/doctor_death_costumes/plechito_tex_w_w.dds"
 		TargetSkin			"pc/plechito/doctor_death_costumes/plechito_tex_w_w.dds"
 	}
@@ -1786,9 +1786,113 @@ Group HairData
 	{
 		SpecialPath			"d:/ymir work/"
 		HairIndex			908
-		Model				"pc/althea_is623/thunder_spirit/sura_w_hair.gr2"
+		Model				"pc/althea_style/thunder_spirit/sura_w_hair.gr2"
 		SourceSkin			"pc/plechito/thunder_spirit_set/hair/plechito_tex_w.dds"
 		TargetSkin			"pc/plechito/thunder_spirit_set/hair/plechito_tex_w.dds"
+	}
+	Group HairData800
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			920
+		Model				"pc/althea_favorites/dark_cult/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/dark_cult_costume/plechito_tex_w_su.dds"
+		TargetSkin			"pc/plechito/dark_cult_costume/plechito_tex_w_su.dds"
+	}
+	Group HairData801
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			921
+		Model				"pc/althea_favorites/dark_hwang/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/dark_hwang/plechito_tex_w_su.dds"
+		TargetSkin			"pc/plechito/dark_hwang/plechito_tex_w_su.dds"
+	}
+	Group HairData802
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			922
+		Model				"pc/althea_favorites/demonic/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/demonic_costumes/hair/plechito_tex_w.dds"
+		TargetSkin			"pc/plechito/demonic_costumes/hair/plechito_tex_w.dds"
+	}
+	Group HairData803
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			923
+		Model				"pc/althea_favorites/frozen_warrior/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/frozen_warrior/plechito_tex_w.dds"
+		TargetSkin			"pc/plechito/frozen_warrior/plechito_tex_w.dds"
+	}
+	Group HairData804
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			924
+		Model				"pc/althea_favorites/halloween2020/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/halloween2020/hair/plechito_tex_w1.dds"
+		TargetSkin			"pc/plechito/halloween2020/hair/plechito_tex_w1.dds"
+	}
+	Group HairData805
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			925
+		Model				"pc/althea_favorites/halloween2023_4_red/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/halloween2023_4_red/plechito_tex_w_su.dds"
+		TargetSkin			"pc/plechito/halloween2023_4_red/plechito_tex_w_su.dds"
+	}
+	Group HairData806
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			926
+		Model				"pc/althea_favorites/halloween2024_3/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/halloween2024_3/plechito_tex_w_su.dds"
+		TargetSkin			"pc/plechito/halloween2024_3/plechito_tex_w_su.dds"
+	}
+	Group HairData807
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			927
+		Model				"pc/althea_favorites/hellboy/hair/sura_w.gr2"
+		SourceSkin			"pc/jawwad/hellboy/hair/hair_f.dds"
+		TargetSkin			"pc/jawwad/hellboy/hair/hair_f.dds"
+	}
+	Group HairData808
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			928
+		Model				"pc/althea_favorites/night_butterfly/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/night_butterfly/hair/plechito_tex_w.dds"
+		TargetSkin			"pc/plechito/night_butterfly/hair/plechito_tex_w.dds"
+	}
+	Group HairData809
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			929
+		Model				"pc/althea_favorites/skull_necromancer/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/skull_necromancer/plechito_tex_w.dds"
+		TargetSkin			"pc/plechito/skull_necromancer/plechito_tex_w.dds"
+	}
+	Group HairData810
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			930
+		Model				"pc/althea_favorites/summer2024_2/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/summer2024_2/plechito_tex_w.dds"
+		TargetSkin			"pc/plechito/summer2024_2/plechito_tex_w.dds"
+	}
+	Group HairData811
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			931
+		Model				"pc/althea_favorites/valentine2025_2/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/valentine2025_2/plechito_tex_w_su.dds"
+		TargetSkin			"pc/plechito/valentine2025_2/plechito_tex_w_su.dds"
+	}
+	Group HairData812
+	{
+		SpecialPath			"d:/ymir work/"
+		HairIndex			932
+		Model				"pc/althea_favorites/yinyang_phantom/hair/sura_w.gr2"
+		SourceSkin			"pc/plechito/yinyang_phantom/hair/woman_hair_bottom.dds"
+		TargetSkin			"pc/plechito/yinyang_phantom/hair/woman_hair_bottom.dds"
 	}
 }
 
@@ -3979,55 +4083,133 @@ Group ShapeData
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45100
-		Model				"pc/althea_is623/royal_atlantis/sura_w.gr2"
+		Model				"pc/althea_style/royal_atlantis/sura_w.gr2"
 	}
 	Group ShapeData703
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45101
-		Model				"pc/althea_is623/steampunk/sura_w.gr2"
+		Model				"pc/althea_style/steampunk/sura_w.gr2"
 	}
 	Group ShapeData704
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45102
-		Model				"pc/althea_is623/golden_noble/sura_w.gr2"
+		Model				"pc/althea_style/golden_noble/sura_w.gr2"
 	}
 	Group ShapeData705
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45103
-		Model				"pc/althea_is623/silver_paladin/sura_w.gr2"
+		Model				"pc/althea_style/silver_paladin/sura_w.gr2"
 	}
 	Group ShapeData706
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45104
-		Model				"pc/althea_is623/bone_of_glory/sura_w.gr2"
+		Model				"pc/althea_style/bone_of_glory/sura_w.gr2"
 	}
 	Group ShapeData707
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45105
-		Model				"pc/althea_is623/wandering_soul/sura_w.gr2"
+		Model				"pc/althea_style/wandering_soul/sura_w.gr2"
 	}
 	Group ShapeData708
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45106
-		Model				"pc/althea_is623/stars_guardian/sura_w.gr2"
+		Model				"pc/althea_style/stars_guardian/sura_w.gr2"
 	}
 	Group ShapeData709
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45107
-		Model				"pc/althea_is623/doctor_death/sura_w.gr2"
+		Model				"pc/althea_style/doctor_death/sura_w.gr2"
 	}
 	Group ShapeData710
 	{
 		SpecialPath			"d:/ymir work/"
 		ShapeIndex			45108
-		Model				"pc/althea_is623/thunder_spirit/sura_w.gr2"
+		Model				"pc/althea_style/thunder_spirit/sura_w.gr2"
+	}
+	Group ShapeData800
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45200
+		Model				"pc/althea_favorites/dark_cult/body/sura_w.gr2"
+	}
+	Group ShapeData801
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45201
+		Model				"pc/althea_favorites/dark_hwang/body/sura_w.gr2"
+	}
+	Group ShapeData802
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45202
+		Model				"pc/althea_favorites/demonic/body/sura_w.gr2"
+	}
+	Group ShapeData803
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45203
+		Model				"pc/althea_favorites/frozen_warrior/body/sura_w.gr2"
+	}
+	Group ShapeData804
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45204
+		Model				"pc/althea_favorites/halloween2020/body/sura_w.gr2"
+	}
+	Group ShapeData805
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45205
+		Model				"pc/althea_favorites/halloween2023_4_red/body/sura_w.gr2"
+	}
+	Group ShapeData806
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45206
+		Model				"pc/althea_favorites/halloween2024_3/body/sura_w.gr2"
+	}
+	Group ShapeData807
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45207
+		Model				"pc/althea_favorites/hellboy/body/sura_w.gr2"
+	}
+	Group ShapeData808
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45208
+		Model				"pc/althea_favorites/night_butterfly/body/sura_w.gr2"
+	}
+	Group ShapeData809
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45209
+		Model				"pc/althea_favorites/skull_necromancer/body/sura_w.gr2"
+	}
+	Group ShapeData810
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45210
+		Model				"pc/althea_favorites/summer2024_2/body/sura_w.gr2"
+	}
+	Group ShapeData811
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45211
+		Model				"pc/althea_favorites/valentine2025_2/body/sura_w.gr2"
+	}
+	Group ShapeData812
+	{
+		SpecialPath			"d:/ymir work/"
+		ShapeIndex			45212
+		Model				"pc/althea_favorites/yinyang_phantom/body/sura_w.gr2"
 	}
 }
 

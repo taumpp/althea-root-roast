@@ -64,15 +64,30 @@ def validate(kind, records, alternatives=3, attributes=7):
     return result
 
 
-def load(kind, alternatives=3, attributes=7):
+def _reject_constant(value):
+    raise ValueError("Non-finite JSON number")
+
+
+def load_document(path):
+    """Read bounded JSON only; callers must validate their own schema."""
     try:
-        with _DISK_OPEN(_PATHS[kind], "rb") as source:
+        with _DISK_OPEN(path, "rb") as source:
             raw = source.read(MAX_BYTES + 1)
     except FileNotFoundError:
-        return {}
+        return None
     if len(raw) > MAX_BYTES:
         raise ValueError("Preset file exceeds size limit")
-    document = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    document = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
+                          parse_constant=_reject_constant)
+    if type(document) is not dict:
+        raise ValueError("Invalid JSON document")
+    return document
+
+
+def load(kind, alternatives=3, attributes=7):
+    document = load_document(_PATHS[kind])
+    if document is None:
+        return {}
     if type(document) is not dict or set(document) != {"version", "presets"} or type(document["version"]) is not int or document["version"] != 1:
         raise ValueError("Unsupported preset version")
     return validate(kind, document["presets"], alternatives, attributes)
@@ -80,10 +95,14 @@ def load(kind, alternatives=3, attributes=7):
 
 def save(kind, records, alternatives=3, attributes=7):
     records = validate(kind, records, alternatives, attributes)
-    raw = json.dumps({"version": 1, "presets": records}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    save_document(_PATHS[kind], {"version": 1, "presets": records})
+
+
+def save_document(path, document):
+    """Atomically persist data whose schema has already been validated."""
+    raw = json.dumps(document, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
     if len(raw) > MAX_BYTES:
         raise ValueError("Preset file exceeds size limit")
-    path = _PATHS[kind]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + "." + os.urandom(12).hex() + ".tmp"
     # Exclusive creation avoids following an existing temporary symlink. Replace

@@ -179,6 +179,15 @@ def _CreateImage(parent, x, y, filename):
 	return image
 
 
+def _BuildR1(window):
+	"""The R1 look of the window (uipermanenttasksr1) or None for the original look ("Starý vzhled")."""
+	try:
+		import uipermanenttasksr1
+	except Exception:
+		return None
+	return uipermanenttasksr1.Build(window)
+
+
 def _CreateSlot(parent, x, y, slotIndex=0):
 	slot = ui.SlotWindow()
 	slot.SetParent(parent)
@@ -207,6 +216,7 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 		self.huntRows = {}
 		self.huntRewards = {}
 		self.snapshotEvent = None
+		self.r1 = None
 		self.__BuildWindow()
 
 	def __del__(self):
@@ -342,6 +352,7 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 			fontconfig.ROLE_CONTROL,
 		)
 		self.__Keep(self.rewardBonusText)
+		self.r1 = _BuildR1(self)
 
 		self.__RefreshTask()
 		self.Hide()
@@ -462,6 +473,8 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 			else:
 				button.SetUp()
 				button.categoryLabel.SetPackedFontColor(0xffc8bba6)
+		if self.r1:
+			self.r1.SelectCategory(category)
 		self.__RefreshTask()
 		if self.IsShow():
 			self.__RefreshRenderTarget()
@@ -507,6 +520,8 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 		self.passiveButton.SetPosition(32, 119 + footerExtra)
 		self.rewardItemSlot.SetPosition(152, 119 + footerExtra)
 		self.rewardBonusText.SetPosition(48, 158 + footerExtra)
+		if self.r1:
+			self.r1.Layout(WINDOW_SIZE[0], height)
 
 	def __RefreshHuntTask(self):
 		self.__LayoutHunt(1)
@@ -531,15 +546,15 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 		row = self.huntRows.get(self.category)
 		if not self.collectorAvailable:
 			self.stageText.SetText(u"")
-			self.targetText.SetText(u"Systém je dočasně nedostupný")
+			self.targetText.SetText(u"Lov teď není dostupný")
 			self.targetText.Show()
-			self.passiveButton.SetToolTipText(u"Trvalý bonus: 0 %")
+			self.passiveButton.SetToolTipText(u"Trvalý bonus: 0%")
 			return
 		if self.collectorLoading or row is None:
 			self.stageText.SetText(u"")
-			self.targetText.SetText(u"Načítání…")
+			self.targetText.SetText(u"Načítání...")
 			self.targetText.Show()
-			self.passiveButton.SetToolTipText(u"Načítání…")
+			self.passiveButton.SetToolTipText(u"Načítání...")
 			return
 		self.__LayoutHunt(len(row["targets"]))
 		self.categoryText.SetText(localeInfo.PERMANENT_TASKS_STAGE % row["stage"])
@@ -557,7 +572,7 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 			self.targetText.Show()
 			return
 		self.passiveButton.SetToolTipText(
-			u"%s: %d %% · +%d %% za dokončení" % (
+			u"%s: %d%% | +%d%% za dokončení" % (
 				bonusName, bonus, row["stage_bonus_percent"]
 			)
 		)
@@ -692,6 +707,9 @@ class PermanentTasksWindow(ui.BoardWithTitleBar):
 	def Destroy(self):
 		self.Close()
 		self.__RemoveRenderTarget()
+		if self.r1:
+			self.r1.Destroy()
+		self.r1 = None
 		self.tooltipItem = None
 		self.snapshotEvent = None
 		self.collectorRow = None

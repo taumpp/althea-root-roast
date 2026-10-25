@@ -1,6 +1,7 @@
 """Native/provider bindings for Settings A. Reads never send packets or save files."""
 import builtins
 import json
+import math
 import os
 import tempfile
 
@@ -19,6 +20,8 @@ import settingsmodel as model
 
 REAL_OPEN = getattr(builtins, 'old_open', builtins.open)
 PREFERENCES = 'UserData/settings-a.json'
+# metin2.cfg [OPTION] names of the frame options (read by the executable at start).
+CFG_KEYS = dict(fps='fps_limit', background_fps='background_fps_limit')
 BINDINGS = {
     'world_level': ('GetWorldGraphicsLevel', 'SetWorldGraphicsLevel'),
     'aa': ('GetWorldAntialiasMode', 'SetWorldAntialiasMode'),
@@ -44,6 +47,13 @@ BINDINGS = {
     'mob_aggressive': ('IsShowMobAIFlag', 'SetShowMobAIFlag'),
     'damage': ('IsShowDamage', 'SetShowDamageFlag'),
     'damage_size': ('GetDamageTextureScale', 'SetDamageTextureScale'),
+    'damage_height': ('GetDamageHeight', 'SetDamageHeight'),
+    'damage_font': ('GetDamageFont', 'SetDamageFont'),
+    'damage_normal_color': ('GetDamageNormalColor', 'SetDamageNormalColor'),
+    'damage_critical_color': ('GetDamageCriticalColor', 'SetDamageCriticalColor'),
+    'damage_outline': ('GetDamageOutline', 'SetDamageOutline'),
+    'damage_grouping': ('GetDamageGrouping', 'SetDamageGrouping'),
+
     'stone_size': ('GetMetinstoneScale', 'SetMetinstoneScale'),
     'special_effects': ('GetEffectLevel', 'SetEffectLevel'),
     'pet': ('IsShowPet', 'SetShowPet'), 'mount': ('IsShowMount', 'SetShowMount'),
@@ -53,7 +63,22 @@ BINDINGS = {
     'sound': ('GetSoundVolume', 'SetSoundVolumef'), 'music': ('GetMusicVolume', 'SetMusicVolume'),
 }
 NOTIFICATION_KEYS = ('biolog_hud', 'biolog_messages', 'dungeon_hud', 'dungeon_messages', 'switchbot_messages')
+# Effect switches -> native index of GetBLEffectOption / SetBLEffectOption. The native value is True when the
+# effects are SHOWN (the legacy "Hide effects" toggle was pressed on False); metin2.cfg keeps it under the
+# misleading names HIDE_SKILL_EFFECT / HIDE_BUFF_EFFECT, 1 = shown.
+EFFECT_SWITCHES = (('skills', 1), ('buffs', 0))
 SKY_REGISTERED = set()
+DAMAGE_KEYS = tuple(key for key in BINDINGS if key.startswith('damage_') and key not in ('damage_size', 'damage_height'))
+
+
+def damage_supported():
+    return all(callable(getattr(systemSetting, method, None))
+               for key in DAMAGE_KEYS for method in BINDINGS[key])
+
+
+def name_visibility_supported():
+    return all(callable(getattr(systemSetting, method, None))
+               for method in ('GetNameVisibility', 'SetNameVisibility'))
 
 
 class SettingsValidationError(ValueError):
@@ -104,16 +129,37 @@ def read_pickup():
             key, separator, value = line.partition(':')
             if not separator:
                 continue
-            if key in ('pick_mode', 'min_lvl', 'max_lvl'):
-                result[dict(pick_mode='pickup_mode', min_lvl='pickup_min', max_lvl='pickup_max')[key]] = int(value)
-            elif key in ('block_class', 'block_weapon', 'block_armor'):
-                group = key[6:]
-                selected = {int(v) for v in value.split(',') if v}
-                for index in range(4 if group == 'class' else 7):
-                    result['pickup_%s_%d' % (group, index)] = int(index in selected)
+            try:
+                if key in ('pick_mode', 'min_lvl', 'max_lvl'):
+                    result[dict(pick_mode='pickup_mode', min_lvl='pickup_min', max_lvl='pickup_max')[key]] = int(value)
+                elif key in ('block_class', 'block_weapon', 'block_armor'):
+                    group = key[6:]
+                    selected = {int(v) for v in value.split(',') if v}
+                    for index in range(4 if group == 'class' else 7):
+                        result['pickup_%s_%d' % (group, index)] = int(index in selected)
+            except ValueError:
+                # One damaged row must not discard subsequent equipment bans.
+                continue
     except (OSError, ValueError):
         pass
     return result
+
+
+def apply_pickup(values):
+    osfInfo.PICKUP_MODE = values['pickup_mode']
+    player.PickupBlockMinLvl(values['pickup_min'])
+    player.PickupBlockMaxLvl(values['pickup_max'])
+    for group, count, setter in (('class', 4, player.PickupBlockClassType),
+                                  ('weapon', 7, player.PickupBlockWeaponType),
+                                  ('armor', 7, player.PickupBlockArmorType)):
+        for index in range(count):
+            setter(bool(values['pickup_%s_%d' % (group, index)]), index)
+
+
+def load_pickup():
+    # Loading clears native player state even when the Python window survives.
+    # Apply a complete character snapshot, including cleared seventh slots.
+    apply_pickup(model.normalized(read_pickup()))
 
 
 def save_pickup(values):
@@ -123,14 +169,20 @@ def save_pickup(values):
         lines.append('block_%s:%s' % (group, ','.join(str(i) for i in range(count)
                                                     if values['pickup_%s_%d' % (group, i)])))
     atomic_write(pickup_path(), ('\n'.join(lines) + '\n').encode('ascii'))
-    osfInfo.PICKUP_MODE = values['pickup_mode']
-    player.PickupBlockMinLvl(values['pickup_min'])
-    player.PickupBlockMaxLvl(values['pickup_max'])
-    for group, count, setter in (('class', 4, player.PickupBlockClassType),
-                                  ('weapon', 7, player.PickupBlockWeaponType),
-                                  ('armor', 7, player.PickupBlockArmorType)):
-        for index in range(count):
-            setter(bool(values['pickup_%s_%d' % (group, index)]), index)
+    apply_pickup(values)
+
+
+def ui_scale_info():
+    methods = ('GetUIScale', 'SetUIScale', 'GetUIScaleInfo', 'GetUIScaleRange')
+    if not all(callable(getattr(systemSetting, name, None)) for name in methods):
+        return None
+    if tuple(systemSetting.GetUIScaleRange()) != (50, 150, 5):
+        return None
+    requested, active, maximum = systemSetting.GetUIScaleInfo()
+    if (requested not in model.UI_SCALE_CHOICES or
+            not all(math.isfinite(value) and value > 0 for value in (active, maximum))):
+        return None
+    return requested, active, maximum
 
 
 def refresh_rate_info():
@@ -157,6 +209,96 @@ def family_names_value():
 
 def request_family_names(value):
     return family_names_supported() and bool(systemSetting.SetOwnFamilyNameVisible(int(bool(value))))
+
+
+def background_fps_supported():
+    # Older executables keep a fixed inactive-window limit; the row is then hidden.
+    return all(callable(getattr(app, name, None)) for name in ('SetBackgroundFPS', 'GetBackgroundFPSLimit'))
+
+
+def tree_shadow_supported():
+    # Older clients lack the native limit; the setting is then shown disabled.
+    return all(callable(getattr(background, name, None))
+               for name in ('SetTreeShadowDistance', 'GetTreeShadowDistance'))
+
+
+def saved_tree_shadow(preferences):
+    """Persisted tree shadow distance; older files follow their saved preset."""
+    value = preferences.get('tree_shadow') if isinstance(preferences, dict) else None
+    if value is None and isinstance(preferences, dict) and preferences.get('quality_preset') in range(4):
+        value = model.QUALITY_PRESETS[preferences['quality_preset']]['tree_shadow']
+    return model.normalized(dict(tree_shadow=value))['tree_shadow']
+
+
+def apply_tree_shadow(value):
+    if not tree_shadow_supported():
+        return False
+    background.SetTreeShadowDistance(float(value))
+    return True
+
+
+def saved_dps_meter(preferences):
+    """Ukazatel poškození (DPS) on (1, the default) or off (0), from the settings preferences file."""
+    value = preferences.get('dps_meter') if isinstance(preferences, dict) else None
+    return model.normalized(dict(dps_meter=1 if value is None else value))['dps_meter']
+
+
+def load_dps_meter():
+    """The saved DPS meter switch (uidpsmeter reads it once, lazily, when the first table is made)."""
+    return saved_dps_meter(_read_json(PREFERENCES))
+
+
+def dps_meter_enabled():
+    """The live switch (uidpsmeter, shared by the Settings row and the target form's chip); the saved value when
+    the module is not loaded yet."""
+    import sys
+    for name in ('uiDpsMeter', 'uidpsmeter'):
+        module = sys.modules.get(name)
+        if module is not None and callable(getattr(module, 'IsEnabled', None)):
+            return int(bool(module.IsEnabled()))
+    return load_dps_meter()
+
+
+def set_dps_meter(value):
+    """Settings row: saves the switch at once (only this key of the preferences file) and applies it live."""
+    value = int(bool(value))
+    preferences = _read_json(PREFERENCES) or dict(version=1)
+    preferences['dps_meter'] = value
+    atomic_write(PREFERENCES, json.dumps(preferences, sort_keys=True).encode('utf-8'))
+    apply_dps_meter(value)
+    return value
+
+
+def apply_dps_meter(value):
+    """Live: off collapses an open DPS section and drops the snapshots; on takes the next snapshot again."""
+    import sys
+    done = False
+    # uitarget imports the module as uiDpsMeter, uidpsmeterr1 as uidpsmeter: every loaded copy gets the switch
+    for name in ('uiDpsMeter', 'uidpsmeter'):
+        module = sys.modules.get(name)
+        if module is not None and callable(getattr(module, 'SetEnabled', None)):
+            module.SetEnabled(bool(value))
+            done = True
+    if not done:
+        try:
+            import uidpsmeter
+            uidpsmeter.SetEnabled(bool(value))
+            done = True
+        except Exception:
+            pass
+    return done
+
+
+def load_tree_shadow():
+    """Game start: the native limit is not persisted by the client itself."""
+    return apply_tree_shadow(saved_tree_shadow(_read_json(PREFERENCES)))
+
+
+def load_effect_switches():
+    """Game start: hand the saved effect switches to the effect manager. A metin2.cfg without them (first start)
+    otherwise leaves the effects hidden while the switches already read as on."""
+    for unused, index in EFFECT_SWITCHES:
+        systemSetting.SetBLEffectOption(index, bool(systemSetting.GetBLEffectOption(index)))
 
 
 class GameBackend:
@@ -186,23 +328,42 @@ class GameBackend:
     def read(self):
         values = dict(model.DEFAULTS)
         for key, (getter, unused) in BINDINGS.items():
+            if key == 'damage_height' and not callable(getattr(systemSetting, getter, None)):
+                continue
+            if key in DAMAGE_KEYS and not damage_supported():
+                continue
             if key == 'family_names' and not family_names_bridge():
                 continue
             values[key] = getattr(background if key == 'fog' else systemSetting, getter)()
+        if name_visibility_supported():
+            for category, key in enumerate(model.NAME_VISIBILITY_KEYS):
+                values[key] = systemSetting.GetNameVisibility(category)
         values['font'] = fontconfig.NormalizeFontLevel(values['font'])
         values['sound'] /= 5.
         values['npc_names'] = int(not values['npc_names'])
         values['special_effects'] = {0: 0, 1: 1, 2: 0, 3: 1, 4: 2}.get(values['special_effects'], 0)
-        values['skills'] = int(not systemSetting.GetBLEffectOption(1))
-        values['buffs'] = int(not systemSetting.GetBLEffectOption(0))
-        for key, default in (('fps', 60), ('vsync', 1), ('show_fps', 0)):
-            values[key] = cfg.Get(cfg.SAVE_OPTION, 'fps_limit' if key == 'fps' else key, str(default))
+        for key, index in EFFECT_SWITCHES:
+            values[key] = int(bool(systemSetting.GetBLEffectOption(index)))
+        for key, default in (('fps', 60), ('background_fps', 30), ('vsync', 1), ('show_fps', 0)):
+            values[key] = cfg.Get(cfg.SAVE_OPTION, CFG_KEYS.get(key, key), str(default))
+        if background_fps_supported():
+            values['background_fps'] = app.GetBackgroundFPSLimit()
+        scale = ui_scale_info()
+        if scale is not None:
+            values['ui_scale'] = systemSetting.GetUIScale()
         info = refresh_rate_info()
         values['refresh_hz'] = info[0] if info else 0
         values.update(read_pickup())
         values['pvp'] = player.GetPKMode()
         values['block'] = self.block_requests[-1] if self.block_requests else self.get_block()
         values['track'] = musicInfo.fieldMusic
+        try:
+            import pregamemusic
+            values['menu_music'] = pregamemusic.ReadSetting()
+        except Exception:
+            values['menu_music'] = model.DEFAULTS['menu_music']
+        values['tree_shadow'] = saved_tree_shadow(self.read_preferences())
+        values['dps_meter'] = dps_meter_enabled()
         interface = self.interface()
         if interface:
             values['loot_lifetime'] = interface.GetDropTrackerRecentLifetime()
@@ -224,6 +385,9 @@ class GameBackend:
                 raise SettingsValidationError(localeInfo.OPTION_PVPMODE_CANNOT_SET_GUILD_MODE)
             if values['pvp'] not in (0, 1, 2, 4):
                 raise ValueError('Unsupported PvP mode')
+        if values['ui_scale'] != before['ui_scale'] and ui_scale_info() is None:
+            from settingslocale import Text
+            raise SettingsValidationError(Text('Velikost rozhran\u00ed nen\u00ed dostupn\u00e1.', 'UI scaling is unavailable.'))
         if values['refresh_hz'] != before['refresh_hz']:
             info = refresh_rate_info()
             if info is None or info[2] or (values['refresh_hz'] and values['refresh_hz'] not in info[3]):
@@ -237,6 +401,10 @@ class GameBackend:
                 raise SettingsValidationError(Text('Vybraná obloha není dostupná.', 'The selected sky is unavailable.'))
 
     def _set_native(self, key, value):
+        if key == 'damage_height' and not callable(getattr(systemSetting, 'SetDamageHeight', None)):
+            return
+        if key in DAMAGE_KEYS and not damage_supported():
+            return
         if key == 'family_names':
             if not request_family_names(value):
                 raise ValueError('Family-name visibility request is unavailable')
@@ -283,7 +451,7 @@ class GameBackend:
             if value != previous['colors'][key]:
                 if not systemSetting.SetWorldVisualPreview(key, value):
                     raise OSError('Unable to preview color preference')
-        for key in ('fov', 'stone_size', 'damage_size', 'sound', 'music', 'grass_radius'):
+        for key in ('fov', 'stone_size', 'damage_size', 'damage_height', 'sound', 'music', 'grass_radius'):
             if state['values'][key] != previous['values'][key]:
                 self._set_native(key, state['values'][key])
 
@@ -298,6 +466,9 @@ class GameBackend:
                 original['colors'], original['color_preset'], original['custom_colors']):
             if not systemSetting.ApplyWorldVisualSettings(state['color_preset'], state['colors'], state['custom_colors']):
                 raise OSError('Unable to save color preferences')
+        if 'ui_scale' in changed:
+            if not systemSetting.SetUIScale(values['ui_scale']):
+                raise OSError('Unable to save UI scale preference')
         if 'refresh_hz' in changed:
             if not systemSetting.SetRefreshRate(values['refresh_hz']):
                 from settingslocale import Text
@@ -310,18 +481,26 @@ class GameBackend:
             manager = getattr(interface, 'systemNotifications', None)
             if manager and not manager.ApplyPreferences({key: bool(values[key]) for key in NOTIFICATION_KEYS}):
                 raise OSError('Unable to save notification preferences')
+        if any(key in changed for key in model.NAME_VISIBILITY_KEYS):
+            if not name_visibility_supported():
+                raise SettingsValidationError('Name visibility is unavailable')
+            for category, key in enumerate(model.NAME_VISIBILITY_KEYS):
+                if key in changed:
+                    systemSetting.SetNameVisibility(category, values[key])
         # Base renderer first: all subsequent feature fields remain explicit.
         for key in BINDINGS:
             if key in changed:
                 self._set_native(key, values[key])
-        for key, index in (('skills', 1), ('buffs', 0)):
+        for key, index in EFFECT_SWITCHES:
             if key in changed:
-                systemSetting.SetBLEffectOption(index, not values[key])
-        for key in ('fps', 'vsync', 'show_fps'):
+                systemSetting.SetBLEffectOption(index, bool(values[key]))
+        for key in ('fps', 'background_fps', 'vsync', 'show_fps'):
             if key in changed:
-                cfg.Set(cfg.SAVE_OPTION, 'fps_limit' if key == 'fps' else key, str(values[key]))
+                cfg.Set(cfg.SAVE_OPTION, CFG_KEYS.get(key, key), str(values[key]))
         if 'fps' in changed:
             app.SetFPS(values['fps'])
+        if 'background_fps' in changed and background_fps_supported():
+            app.SetBackgroundFPS(values['background_fps'])
         if 'show_fps' in changed and interface and interface.wndMiniMap:
             interface.wndMiniMap.SetFPSCounterVisible(bool(values['show_fps']))
         if 'loot_placement' in changed and interface:
@@ -331,6 +510,9 @@ class GameBackend:
                 raise OSError('Unable to save loot display duration')
         if 'costumes' in changed and interface:
             interface.SetSeparateCostumeInventory(bool(values['costumes']))
+        if 'menu_music' in changed:
+            import pregamemusic
+            pregamemusic.WriteSetting(values['menu_music'])
         if 'track' in changed:
             if musicInfo.fieldMusic:
                 snd.FadeOutMusic('BGM/' + musicInfo.fieldMusic)
@@ -338,10 +520,15 @@ class GameBackend:
             musicInfo.SaveLastPlayFieldMusic()
             if musicInfo.fieldMusic:
                 snd.FadeInMusic('BGM/' + musicInfo.fieldMusic)
+        if 'tree_shadow' in changed:
+            apply_tree_shadow(values['tree_shadow'])
+        if 'dps_meter' in changed:
+            apply_dps_meter(values['dps_meter'])
         if not systemSetting.SaveConfig():
             raise OSError('Unable to save native settings')
         preferences = dict(version=1, quality_preset=state['quality_preset'],
-                           custom_quality=state['custom_quality'],
+                           custom_quality=state['custom_quality'], tree_shadow=values['tree_shadow'],
+                           dps_meter=values['dps_meter'] if 'dps_meter' in changed else dps_meter_enabled(),
                            quality_values={key: values[key] for key in model.QUALITY_KEYS})
         atomic_write(PREFERENCES, json.dumps(preferences, sort_keys=True).encode('utf-8'))
         # Requests go last, after local persistence. The next server snapshot

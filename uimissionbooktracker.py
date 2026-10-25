@@ -8,7 +8,7 @@ import fontconfig
 import missionbookmodel as model
 from missionbooklocale import Text
 from uimissionbookwidgets import WindowDestroy, line, fitted, book_image, GOLD, DIM
-from uicountdownhud import _HitArea, _SetControl, _Image, Text as CountdownText
+from uicountdownhud import _HitArea, _SetControl, _Image, Text as CountdownText, R1ShowHint, R1HideHint
 from uicrimsonember import SettingsScrollBar
 
 
@@ -60,7 +60,23 @@ class MissionBookTracker(ui.Window):
             self.lockButton, self.collapseButton, self.bookHit, self.viewport,
             self.scroll, self.resizeGrip, self.resizeImage]
         self.Layout()
+        self.ApplyR1Look()
         self.Hide()
+
+    def ApplyR1Look(self):
+        """R1 look (root/uihudpanelr1.py, shared with Odpočty) unless Settings -> "Starý vzhled" chose the original
+        one; a build failure keeps the original look (traced, not tried again in this session)."""
+        self.r1 = None
+        try:
+            import uihudpanelr1
+            self.r1 = uihudpanelr1.Build(self, uihudpanelr1.TrackerSkin, Text("TRACKER"),
+                                         lambda me=weakref.proxy(self): me.owner.settings)
+        except Exception:
+            self.r1 = None
+
+    def SyncR1(self):
+        if self.r1:
+            self.r1.SyncSafe()
 
     def Initialize(self):
         self.owner = None
@@ -75,6 +91,8 @@ class MissionBookTracker(ui.Window):
         self.lastScreen = None
         self.bookVnum = None
         self.layoutBusy = False
+        self.r1 = None
+        self.resizeState = None
 
     def __del__(self):
         ui.Window.__del__(self)
@@ -108,7 +126,7 @@ class MissionBookTracker(ui.Window):
         _SetControl(self.lockButton, "lock", s["locked"])
         _SetControl(self.collapseButton, "up" if s["collapsed"] else "down")
         self.lockButton.SetToolTipText(CountdownText("UNLOCK" if s["locked"] else "LOCK"))
-        self.collapseButton.SetToolTipText(CountdownText("EXPAND" if s["collapsed"] else "COLLAPSE"))
+        self.collapseButton.SetToolTipText(Text("TRACKER_EXPAND" if s["collapsed"] else "TRACKER_COLLAPSE"))
         self.viewport.SetSize(max(1, w - 81), max(1, h - 62))
         self.layoutBusy = True
         self.scroll.SetPosition(w - 23, 33)
@@ -130,7 +148,9 @@ class MissionBookTracker(ui.Window):
         overflow = max(0, len(targets) - visible)
         self.layoutBusy = True
         self.scroll.SetMiddleBarSize(max(0.1, min(1.0, float(visible) / max(1, len(targets)))))
-        if not overflow:
+        if overflow:
+            self.scroll.SetScrollStep(1.0 / overflow)       # one target per wheel notch (was 40 % of the list)
+        else:
             self.scroll.SetPos(0)
         self.layoutBusy = False
         first = int(round(overflow * self.scroll.GetPos()))
@@ -156,6 +176,7 @@ class MissionBookTracker(ui.Window):
                 self.book.Hide()
             self.book = book_image(self.bookHit, active[0], 0, 0)
             self.bookVnum = active[0]
+        self.SyncR1()
 
     def Open(self, force=False):
         if not self.owner.state.active or (not force and not self.owner.settings["auto_track"]) or self.owner.suspended:
@@ -220,15 +241,20 @@ class MissionBookTracker(ui.Window):
         state = "disabled" if self.owner.settings["locked"] else (
             "pressed" if self.dragState else "hover" if self.resizeGrip.hovered else "normal")
         path = "d:/ymir work/ui/game/crimson_ember/countdown_hud/resize_%s_%s.png"
-        self.resizeImage.LoadImage(path % ("left" if self.growLeft else "right", state))
+        self.resizeState = ("left" if self.growLeft else "right", state)
+        self.resizeImage.LoadImage(path % self.resizeState)
+        if self.r1:
+            self.r1.SyncResizeSafe()
 
     def Activate(self, action):
         self.HideHint()
         if action == "open":
             self.owner.Open()
 
-    def ShowHint(self, text):
+    def ShowHint(self, text, widget=None):
         if self.dragState:
+            return
+        if R1ShowHint(self, text, widget):
             return
         self.tooltip.ClearToolTip()
         self.tooltip.SetThinBoardSize(uiToolTip.ToolTip.TOOL_TIP_WIDTH)
@@ -237,6 +263,7 @@ class MissionBookTracker(ui.Window):
         self.tooltip.ShowToolTip()
 
     def HideHint(self):
+        R1HideHint(self)
         if self.tooltip:
             self.tooltip.HideToolTip()
 
@@ -244,10 +271,6 @@ class MissionBookTracker(ui.Window):
         if not self.scroll.IsShow() or not delta:
             return False
         self.scroll.OnUp() if delta > 0 else self.scroll.OnDown()
-        return True
-
-    def OnPressEscapeKey(self):
-        self.Close()
         return True
 
     def OnUpdate(self):
@@ -260,6 +283,9 @@ class MissionBookTracker(ui.Window):
             return
         self.Close()
         self.owner.Save()
+        if self.r1:
+            self.r1.Destroy()
+            self.r1 = None
         self.titleBar.SetCloseEvent(None)
         self.lockButton.SetEvent(None)
         self.collapseButton.SetEvent(None)

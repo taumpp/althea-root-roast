@@ -1,8 +1,6 @@
 """Temporary mount crystal selection; never predicts or awards soul EXP."""
 
 CRYSTAL_VNUMS = (79530, 79531, 79532)
-PROTEIN_BAR_VNUM = 55001
-REGULAR_FEED_VNUMS = CRYSTAL_VNUMS + (PROTEIN_BAR_VNUM,)
 SLOT_COUNT = 9
 
 

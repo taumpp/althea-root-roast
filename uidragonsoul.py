@@ -1,3 +1,4 @@
+import dungeonequipmentbinding
 import ui
 import player
 import mouseModule
@@ -18,6 +19,7 @@ import constInfo
 import osfInfo
 import ime
 import uiInventory
+import npcsellprice
 import sys
 from dragon_soul_auto_refine import StrengthAutoRefineSession
 if app.ENABLE_DS_GRADE_MYTH:
@@ -90,6 +92,7 @@ class DragonSoulWindow(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
 		self.questionDialog = None
+		self.dungeonLockOverlays = {}
 		self.tooltipItem = None
 		if app.ENABLE_DS_GRADE_MYTH:
 			self.toolTip = uiToolTip.ToolTip()
@@ -104,6 +107,7 @@ class DragonSoulWindow(ui.ScriptWindow):
 		self.tabButtonDict = None
 		self.deckPageIndex = 0
 		self.inventoryPageIndex = 4
+		self.r1Skin = None
 		self.SetWindowName("DragonSoulWindow")
 		self.__LoadWindow()
 		self.interface = None
@@ -268,8 +272,31 @@ class DragonSoulWindow(ui.ScriptWindow):
 		self.activateButton.Enable()
 		self.deckTab[self.deckPageIndex].Down()
 		self.activateButton.SetUp()
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""R1 look (root/uidragonsoulr1.py) unless Settings -> "Starý vzhled" chose the original one; a build
+		failure undoes every change and keeps the original look (traced to syserr)."""
+		self.r1Skin = None
+		try:
+			import uir1
+			if not uir1.UseR1():
+				return
+			import uidragonsoulr1
+			self.r1Skin = uidragonsoulr1.DragonSkin(self)
+		except Exception:
+			self.r1Skin = None
+			try:
+				import uir1
+				uir1.TraceFailure("the dragon stone alchemy window")
+			except Exception:
+				pass
 
 	def Destroy(self):
+		dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.Destroy()
+		self.r1Skin = None
 		self.ClearDictionary()
 		self.tooltipItem = None
 		if app.ENABLE_DS_GRADE_MYTH:
@@ -339,6 +366,12 @@ class DragonSoulWindow(ui.ScriptWindow):
 		def OverInInventoryTab(self, page):
 			if self.toolTip:
 				tooltip = self.PAGE_TAB_TITLES[page]
+				import uir1
+				if uir1.UseR1():
+					# R1 look: the one R1 hint above the tab (owner = the tab: OnUpdate's OverOut of the
+					# other tabs leaves it shown).
+					uir1.ShowHint(None, self.inventoryTab[page], tooltip)
+					return
 				arglen = len(tooltip)
 				pos_x, pos_y = wndMgr.GetMousePosition()
 				self.toolTip.ClearToolTip()
@@ -348,6 +381,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 
 		def OverOutInventoryTab(self, page):
 			if self.toolTip:
+				import uir1
+				uir1.HideHint(self.inventoryTab[page])
 				self.toolTip.Hide()
 
 		def OnUpdate(self):
@@ -360,10 +395,13 @@ class DragonSoulWindow(ui.ScriptWindow):
 						self.OverOutInventoryTab(i)
 
 	def RefreshEquipSlotWindow(self):
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.wndEquip)
 		for i in range(player.DRAGON_SOUL_EQUIPMENT_FIRST_SIZE):
 			slotNumber = self.__InventoryLocalSlotPosToGlobalSlotPos(player.INVENTORY, player.DRAGON_SOUL_EQUIPMENT_SLOT_START + i)
 			itemVnum = player.GetItemIndex(slotNumber)
 			self.wndEquip.SetItemSlot(player.DRAGON_SOUL_EQUIPMENT_SLOT_START + i, itemVnum, 0)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip,
+				player.DRAGON_SOUL_EQUIPMENT_SLOT_START + i, slotNumber, itemVnum)
 			self.wndEquip.EnableSlot(player.DRAGON_SOUL_EQUIPMENT_SLOT_START + i)
 
 		self.wndEquip.RefreshSlot()
@@ -393,6 +431,7 @@ class DragonSoulWindow(ui.ScriptWindow):
 			return (self.DSKindIndex * 5 * player.DRAGON_SOUL_PAGE_SIZE) + self.inventoryPageIndex * player.DRAGON_SOUL_PAGE_SIZE + local_slot_pos
 
 	def RefreshBagSlotWindow(self):
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.wndItem)
 		getItemVNum = player.GetItemIndex
 		getItemCount = player.GetItemCount
 		setItemVnum = self.wndItem.SetItemSlot
@@ -411,6 +450,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 			itemVnum = getItemVNum(player.DRAGON_SOUL_INVENTORY, slotNumber)
 
 			setItemVnum(i, itemVnum, itemCount)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndItem,
+				i, slotNumber, itemVnum, player.DRAGON_SOUL_INVENTORY)
 
 		self.__HighlightSlot_RefreshCurrentPage()
 		self.wndItem.RefreshSlot()
@@ -539,12 +580,7 @@ class DragonSoulWindow(ui.ScriptWindow):
 				self.popup = popup
 				return
 
-			itemPrice = item.GetISellItemPrice()
-
-			if item.Is1GoldItem():
-				itemPrice = itemCount // itemPrice // 5
-			else:
-				itemPrice = itemPrice * itemCount // 5
+			itemPrice = npcsellprice.SellPrice(item.GetISellItemPrice(), itemCount, item.Is1GoldItem())
 
 			item.GetItemName(itemIndex)
 			itemName = item.GetItemName()
@@ -555,6 +591,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 			self.questionDialog.SetCancelEvent(ui.__mem_func__(self.OnCloseQuestionDialog))
 			self.questionDialog.Open()
 			self.questionDialog.count = itemCount
+			# The shown price is void once the server changes the sale terms.
+			npcsellprice.Watch(self.questionDialog, ui.__mem_func__(self.OnCloseQuestionDialog))
 
 	## 상점에 팔기
 	def SellItem(self):
@@ -632,6 +670,11 @@ class DragonSoulWindow(ui.ScriptWindow):
 					return
 		except:
 			pass
+
+		import virtualmarketquickadd
+		if virtualmarketquickadd.TryAddInventoryItem(
+				self.interface, slotIndex, player.DRAGON_SOUL_INVENTORY):
+			return
 
 		self.__UseItem(slotIndex)
 
@@ -846,6 +889,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 		self.tabText.SetText(DragonSoulWindow.KIND_TAP_TITLES[kindIndex])
 
 		self.RefreshBagSlotWindow()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def SetDeckPage(self, page):
 		if page == self.deckPageIndex:
@@ -885,6 +930,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 		self.deckTab[deck].Down()
 		self.deckTab[(deck+1)%2].SetUp()
 		self.RefreshEquipSlotWindow()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 		if app.ENABLE_DSS_ACTIVE_EFFECT:
 			if self.interface:
@@ -894,6 +941,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 		self.DeactivateEquipSlotWindow()
 		self.isActivated = False
 		self.activateButton.SetUp()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 		if app.ENABLE_DSS_ACTIVE_EFFECT:
 			if self.interface:
@@ -916,6 +965,8 @@ class DragonSoulWindow(ui.ScriptWindow):
 				self.activateButton.SetUp()
 		else:
 			net.SendChatPacket("/dragon_soul deactivate")
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __CanActivateDeck(self):
 		for i in range(player.DRAGON_SOUL_EQUIPMENT_FIRST_SIZE):
@@ -999,6 +1050,7 @@ class DragonSoulRefineWindow(ui.ScriptWindow):
 			self.refineChoiceButtonTitleDict = None
 		self.doRefineButton = None
 		self.wndMoney = None
+		self.r1Skin = None
 		self.SetWindowName("DragonSoulRefineWindow")
 		if app.ENABLE_EXTENDED_DRAGON_SOUL:
 			self.doAllRefineButton = None
@@ -1096,8 +1148,31 @@ class DragonSoulRefineWindow(ui.ScriptWindow):
 		self.refineChoiceButtonDict[self.REFINE_TYPE_GRADE].Down()
 
 		self.__Initialize()
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""R1 look (root/uidragonsoulr1.py RefineSkin) unless Settings -> "Starý vzhled" chose the original one; a
+		build failure is traced and keeps the original look."""
+		self.r1Skin = None
+		try:
+			import uir1
+			if not uir1.UseR1():
+				return
+			import uidragonsoulr1
+			self.r1Skin = uidragonsoulr1.RefineSkin(self)
+		except Exception:
+			self.r1Skin = None
+			try:
+				import uir1
+				uir1.TraceFailure("the dragon stone refine window")
+			except Exception:
+				pass
 
 	def Destroy(self):
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.Destroy()
+		self.r1Skin = None
+		self.ResetForSessionChange()
 		self.ClearDictionary()
 		self.tooltipItem = None
 		self.wndItem = 0
@@ -1152,6 +1227,22 @@ class DragonSoulRefineWindow(ui.ScriptWindow):
 		self.autoRefinePending = False
 		self.__ResetAutoRefineEmptyGrace()
 		self.autoRefineTime = float(app.GetTime())
+
+	def ResetForSessionChange(self):
+		# LoadingPhase clears inventory and the destination re-sends its counts.
+		# Never refund source-map reservations or send CLOSE on the leaving socket.
+		if app.ENABLE_EXTENDED_DRAGON_SOUL:
+			self.strengthAutoRefine = StrengthAutoRefineSession()
+			self.autoRefinePending = False
+			self.autoRefineCount = 0
+			self.autoRefineTime = 0.0
+			self.StopAutoRefine()
+		self.currentFirstItem = (-1, -1)
+		self.currentSecondItem = (-1, -1)
+		self.__Initialize()
+		if self.tooltipItem:
+			self.tooltipItem.HideToolTip()
+		self.Hide()
 
 	def Close(self):
 		if None != self.tooltipItem:
@@ -1678,6 +1769,8 @@ class DragonSoulRefineWindow(ui.ScriptWindow):
 			self.doAllRefineButton.Hide()
 		else:
 			self.doAllRefineButton.Show()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __RefreshRefineItemSlot(self):
 		try:

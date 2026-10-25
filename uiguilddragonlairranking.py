@@ -29,7 +29,6 @@ class GuildDragonLairRankingDialog(ui.ScriptWindow):
 		self.isLoaded = 0
 		self.NowStartLineNumber = 0
 		self.DragonLairType = 0
-		self.IsShow = False
 		self.board = None
 		if not app.ENABLE_GUILD_DRAGONLAIR_PARTY_SYSTEM:
 			self.ScrollBar = None
@@ -47,7 +46,6 @@ class GuildDragonLairRankingDialog(ui.ScriptWindow):
 		self.isLoaded = 0
 		self.NowStartLineNumber = 0
 		self.DragonLairType = 0
-		self.IsShow = False
 		self.board = None
 		if not app.ENABLE_GUILD_DRAGONLAIR_PARTY_SYSTEM:
 			self.ScrollBar = None
@@ -62,7 +60,6 @@ class GuildDragonLairRankingDialog(ui.ScriptWindow):
 		self.isLoaded = 0
 		self.NowStartLineNumber = 0
 		self.DragonLairType = 0
-		self.IsShow = False
 		self.board = None
 		if not app.ENABLE_GUILD_DRAGONLAIR_PARTY_SYSTEM:
 			self.ScrollBar = None
@@ -73,8 +70,10 @@ class GuildDragonLairRankingDialog(ui.ScriptWindow):
 			self.ResultButtonRankList = []
 
 	def Open(self,type):
-		if not self.IsShow:
-			self.IsShow = True
+		# Ask the native window. An instance attribute named IsShow would
+		# shadow ui.Window.IsShow, and shared callers such as
+		# Interface.OnFeatureAvailability call window.IsShow().
+		if not self.IsShow():
 			self.SetCenterPosition()
 			self.SetTop()
 			self.NowStartLineNumber = 0
@@ -84,7 +83,6 @@ class GuildDragonLairRankingDialog(ui.ScriptWindow):
 			ui.ScriptWindow.Show(self)
 
 	def Close(self):
-		self.IsShow = False
 		self.NowStartLineNumber = 0
 		self.Hide()
 

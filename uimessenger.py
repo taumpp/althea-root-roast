@@ -877,6 +877,7 @@ class MessengerWindow(ui.ScriptWindow):
 		member.SetName(name)
 		member.Online()
 		self.OnRefreshList()
+		self.NotifyUnifiedMessengerPresence()
 
 	def OnLogout(self, groupIndex, key, name=None):
 		group = self.groupList[groupIndex]
@@ -887,6 +888,19 @@ class MessengerWindow(ui.ScriptWindow):
 		member.SetName(name)
 		member.Offline()
 		self.OnRefreshList()
+		self.NotifyUnifiedMessengerPresence()
+
+	def NotifyUnifiedMessengerPresence(self):
+		# Zprávy draws the dot of every friend and guild member from this
+		# roster (GetCrimsonPresence); redraw its list when one logs in or out.
+		try:
+			interface = getattr(self, "interface", None)
+			router = getattr(interface, "unifiedMessengerRouter", None) if interface else None
+			window = getattr(router, "window", None) if router else None
+			if window and hasattr(window, "OnPresenceChanged"):
+				window.OnPresenceChanged()
+		except ReferenceError:
+			pass
 
 	def OnAddLover(self, name, lovePoint):
 		if not self.familyGroup:
@@ -928,6 +942,31 @@ class MessengerWindow(ui.ScriptWindow):
 			return
 
 		lover.Offline()
+
+	def ResetSession(self):
+		"""Seamless warp: forget the source core's roster. The destination
+		re-sends friends, guild members, blocks and the lover after login."""
+		for group in self.groupList:
+			for member in group.memberList:
+				member.Hide()
+			group.ClearMember()
+		if self.familyGroup:
+			lover = self.familyGroup.GetLover()
+			if lover:
+				lover.Hide()
+			self.familyGroup.Hide()
+		self.ClearLoverInfo()
+		self.selectedItem = None
+		self.OnRefreshList()
+
+	def ReattachHandler(self):
+		"""messenger.Destroy() on a warp clears the native handler; the
+		surviving window registers again and replays the native roster."""
+		global _messengerHandlerOwner
+		self._messengerHandlerToken = object()
+		_messengerHandlerOwner = self._messengerHandlerToken
+		messenger.SetMessengerHandler(self)
+		getattr(messenger, "RefreshMessenger", messenger.RefreshGuildMember)()
 
 	def ClearLoverInfo(self):
 		if not self.familyGroup:
@@ -1081,6 +1120,10 @@ class ScrollBarSpecial(ui.Window):
 # CRIMSON_EMBER_FRIENDS_V16_BEGIN
 import messengerportraitresolver
 import uicrimsonember
+try:
+	import uir1friends
+except Exception:
+	uir1friends = None
 
 CRIMSON_FRIENDS_IMG_DIR = "d:/ymir work/ui/game/crimson_ember/messenger/"
 IMG_DIR = CRIMSON_FRIENDS_IMG_DIR + "page/"
@@ -1148,8 +1191,29 @@ class _CrimsonFriendsActionToolTip(uiToolTip.ToolTip):
 		self.ShowToolTip()
 
 
+def _R1TextTip(button):
+	"""The button's tooltip is the R1 one (uir1.TextTip, made while the R1 look was on)."""
+	try:
+		import uir1
+		return isinstance(getattr(button, "ToolTipText", None), uir1.TextTip)
+	except Exception:
+		return False
+
+
 def _CrimsonResolvePortrait(name):
 	return messengerportraitresolver.ResolvePortrait(0, name)
+
+
+def _R1Skin(window):
+	return getattr(window, "r1Skin", None) if window else None
+
+
+def _R1PaintItem(item):
+	# The R1 look (uir1friends) paints the row band; the original look keeps the crimson row art.
+	getParent = getattr(item, "getParentEvent", None)
+	skin = _R1Skin(getParent() if getParent else None)
+	if skin:
+		skin.PaintItem(item)
 
 
 def _CrimsonFriendsItemInit(self, getParentEvent):
@@ -1158,6 +1222,8 @@ def _CrimsonFriendsItemInit(self, getParentEvent):
 	self.AddFlag("float")
 	self.SetSize(172, 36)
 	self.name = ""
+	# Created before the row art: the R1 band lies under it (hidden in the original look).
+	self.r1Band = uir1friends.NewItemBand(self) if uir1friends else None
 	self.background = ui.ImageBox()
 	self.background.SetParent(self)
 	self.background.LoadImage(CRIMSON_FRIENDS_IMG_DIR + "row/member_normal.png")
@@ -1215,6 +1281,7 @@ def _CrimsonFriendsOnline(self):
 	self.image.SetPosition(25, 24)
 	self.statusText.SetText("")
 	self.statusText.Hide()
+	_R1PaintItem(self)
 
 
 def _CrimsonFriendsOffline(self):
@@ -1223,21 +1290,26 @@ def _CrimsonFriendsOffline(self):
 	self.image.SetPosition(25, 24)
 	self.statusText.SetText("")
 	self.statusText.Hide()
+	_R1PaintItem(self)
 
 
 def _CrimsonFriendsSelect(self):
 	self.isSelected = True
 	self.background.LoadImage(CRIMSON_FRIENDS_IMG_DIR + "row/member_selected.png")
+	_R1PaintItem(self)
 
 
 def _CrimsonFriendsUnselect(self):
 	self.isSelected = False
 	self.background.LoadImage(CRIMSON_FRIENDS_IMG_DIR + "row/member_normal.png")
+	_R1PaintItem(self)
 
 
 def _CrimsonFriendsOverIn(self):
 	if not self.isSelected:
 		self.background.LoadImage(CRIMSON_FRIENDS_IMG_DIR + "row/member_hover.png")
+	self.r1Hover = True
+	_R1PaintItem(self)
 	if -1 != self.lovePoint:
 		if not self.lovePointToolTip:
 			self.lovePointToolTip = uiToolTip.ToolTip(100)
@@ -1249,6 +1321,8 @@ def _CrimsonFriendsOverIn(self):
 
 def _CrimsonFriendsOverOut(self):
 	self.background.LoadImage(CRIMSON_FRIENDS_IMG_DIR + "row/member_" + ("selected" if self.isSelected else "normal") + ".png")
+	self.r1Hover = False
+	_R1PaintItem(self)
 	if self.lovePointToolTip:
 		self.lovePointToolTip.HideToolTip()
 
@@ -1319,6 +1393,7 @@ def _CrimsonFriendsLocate(self):
 	if self.isLoaded == 0:
 		return
 	heightLimit = 184
+	skin = getattr(self, "r1Skin", None)
 	list(map(ui.Window.Hide, self.showingItemList))
 	totalY = sum(item.GetHeight() for item in self.showingItemList)
 	validStarts = _CrimsonFriendsValidStarts(self.showingItemList, heightLimit)
@@ -1336,6 +1411,8 @@ def _CrimsonFriendsLocate(self):
 		item.SetPosition(14, yPos)
 		item.SetTop()
 		item.Show()
+		if skin:
+			skin.PaintItem(item)
 		yPos += itemHeight
 	if totalY > heightLimit:
 		self.scrollBar.Show()
@@ -1398,14 +1475,16 @@ def _CrimsonFriendsRefreshList(self):
 		self.crimsonCollapsedGroups = {"online": False, "offline": False}
 	onlineLabel = getattr(localeInfo, "MESSENGER_ONLINE", "Online")
 	offlineLabel = getattr(localeInfo, "MESSENGER_OFFLINE", "Offline")
-	self.showingItemList.append(_CrimsonFriendsDivider(
-		self, "online", onlineLabel, len(onlineMembers),
-		self.crimsonCollapsedGroups["online"]))
-	if not self.crimsonCollapsedGroups["online"]:
-		self.showingItemList.extend(onlineMembers)
-	self.showingItemList.append(_CrimsonFriendsDivider(
-		self, "offline", offlineLabel, len(offlineMembers),
-		self.crimsonCollapsedGroups["offline"]))
+	skin = getattr(self, "r1Skin", None)
+	for groupKey, label, members in (("online", onlineLabel, onlineMembers), ("offline", offlineLabel, offlineMembers)):
+		divider = _CrimsonFriendsDivider(
+			self, groupKey, label, len(members),
+			self.crimsonCollapsedGroups[groupKey])
+		if skin:
+			skin.DressDivider(divider, self.crimsonCollapsedGroups[groupKey])
+		self.showingItemList.append(divider)
+		if groupKey == "online" and not self.crimsonCollapsedGroups["online"]:
+			self.showingItemList.extend(onlineMembers)
 	if not self.crimsonCollapsedGroups["offline"]:
 		self.showingItemList.extend(offlineMembers)
 	self.startLine = 0
@@ -1438,8 +1517,9 @@ def _CrimsonFriendsMouseInList(self):
 
 
 def _CrimsonFriendsMouseWheel(self, isDown):
-	if _CrimsonFriendsMouseInList(self):
-		self.scrollBar.OnMouseWheel(-1 if isDown else 1)
+	if not _CrimsonFriendsMouseInList(self):
+		return False	# the bar, the tabs, the search: the window's panel wheel (uiwheel) scrolls the list
+	self.scrollBar.OnMouseWheel(-1 if isDown else 1)
 	return True
 
 
@@ -1486,6 +1566,11 @@ def _CrimsonFriendsLoadWindow(self):
 		actionButtons += ((self.addBlockButton,
 			_CrimsonFriendsActionLabel("MESSENGER_BLOCK_FRIEND", "WHISPER_BAN")),)
 	for button, label in actionButtons:
+		if _R1TextTip(button):
+			# R1 look: the label as the button's own tooltip text, shown as the one R1 hint ABOVE the button (the
+			# item tooltip used here covered the button's top 6 px and put the item-name vein under the label).
+			button.SetToolTipText(label)
+			continue
 		if button.ToolTipText:
 			button.ToolTipText.Hide()
 		tooltip = _CrimsonFriendsActionToolTip(label)
@@ -1494,11 +1579,17 @@ def _CrimsonFriendsLoadWindow(self):
 		button.SetHideToolTipEvent(tooltip.HideToolTip)
 		self.crimsonActionToolTips.append(tooltip)
 		self.crimsonTooltipButtons.append(button)
+	# The R1 look (default) is drawn into the loaded window; "Starý vzhled" or a failure keeps this one.
+	self.r1Skin = uir1friends.Build(self) if uir1friends else None
 	self.OnRefreshList()
 	return result
 
 
 def _CrimsonFriendsDestroy(self):
+	skin = getattr(self, "r1Skin", None)
+	if skin:
+		skin.Destroy()
+	self.r1Skin = None
 	for tooltip in getattr(self, "crimsonActionToolTips", []):
 		tooltip.HideToolTip()
 	for button in getattr(self, "crimsonTooltipButtons", []):
@@ -1531,6 +1622,9 @@ def _CrimsonFriendsSearchIMEUpdate(self):
 
 def _CrimsonFriendsOnUpdate(self):
 	messengerportraitresolver.Pump()
+	skin = _R1Skin(self)
+	if skin and self.IsShow():
+		skin.Update()
 
 
 MessengerItem.__init__ = _CrimsonFriendsItemInit

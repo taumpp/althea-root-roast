@@ -1,6 +1,8 @@
 """Read-only compact dungeon rewards; owned by DungeonTeleportPage."""
 import weakref
+import chestpreview
 
+import app
 import item
 import net
 import localeInfo
@@ -62,10 +64,10 @@ class DropCell(ui.Window):
 
     def OnMouseOverIn(self):
         if self.vnum:
-            self.owner.OverIn(self.vnum)
+            self.owner.OverIn(self.vnum, self)
 
     def OnMouseOverOut(self):
-        self.owner.OverOut()
+        self.owner.LeaveCell()
 
     def OnMouseWheel(self, length):
         return self.owner.OnMouseWheel(length)
@@ -119,6 +121,12 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
         self.thumb.SetRestrictMovementArea(240, 57, 8, self.TRACK_HEIGHT)
         self.thumb.SetMoveEvent(ui.__mem_func__(self._OnDrag))
         self.Hide()
+        # R1 look (root/uir1dungeondrop.py); "Starý vzhled" or a failure keeps this window as it is
+        try:
+            import uir1dungeondrop
+            self.r1Drop = uir1dungeondrop.Dress(self)
+        except Exception:
+            self.r1Drop = None
 
     def _Initialize(self):
         self.cells = []
@@ -128,11 +136,13 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
         self.requestId = 0
         self.pending = None
         self.tooltipShown = False
+        self.chestPreview = None
         self.heading = None
         self.total = None
         self.empty = None
         self.track = None
         self.thumb = None
+        self.r1Drop = None
 
     def _Text(self, x, y, value):
         label = ui.TextLine()
@@ -161,6 +171,8 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
         if self.bossVnum == bossVnum:
             return
         self.OverOut()
+        if self.chestPreview:
+            self.chestPreview.ResetScope()
         self.bossVnum = bossVnum
         self.entries = ()
         self.pending = None
@@ -246,13 +258,30 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
             return interface.tooltipItem
         return None
 
-    def OverIn(self, vnum):
+    def OverIn(self, vnum, cell=None):
+        self.OverOut()
+        if cell and getattr(app, "ENABLE_SHOW_CHEST_DROP", False):
+            item.SelectItem(vnum)
+            if chestpreview.CanPreview(vnum) and item.GetItemType() in (item.ITEM_TYPE_GIFTBOX, item.ITEM_TYPE_GACHA,
+                                      item.ITEM_TYPE_TREASURE_BOX):
+                if self.chestPreview is None:
+                    import uidungeonchestpreview
+                    self.chestPreview = uidungeonchestpreview.DungeonChestPreview(self)
+                self.chestPreview.Open(vnum, cell)
+                return
         tooltip = self._ToolTip()
         if tooltip:
             tooltip.SetItemToolTip(vnum)
             self.tooltipShown = True
 
+    def LeaveCell(self):
+        if self.chestPreview and self.chestPreview.IsShow():
+            return
+        self.OverOut()
+
     def OverOut(self):
+        if self.chestPreview:
+            self.chestPreview.Close()
         # The item tooltip is shared; hide it only when a drop cell showed it.
         if not self.tooltipShown:
             return
@@ -263,6 +292,8 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
 
     def Close(self):
         self.OverOut()
+        if self.chestPreview:
+            self.chestPreview.ResetScope()
         self.pending = None
         self.Hide()
 
@@ -272,6 +303,8 @@ class DungeonDropWindow(ui.BoardWithTitleBar):
 
     def Destroy(self):
         self.Close()
+        if self.chestPreview:
+            self.chestPreview.Destroy()
         for cell in self.cells:
             cell.Destroy()
         if self.thumb:

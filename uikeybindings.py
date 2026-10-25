@@ -49,13 +49,15 @@ class ShortcutCaptureDialog(ui.ScriptWindow):
 		ui.ScriptWindow.__init__(self)
 		self.manager = None
 		self.callback = None
-		self.__LoadWindow()
+		self._LoadWindow()
 
 	def __del__(self):
 		self.Close()
 		ui.ScriptWindow.__del__(self)
 
-	def __LoadWindow(self):
+	def _LoadWindow(self):
+		# Overridable: the settings kit look builds the same controls (board, capturedShortcut, cancelButton)
+		# without this script (uisettingsc9dialogs).
 		loader = ui.PythonScriptLoader()
 		loader.LoadScriptFile(self, "UIScript/keybindingcapturedialog.py")
 		self.board = self.GetChild("Board")
@@ -349,6 +351,14 @@ class KeybindingsPage(object):
 		try:
 			conflict = self.session.assign(action_id, shortcut)
 		except keybindingcore.ReservedShortcutError:
+			if action_id in getattr(keybindings, "SPACE_IN_MINIGAME_ACTIONS", ()) and shortcut == keybindingcore.Shortcut("SPACE"):
+				self.__ShowPopup(
+					_locale(
+						"KEYBIND_SPACE_IN_MINIGAME_MESSAGE",
+						"Space already hits in the minigame, no need to bind it.",
+					)
+				)
+				return False
 			self.__ShowPopup(
 				_locale(
 					"KEYBIND_RESERVED_MESSAGE",

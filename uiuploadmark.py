@@ -36,13 +36,13 @@ def DescribeGuildMarkFile(fileName):
 	"""(usable, status) of one candidate, known before anything is uploaded."""
 	kind = os.path.splitext(fileName)[1][1:].lower()
 	if kind not in GUILD_MARK_EXTENSIONS:
-		return False, "Nepodporovaný formát (.%s) — ulož jako PNG" % kind
+		return False, "Nepodporovaný formát (.%s) - ulož jako PNG" % kind
 	canLoad, width, height = app.GetImageInfo("upload/" + fileName)
 	if canLoad != 1:
-		return False, "Obrázek nelze přečíst — ulož ho znovu jako PNG"
+		return False, "Obrázek nelze přečíst - ulož ho znovu jako PNG"
 	if (width, height) != (GUILD_MARK_WIDTH, GUILD_MARK_HEIGHT):
-		return False, "%d×%d px — musí být %d×%d" % (width, height, GUILD_MARK_WIDTH, GUILD_MARK_HEIGHT)
-	return True, "%d×%d px · připraveno k nahrání" % (width, height)
+		return False, "%dx%d px - musí být %dx%d" % (width, height, GUILD_MARK_WIDTH, GUILD_MARK_HEIGHT)
+	return True, "%dx%d px | připraveno k nahrání" % (width, height)
 
 
 def OpenGuildMarkUploadFolder():
@@ -53,6 +53,14 @@ def OpenGuildMarkUploadFolder():
 	except OSError:
 		pass
 	app.ShellExecute(uploadPath)
+
+class MarkFolder(object):
+	"""The upload folder access the R1 picker (uiuploadmarkr1) shares with this one."""
+	List = staticmethod(ListGuildMarkFiles)
+	Describe = staticmethod(DescribeGuildMarkFile)
+	Path = staticmethod(GuildMarkUploadFolder)
+	Open = staticmethod(OpenGuildMarkUploadFolder)
+
 
 class MarkItem(ui.ListBoxEx.Item):
 	def __init__(self, fileName):
@@ -118,6 +126,8 @@ class PopupDialog(ui.ScriptWindow):
 	def __init__(self, parent):
 		# print "NEW POPUP WINDOW ------------------------------------------------------------------------------"
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accept', child=True)
 
 		self.__Load()
 		self.__Bind()
@@ -143,9 +153,20 @@ class PopupDialog(ui.ScriptWindow):
 			exception.Abort("PopupDialog.__Bind")
 
 		self.okButton.SetEvent(ui.__mem_func__(self.__OnOK))
+		# R1 dialog look (root/uir1dialog.py); "Starý vzhled" or a failure keeps the original
+		try:
+			import uir1dialog
+			uir1dialog.DressPopup(self)
+		except Exception:
+			pass
 
 	def Open(self, msg):
 		self.textLine.SetText(msg)
+		try:
+			import uir1dialog
+			uir1dialog.Layout(self)
+		except Exception:
+			pass
 		self.SetCenterPosition()
 		self.Show()
 		self.SetTop()
@@ -167,8 +188,20 @@ class MarkSelectDialog(object):
 
 	def Open(self):
 		if not self.window:
-			self.window = MarkSelectWindow(self)
+			self.window = self.__CreateWindow()
 		self.window.Open()
+
+	def __CreateWindow(self):
+		# The R1 look (uiuploadmarkr1) unless Settings -> "Starý vzhled";
+		# a failed R1 build is traced there and keeps this guild window style.
+		try:
+			import uiuploadmarkr1
+			window = uiuploadmarkr1.Create(self, MarkFolder)
+			if window:
+				return window
+		except Exception:
+			pass
+		return MarkSelectWindow(self)
 
 	def Close(self):
 		if self.window:
@@ -244,14 +277,14 @@ class MarkSelectWindow(uiguildv2widgets.Canvas):
 		body.clear()
 		folder = GuildMarkUploadFolder()
 		body.text(24, 44, "Nahrát znak cechu", width - 48, w.INK, w.ROLE_TITLE)
-		body.text(24, 82, "Obrázek 32 × 32 px ve formátu PNG, TGA, BMP nebo JPG. Hledáme ve složce:", width - 48, w.DIM, w.ROLE_CAPTION)
+		body.text(24, 82, "Obrázek 32 x 32 px ve formátu PNG, TGA, BMP nebo JPG. Hledá se ve složce:", width - 48, w.DIM, w.ROLE_CAPTION)
 		body.text(24, 102, folder, width - 48, w.GOLD, w.ROLE_CAPTION)
 		if self.files:
 			body.keep(w.ScrollList(body, 24, 130, width - 48, 262, self.files, 52, self.DrawFile))
 		else:
 			body.panel(24, 130, width - 48, 262)
 			body.block(44, 150, "Ve složce zatím není žádný obrázek.", width - 88, w.GOLD, w.fontconfig.ROLE_CONTROL)
-			body.block(44, 180, "Vlož do složky upload obrázek 32 × 32 px ve formátu PNG, TGA, BMP nebo JPG "
+			body.block(44, 180, "Vlož do složky upload obrázek 32 x 32 px ve formátu PNG, TGA, BMP nebo JPG "
 				"a klikni na Obnovit. Tlačítko Otevřít složku ji otevře.", width - 88, w.DIM)
 			body.block(44, 246, folder, width - 88, w.GOLD, w.ROLE_CAPTION)
 		usable = sum(1 for fileName, ok, status in self.files if ok)
@@ -260,7 +293,7 @@ class MarkSelectWindow(uiguildv2widgets.Canvas):
 		body.action("Otevřít složku", 24, height - 36, OpenGuildMarkUploadFolder, width=140)
 		body.action("Obnovit", 172, height - 36, ui.__mem_func__(self.Refresh), width=110)
 		body.button("Nahrát znak", width - 194, height - 36, ui.__mem_func__(self.Upload), bool(self.selected),
-			tooltip=None if self.selected else "Vyber obrázek 32 × 32 px")
+			tooltip=None if self.selected else "Vyber obrázek 32 x 32 px")
 
 	def DrawFile(self, canvas, record, y, width):
 		w = uiguildv2widgets
@@ -290,6 +323,8 @@ class SymbolSelectDialog(ui.ScriptWindow):
 	def __init__(self):
 		# print "NEW SYMBOL LIST WINDOW ------------------------------------------------------------------------------"
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'okButton')
 
 		self.selectEvent = None
 		self.isLoaded = 0

@@ -1,17 +1,18 @@
 # Name policies shared by character create/rename and Guild V2.
 # Existing names stay valid lookup targets and are never revalidated here.
 CHARACTER_MAX_BYTES = 16
-GUILD_MAX_BYTES = 12
+GUILD_MAX_CHARACTERS = 12
+GUILD_MAX_BYTES = GUILD_MAX_CHARACTERS * 4
 
-# Guild V2 names: the looser UTF-8/spacing rule (server text_name_policy.h).
+# Guild V2 names: existing UTF-8/spacing rules, counted in Unicode characters.
 def valid(value, maximum):
     if not isinstance(value, str) or not value:
         return False
     try:
-        encoded = value.encode("utf-8", "strict")
+        value.encode("utf-8", "strict")
     except UnicodeError:
         return False
-    return (len(encoded) <= maximum and value == value.strip(" ") and
+    return (len(value) <= maximum and value == value.strip(" ") and
             "  " not in value and "|" not in value and
             all(ord(c) >= 32 and ord(c) != 127 for c in value))
 

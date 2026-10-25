@@ -12,6 +12,7 @@ import osfInfo
 import systemSetting
 import osfInfo
 import uiScriptLocale
+import chatlinkedit
 
 if app.ENABLE_WINDOW_RESIZE:
 	from resizeexpr import Expr
@@ -298,8 +299,24 @@ class ChatLine(ui.EditLine):
 		return False
 
 	def OnIMEUpdate(self):
+		previous = self.GetText()
 		ui.EditLine.OnIMEUpdate(self)
+		self.__KeepLinksWhole(previous)
 		self.__CheckChatMark()
+
+	def __KeepLinksWhole(self, previous):
+		# a Backspace / Delete that cut an item link removes the whole link (chatlinkedit); the IME
+		# alone took it apart tag by tag and the input kept showing the old link.
+		try:
+			fixed = chatlinkedit.Repair(previous, self.GetText())
+		except Exception:
+			return
+		if fixed is None:
+			return
+		text, cursor = fixed
+		ui.EditLine.SetText(self, text)
+		if self.IsFocus():
+			ime.SetCursorPosition(chatlinkedit.RenderLength(text[:cursor]))
 
 	def __CheckChatMark(self):
 		self.overTextLine.Hide()
@@ -330,7 +347,10 @@ class ChatLine(ui.EditLine):
 			return True
 		# END_OF_LAST_SENTENCE_STACK
 
+		previous = self.GetText()
 		ui.EditLine.OnIMEKeyDown(self, key)
+		if app.VK_DELETE == key:
+			self.__KeepLinksWhole(previous)
 
 	# LAST_SENTENCE_STACK
 	def __PrevLastSentenceStack(self):

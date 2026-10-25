@@ -711,6 +711,8 @@ class AutoAttackOptionWindow(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.__checkbox_back_img_list = []
 		self.__checkbox_text_list = []
 		self.__checkbox_list = []
@@ -882,6 +884,8 @@ class AutoHuntingRangeWindow(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.__slider_bar = None
 		self.__range_text = None
 		self.__auto_window = None

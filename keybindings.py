@@ -62,6 +62,18 @@ class ActionDefinition(object):
 		self.callback = callback
 
 
+# Switched off by the owner on 2026-10-05: no panel button, "More" entry or
+# assignable shortcut. The windows stay in the client and the server refuses
+# their requests while the matching event flag is unset (althea/server-src
+# common/feature_gate_policy.h); bringing one back needs both sides.
+RETIRED_ACTION_IDS = frozenset((
+	"system.exchange_log",
+	"system.destroyed_items",
+	"system.reward",
+	"system.battle_pass",
+))
+
+
 def _feature_enabled(name):
 	return bool(app and getattr(app, name, False))
 
@@ -77,6 +89,8 @@ def _append_action(
 	callback_name,
 	feature_name=None,
 ):
+	if action_id in RETIRED_ACTION_IDS:
+		return
 	if feature_name and not _feature_enabled(feature_name):
 		return
 	callback = getattr(interface, callback_name, None)
@@ -94,8 +108,18 @@ def _append_action(
 	)
 
 
-def build_actions(interface, channel_count, request_channel_change=None):
+def build_actions(interface, channel_count, request_channel_change=None,
+	request_adjacent_channel_change=None):
 	actions = []
+	if callable(request_adjacent_channel_change) and int(channel_count) > 1:
+		for action_id, locale_key, order, step in (
+			("channel.next", "KEYBIND_ACTION_CHANNEL_NEXT", -2, 1),
+			("channel.previous", "KEYBIND_ACTION_CHANNEL_PREVIOUS", -1, -1),
+		):
+			actions.append(ActionDefinition(
+				action_id, locale_key, CATEGORY_CHANNELS, order, "",
+				lambda direction=step: request_adjacent_channel_change(direction),
+			))
 	if callable(request_channel_change):
 		for channel_index in range(1, max(0, int(channel_count)) + 1):
 			actions.append(
@@ -142,9 +166,10 @@ def build_actions(interface, channel_count, request_channel_change=None):
 	_append_action(actions, interface, "information.skill_tree", "KEYBIND_ACTION_INFORMATION_SKILL_TREE", CATEGORY_MAPS_INFORMATION, 40, "F5", "ToggleSkillTreeWindow")
 	_append_action(actions, interface, "information.event_calendar", "KEYBIND_ACTION_INFORMATION_EVENT_CALENDAR", CATEGORY_MAPS_INFORMATION, 50, "", "OpenEventCalendar", "ENABLE_EVENT_MANAGER")
 	_append_action(actions, interface, "information.ranking", "KEYBIND_ACTION_INFORMATION_RANKING", CATEGORY_MAPS_INFORMATION, 60, "", "ShowRankGlobal", "ENABLE_PLAYER_RANKING")
-	_append_action(actions, interface, "information.dungeon", "KEYBIND_ACTION_INFORMATION_DUNGEON", CATEGORY_MAPS_INFORMATION, 70, "F7", "OpenDungeonInfo", "ENABLE_DUNGEON_INFO")
+	_append_action(actions, interface, "information.dungeon", "KEYBIND_ACTION_INFORMATION_DUNGEON", CATEGORY_MAPS_INFORMATION, 70, "F7", "ToggleDungeonInfo", "ENABLE_DUNGEON_INFO")
 	_append_action(actions, interface, "information.countdowns", "KEYBIND_ACTION_INFORMATION_COUNTDOWNS", CATEGORY_MAPS_INFORMATION, 75, "", "ToggleCountdownHUD")
-	_append_action(actions, interface, "information.boss_track", "KEYBIND_ACTION_INFORMATION_BOSS_TRACK", CATEGORY_MAPS_INFORMATION, 80, "", "OpenBossTrack", "ENABLE_BOSS_TRACK")
+	# Hides / restores every letter on the left (quest letters, Trvalé / Denní úkoly).
+	_append_action(actions, interface, "information.quest_letters", "KEYBIND_ACTION_INFORMATION_QUEST_LETTERS", CATEGORY_MAPS_INFORMATION, 77, "CTRL+Q", "ToggleQuestLetters")
 
 	_append_action(actions, interface, "system.teleport", "KEYBIND_ACTION_SYSTEM_TELEPORT", CATEGORY_SYSTEMS, 10, "TAB", "ToggleTeleportAtlas", "ENABLE_TELEPORT_WINDOW")
 	_append_action(actions, interface, "system.custom_ports", "KEYBIND_ACTION_SYSTEM_CUSTOM_PORTS", CATEGORY_SYSTEMS, 15, "CTRL+X", "ToggleCustomPortsWindow", "ENABLE_CUSTOM_PORTS")
@@ -163,9 +188,18 @@ def build_actions(interface, channel_count, request_channel_change=None):
 	_append_action(actions, interface, "system.auto_hunt", "KEYBIND_ACTION_SYSTEM_AUTO_HUNT", CATEGORY_SYSTEMS, 110, "", "ToggleAutoHuntingWindow", "ENABLE_AUTOMATIC_HUNTING_SYSTEM")
 	_append_action(actions, interface, "system.chat_log", "KEYBIND_ACTION_SYSTEM_CHAT_LOG", CATEGORY_SYSTEMS, 120, "L", "ToggleChatLogWindow")
 	_append_action(actions, interface, "system.options", "KEYBIND_ACTION_SYSTEM_OPTIONS", CATEGORY_SYSTEMS, 130, "", "ToggleSystemDialog")
-	_append_action(actions, interface, "system.help", "KEYBIND_ACTION_SYSTEM_HELP", CATEGORY_SYSTEMS, 140, "", "OpenHelpWindow")
+	_append_action(actions, interface, "system.help", "KEYBIND_ACTION_SYSTEM_HELP", CATEGORY_SYSTEMS, 140, "", "ToggleHelpWindow")
+	_append_action(actions, interface, "system.craft_book", "KEYBIND_ACTION_SYSTEM_CRAFT_BOOK", CATEGORY_SYSTEMS, 145, "", "ToggleCraftBookWindow")
+	# The hit of the mining skill check (uiminingcheck), unbound by default: SPACE stays the attack key
+	# (fixed.movement), but while a ring is up Space hits it anyway (game.OnKeyDown -> MinigameSpaceHit).
+
+	_append_action(actions, interface, "system.mining_check", "KEYBIND_ACTION_SYSTEM_MINING_CHECK", CATEGORY_SYSTEMS, 147, "", "MiningCheckHit")
 
 	return actions
+
+
+# Actions Space already fires while their minigame runs: binding Space to them gets its own message.
+SPACE_IN_MINIGAME_ACTIONS = frozenset(("system.mining_check",))
 
 
 def build_reserved_shortcuts():
@@ -180,7 +214,7 @@ def build_reserved_shortcuts():
 	reserve("fixed.pickup", ("Z", "GRAVE"))
 	reserve("fixed.quickslot", tuple(str(value) for value in range(1, 10)) + tuple("F%d" % value for value in range(1, 5)) + ("F12",))
 	reserve("fixed.quickpage", tuple("CTRL+%d" % value for value in range(1, 10)))
-	reserve("fixed.system", ("CTRL+B", "CTRL+E", "CTRL+F", "CTRL+G", "CTRL+H", "CTRL+O", "CTRL+Q", "ADD", "SUBTRACT", "COMMA", "SYSRQ"))
+	reserve("fixed.system", ("CTRL+B", "CTRL+E", "CTRL+F", "CTRL+G", "CTRL+H", "CTRL+O", "ADD", "SUBTRACT", "COMMA", "SYSRQ"))
 	reserve("fixed.dialog", ("ESC", "ENTER", "ALT+F4"))
 	return shortcut_owners
 
@@ -269,8 +303,12 @@ class Manager(object):
 		channel_count = (
 			get_channel_count() if callable(get_channel_count) else 0
 		)
+		request_adjacent_channel_change = getattr(
+			self._uisystem, "RequestAdjacentChannelChange", None
+		)
 		self.actions = build_actions(
-			interface, channel_count, request_channel_change
+			interface, channel_count, request_channel_change,
+			request_adjacent_channel_change
 		)
 		self._actions_by_id = {
 			action.action_id: action for action in self.actions
@@ -344,6 +382,10 @@ class Manager(object):
 			("NUMPADENTER", "NUMPADENTER"),
 		):
 			register(dik_name, token)
+		for token in ("MOUSE4", "MOUSE5"):
+			value = getattr(app, "KEY_" + token, None)
+			if value is not None:
+				mapping[value] = token
 		return mapping
 
 	def _build_modifier_diks(self):
@@ -425,6 +467,12 @@ class Manager(object):
 
 	def release_key(self, dik):
 		self._pressed_keys.discard(dik)
+
+	def release_unpressed(self):
+		# Focus changes can route key-up to the newly active window.
+		for dik in tuple(self._pressed_keys):
+			if not app.IsPressed(dik):
+				self._pressed_keys.discard(dik)
 
 	def clear_pressed(self):
 		self._pressed_keys.clear()

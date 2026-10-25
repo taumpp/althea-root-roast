@@ -186,8 +186,78 @@ def Visual(family, state):
 	return CONTROL_ROOT + "button_%s_%s.png" % (family, state)
 
 
+# The shared R1 frame (root/uir1frame.py): while a window of its REGISTRY loads its uiscript in the R1 look
+# (ui.PythonScriptLoader opens the scope), the ORIGINAL button names (ALIAS_GROUPS) resolve to the R1 plates of the same
+# native size. Settings, ESC, game options, the system dialog and every other window keep the crimson families.
+R1_PLATE_ROOT = "d:/ymir work/ui/public/althea_r1/plate/"
+R1_PLATE_SKIP = ("199x27", "199x38")
+# R1 plates of buttons that a window of the REGISTRY names by an EXPLICIT path (uir1frame option ``plate_paths``: the
+# unified 148x23 buttons of the drop / buy dialogs, the select buttons of the skill selection), built by
+# tools/build_althea_r1_kit.py like the families of ALIAS_GROUPS.
+R1_EXTRA_PLATE_SIZES = {
+	"148x23": (148, 23),
+	"262x23": (262, 23),
+}
+_R1_PLATE_SCOPE = [0]
+_R1_PLATE_PATHS = []	# one {normalized path prefix: family} per open scope (the window loading now is the last)
+
+
+def BeginR1Plates(paths=None):
+	_R1_PLATE_SCOPE[0] += 1
+	_R1_PLATE_PATHS.append(dict((_NormalizePath(prefix), family) for prefix, family in (paths or {}).items()))
+
+
+def EndR1Plates():
+	_R1_PLATE_SCOPE[0] = max(0, _R1_PLATE_SCOPE[0] - 1)
+	if _R1_PLATE_PATHS:
+		_R1_PLATE_PATHS.pop()
+
+
+def UsesR1Plates():
+	return _R1_PLATE_SCOPE[0] > 0
+
+
+def R1PlateFamilies():
+	"""{family: (w, h)} of every R1 plate: the families of ALIAS_GROUPS and R1_EXTRA_PLATE_SIZES."""
+	families = dict((family, FAMILY_SIZES[family]) for family in ALIAS_GROUPS if family not in R1_PLATE_SKIP)
+	families.update(R1_EXTRA_PLATE_SIZES)
+	return families
+
+
+def R1PlateVisual(family, state):
+	if (family not in FAMILY_SIZES and family not in R1_EXTRA_PLATE_SIZES) or family in R1_PLATE_SKIP or \
+			state not in STATES:
+		raise ValueError("unsupported R1 plate")
+	return R1_PLATE_ROOT + "button_%s_%s.png" % (family, state)
+
+
+def _R1PathFamily(filename):
+	"""The R1 plate family of an explicit button path of the window loading now (its ``plate_paths``), or None."""
+	if not _R1_PLATE_PATHS or not _R1_PLATE_PATHS[-1]:
+		return None
+	path = _NormalizePath(filename)
+	for prefix, family in _R1_PLATE_PATHS[-1].items():
+		if path.startswith(prefix):
+			return family
+	return None
+
+
+def IsR1PlateVisual(filename):
+	return isinstance(filename, _STRING_TYPES) and _NormalizePath(filename).startswith(R1_PLATE_ROOT)
+
+
 def IsUnifiedVisual(filename):
-	return isinstance(filename, _STRING_TYPES) and filename.replace("\\", "/").lower().startswith(CONTROL_ROOT)
+	return isinstance(filename, _STRING_TYPES) and (
+		filename.replace("\\", "/").lower().startswith(CONTROL_ROOT) or IsR1PlateVisual(filename))
+
+
+def StateVisual(filename, state):
+	"""The visual of the same family in another state: an R1 plate or a unified crimson family."""
+	basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+	family = basename[len("button_"):].rsplit("_", 1)[0]
+	if IsR1PlateVisual(filename):
+		return R1PlateVisual(family, state)
+	return Visual(family, state)
 
 
 def _UnifiedFamily(filename):
@@ -211,6 +281,10 @@ def SetGameControlsEnabled(enabled):
 def ResolveVisual(filename, state):
 	if state not in STATES:
 		raise ValueError("unsupported crimson control state")
+	if _R1_PLATE_SCOPE[0]:
+		family = ALIAS_TO_FAMILY.get(_Basename(filename)) or _R1PathFamily(filename)
+		if family and family not in R1_PLATE_SKIP:
+			return R1PlateVisual(family, state)
 	if not GAME_CONTROLS_ENABLED:
 		return filename
 	if IsUnifiedVisual(filename):
@@ -229,3 +303,26 @@ def ApplyVisuals(button, family):
 	button.SetOverVisual(Visual(family, "hover"))
 	button.SetDownVisual(Visual(family, "pressed"))
 	button.SetDisableVisual(Visual(family, "disabled"))
+
+
+# Generic text buttons of ANY width (3-slice, button style B 2026-10-04): 4 px end caps plus a
+# 4 px middle strip that is constant along x, so the native button scale can stretch it
+# horizontally without blurring the frame. ui.CrimsonSlicedButton draws them; heights 14..40.
+SLICE_ROOT = "d:/ymir work/ui/public/crimson/controls/sliced/"
+SLICE_HEIGHTS = tuple(range(14, 41))
+SLICE_CAP = 4
+SLICE_MID = 4
+SLICE_PARTS = ("l", "m", "r")
+
+
+def HasSlices(height):
+	try:
+		return int(height) in SLICE_HEIGHTS
+	except (TypeError, ValueError):
+		return False
+
+
+def SliceVisual(height, part, state):
+	if not HasSlices(height) or part not in SLICE_PARTS or state not in STATES:
+		raise ValueError("unsupported crimson slice")
+	return SLICE_ROOT + "h%d_%s_%s.png" % (int(height), part, state)

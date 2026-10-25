@@ -19,6 +19,8 @@ import chr
 import chat
 import item
 import skillpresentation
+import skillraise
+import skillgradecount
 import uicharacterbuff
 import uiluckknot
 import bonuscolor
@@ -43,6 +45,17 @@ PERMANENT_TASK_SKILL_ENTRIES = (
 	("bossologie", 92, 221, "passive_bossologie_32.png"),
 	("kamenologie", 129, 221, "passive_kamenologie_32.png"),
 )
+# What the three permanent passives among the standard skills give (the skill tooltip shows it as the description
+# of every other skill of the page): the locale key, the Czech text when the locale has none.
+PERMANENT_PASSIVE_DESCRIPTIONS = {
+	"bossologie": ("PERMANENT_TASKS_BOSS_DESC",
+		u"Trvalý bonus proti bossům za dokončené stupně lovu bossů v Trvalých úkolech."),
+	"kamenologie": ("PERMANENT_TASKS_STONE_DESC",
+		u"Trvalý bonus proti meteorům za dokončené stupně lovu meteorů v Trvalých úkolech."),
+	"luck_knot": ("LUCK_KNOT_DESC",
+		u"Zvyšuje šanci na Althea meteor, na dvojitou kořist z meteorů a bossů a na vylepšení rarity. "
+		u"Vylepšuje se pečetěmi a Yangy."),
+}
 
 QUEST_SCROLL_ASSET_ROOT = "d:/ymir work/ui/game/crimson_ember/quest/scroll/"
 QUEST_SCROLL_NORMAL = QUEST_SCROLL_ASSET_ROOT + "quest_scroll_normal.png"
@@ -140,11 +153,17 @@ class CharacterWindow(ui.ScriptWindow):
 		ui.ScriptWindow.__init__(self)
 		self.state = "STATUS"
 		self.isLoaded = 0
+		self.r1Skin = None
 
 		self.toolTipSkill = 0
 
 		self.__Initialize()
 		self.__LoadWindow()
+		try:
+			import uir1
+			uir1.FollowLook(self)
+		except Exception:
+			pass
 
 		self.statusPlusCommandDict = {
 			"HTH" : "/stat ht",
@@ -175,6 +194,7 @@ class CharacterWindow(ui.ScriptWindow):
 		self.refreshToolTip = 0
 		self.selectedSkillTab = 0
 		self.buffPage = None
+		self.skillGradeCounts = {}
 		self.skillHeaderRow = None
 		self.skillPointArea = None
 
@@ -187,11 +207,13 @@ class CharacterWindow(ui.ScriptWindow):
 		self.permanentTaskProgress = {}
 		self.permanentTaskTooltipCategory = None
 		self.luckKnotButton = None
+		self.luckKnotLevel = None
 		self.luckKnotPlus = None
 		self.luckKnotSnapshot = None
 		self.luckKnotAvailable = False
 		self.luckKnotUpgradeDialog = None
 		self.luckKnotUpgradeQuote = None
+		self.luckKnotUpgradePending = False
 		self.faceImage = None
 		self.statusPlusLabel = None
 		self.statusPlusValue = None
@@ -705,8 +727,17 @@ class CharacterWindow(ui.ScriptWindow):
 			if not slotIndex in emotion.EMOTION_DICT:
 				return
 
+			name = emotion.EMOTION_DICT[slotIndex]["name"]
+			body = None
+			if app.ENABLE_EXPRESSING_EMOTION and slotIndex >= app.SPECIAL_ACTION_START_INDEX:
+				leftSec = max(0, emotion.EMOTION_DICT[slotIndex]["time"] - app.GetGlobalTimeStamp())
+				if leftSec > 0:
+					body = localeInfo.LEFT_TIME + " : " + localeInfo.SecondToDHM(leftSec)
+			if self.__R1Hint(name, body):
+				self.emotionToolTip.HideToolTip()
+				return
 			self.emotionToolTip.ClearToolTip()
-			self.emotionToolTip.SetTitle(emotion.EMOTION_DICT[slotIndex]["name"])
+			self.emotionToolTip.SetTitle(name)
 			if app.ENABLE_EXPRESSING_EMOTION:
 				if slotIndex >= app.SPECIAL_ACTION_START_INDEX:
 					self.emotionToolTip.AppendLastTime(emotion.EMOTION_DICT[slotIndex]["time"])
@@ -714,6 +745,7 @@ class CharacterWindow(ui.ScriptWindow):
 			self.emotionToolTip.ShowToolTip()
 
 	def __OverOutEmotion(self):
+		self.__R1HideHint()
 		if self.emotionToolTip:
 			self.emotionToolTip.HideToolTip()
 
@@ -772,6 +804,9 @@ class CharacterWindow(ui.ScriptWindow):
 			uicharacterbuff.ConfigureHeader(self)
 			self.buffPage = uicharacterbuff.CharacterBuffPage(self.pageDict["SKILL"])
 			self.buffPage.SetPosition(*self.activeSlot.GetLocalPosition())
+			# After the slot windows (and the Buffi page): the grade counts above the cells' cover buttons.
+			self.skillGradeCounts = dict((name, skillgradecount.GradeCounts(self.pageDict["SKILL"], page))
+				for name, page in self.skillPageDict.items())
 			self.skillPointArea.OnMouseOverIn = ui.__mem_func__(self.__ShowSkillPointToolTip)
 			self.skillPointArea.OnMouseOverOut = ui.__mem_func__(self.__HideStatToolTip)
 			self.activeSkillPointValue.AddFlag("not_pick")
@@ -784,12 +819,68 @@ class CharacterWindow(ui.ScriptWindow):
 		self.SetState("STATUS")
 		if app.ENABLE_CONQUEROR_LEVEL:
 			self.__ChangeLevelInfoButton(player.LEVEL_TYPE_BASE)
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""R1 look (root/uicharacterr1.py) unless Settings -> "Starý vzhled" chose the original one; a build
+		failure undoes every change and keeps the original look (traced to syserr)."""
+		self.r1Skin = None
+		try:
+			import uir1
+			if not uir1.UseR1():
+				return
+			import uicharacterr1
+			self.r1Skin = uicharacterr1.CharacterSkin(self)
+		except Exception:
+			self.r1Skin = None
+			try:
+				import uir1
+				uir1.TraceFailure("the character window")
+			except Exception:
+				pass
+
+	def SyncR1Look(self):
+		"""Settings switched the look (uir1.LookChanged): the R1 look dressed into the live window or undone, then the
+		page, its tabs and the skill group laid out again by the window's own code (an undo restores what was shown
+		when the look was dressed). A failure keeps the original look (traced)."""
+		import uir1
+		if self.isLoaded == 0:
+			return
+		wanted = uir1.UseR1()
+		skin = getattr(self, "r1Skin", None)
+		if wanted and not skin:
+			self.__ApplyR1Look()
+		elif not wanted and skin:
+			self.r1Skin = None
+			try:
+				skin.Undo()
+			finally:
+				skin.Destroy()
+		else:
+			return
+		for refresh in (lambda: self.SetState(self.state),
+						lambda: self.__SelectSkillGroup(getattr(self, "selectedSkillTab", 0))):
+			try:
+				refresh()
+			except Exception:
+				uir1.TraceFailure("the character window (look switch)")
 
 	def Destroy(self):
+		try:
+			import uir1
+			uir1.UnfollowLook(self)
+		except Exception:
+			pass
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.Destroy()
+		self.r1Skin = None
 		self.__CloseLuckKnotUpgrade()
 		self.__HideStatToolTip()
 		if app.ENABLE_SKILL_COLOR_SYSTEM and self.skillColorWnd:
 			self.skillColorWnd.Close()
+		for counts in (getattr(self, "skillGradeCounts", None) or {}).values():
+			counts.Destroy()
+		self.skillGradeCounts = {}
 		self.ClearDictionary()
 
 		self.__Initialize()
@@ -821,7 +912,38 @@ class CharacterWindow(ui.ScriptWindow):
 	def ResetBuffSkills(self):
 		self.buffPage.Reset()
 
+	def __R1Hint(self, title, body=None, widget=None):
+		"""R1 look: a short hover text of this window (the tabs, level / EXP, free skill points, the emotions, the
+		champion level switch) is the one R1 hint (uir1, like "Nastavení lišty") - at ``widget``, else above the
+		mouse cursor; False in "Starý vzhled", where the window's tooltip board shows it."""
+		if not getattr(self, "r1Skin", None) or not title:
+			return False
+		try:
+			import uir1
+			if widget is not None:
+				x, y = widget.GetGlobalPosition()
+				rect, follow = (x, y, widget.GetWidth(), widget.GetHeight()), False
+			else:
+				mx, my = wndMgr.GetMousePosition()
+				rect, follow = (mx, my, 1, 1), True
+			uir1.ShowHintAt(rect, title, body, owner=self, follow=follow)
+		except Exception:
+			return False
+		if getattr(self, "toolTip", None):
+			self.toolTip.Hide()
+		return True
+
+	def __R1HideHint(self):
+		if getattr(self, "r1Skin", None):
+			try:
+				import uir1
+				uir1.HideHint(self)
+			except Exception:
+				pass
+
 	def __ShowSkillPointToolTip(self):
+		if self.__R1Hint(localeInfo.STAT_TOOLTIP_POINT, widget=self.skillPointArea):
+			return
 		self.toolTip.ClearToolTip()
 		self.toolTip.SetThinBoardSize(200)
 		self.toolTip.AutoAppendTextLine(localeInfo.STAT_TOOLTIP_POINT)
@@ -850,25 +972,55 @@ class CharacterWindow(ui.ScriptWindow):
 				counter.Hide()
 		if self.permanentTaskTooltipCategory:
 			self.__ShowPermanentTaskToolTip(self.permanentTaskTooltipCategory)
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __ShowPermanentTaskToolTip(self, category):
 		self.permanentTaskTooltipCategory = category
-		if not self.toolTip:
-			return
 		boss = category == "bossologie"
 		label = (localeInfo.PERMANENT_TASKS_BOSS_LABEL if boss
 			else localeInfo.PERMANENT_TASKS_STONE_LABEL)
 		level, bonus = self.permanentTaskProgress.get(category, (None, 0))
-		self.toolTip.ClearToolTip()
-		self.toolTip.SetThinBoardSize(240)
-		self.toolTip.AutoAppendTextLine(label, 0xffffd36b - 0x100000000)
+		lines = []
 		if level is None:
-			self.toolTip.AutoAppendTextLine(localeInfo.LUCK_KNOT_LOADING)
+			lines.append((localeInfo.LUCK_KNOT_LOADING, None))
 		else:
-			self.toolTip.AutoAppendTextLine(localeInfo.TOOLTIP_SKILL_LEVEL % level)
+			lines.append((localeInfo.TOOLTIP_SKILL_LEVEL % level, None))
 			reward = (localeInfo.PERMANENT_TASKS_BOSS_PASSIVE_BONUS if boss
 				else localeInfo.PERMANENT_TASKS_STONE_PASSIVE_BONUS)
-			self.toolTip.AutoAppendTextLine(reward % bonuscolor.Number(bonus), bonuscolor.Value(bonus))
+			lines.append((reward % bonuscolor.Number(bonus), bonuscolor.Value(bonus)))
+		self.__ShowPassiveToolTip(label, category, lines, 240)
+
+	def __ShowPassiveToolTip(self, title, descriptionKey, lines, legacyWidth):
+		"""Lov bossů, Lov meteorů and Uzel štěstí among the standard skills: the skill tooltip of every other skill
+		of the page (title, what it gives, then its level and bonuses). These three showed the
+		window's small centred stat tooltip with no description. Without the skill tooltip (not handed over yet)
+		the stat tooltip shows the same lines."""
+		key, default = PERMANENT_PASSIVE_DESCRIPTIONS[descriptionKey]
+		description = getattr(localeInfo, key, None) or default
+		skillToolTip = getattr(self, "toolTipSkill", None)
+		if skillToolTip:
+			if self.toolTip:
+				self.toolTip.Hide()
+			skillToolTip.ClearToolTip()
+			skillToolTip.SetTitle(title)
+			skillToolTip.AppendDescription(description, 25)
+			skillToolTip.AppendSpace(5)
+			for text, color in lines:
+				skillToolTip.AppendTextLine(text, skillToolTip.NORMAL_COLOR if color is None else color)
+			skillToolTip.ShowToolTip()
+			self.passiveToolTipShown = True
+			return
+		if not self.toolTip:
+			return
+		self.toolTip.ClearToolTip()
+		self.toolTip.SetThinBoardSize(legacyWidth)
+		self.toolTip.AutoAppendTextLine(title, 0xffffd36b - 0x100000000)
+		for text, color in lines:
+			if color is None:
+				self.toolTip.AutoAppendTextLine(text)
+			else:
+				self.toolTip.AutoAppendTextLine(text, color)
 		self.toolTip.AlignHorizonalCenter()
 		self.toolTip.ShowToolTip()
 
@@ -915,6 +1067,8 @@ class CharacterWindow(ui.ScriptWindow):
 		else:
 			self.luckKnotButton.Hide()
 		self.SetLuckKnotSnapshot(self.luckKnotSnapshot)
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __CreateLuckKnotButton(self):
 		if self.luckKnotButton:
@@ -929,28 +1083,47 @@ class CharacterWindow(ui.ScriptWindow):
 		self.luckKnotButton.SetPosition(166, 221)
 		self.luckKnotButton.SetShowToolTipEvent(ui.__mem_func__(self.__ShowLuckKnotToolTip))
 		self.luckKnotButton.SetHideToolTipEvent(ui.__mem_func__(self.__HideStatToolTip))
+		self.luckKnotLevel = ui.NumberLine()
+		self.luckKnotLevel.SetParent(self.luckKnotButton)
+		self.luckKnotLevel.SetHorizontalAlignRight()
+		self.luckKnotLevel.SetPosition(28, 22)
+		self.luckKnotLevel.AddFlag("not_pick")
+		self.luckKnotLevel.Hide()
 		self.luckKnotPlus = ui.Button()
 		self.luckKnotPlus.SetParent(parent)
 		for setter, state in ((self.luckKnotPlus.SetUpVisual, "up"),
 				(self.luckKnotPlus.SetOverVisual, "over"), (self.luckKnotPlus.SetDownVisual, "down")):
 			setter("d:/ymir work/ui/game/windows/btn_plus_%s.sub" % state)
-		self.luckKnotPlus.SetPosition(186, 241)
+		self.luckKnotPlus.SetPosition(186, 221)
 		self.luckKnotPlus.SetEvent(ui.__mem_func__(self.__UpgradeLuckKnot))
 		self.luckKnotPlus.SetShowToolTipEvent(ui.__mem_func__(self.__ShowLuckKnotToolTip))
 		self.luckKnotPlus.SetHideToolTipEvent(ui.__mem_func__(self.__HideStatToolTip))
 		self.luckKnotPlus.Hide()
 
 	def SetLuckKnotSnapshot(self, snapshot):
-		if snapshot != self.luckKnotSnapshot:
-			self.__CloseLuckKnotUpgrade()
+		changed = snapshot != self.luckKnotSnapshot
+		if changed:
+			# The server's answer to a confirmed upgrade keeps the dialog open (new stage and
+			# price, or "Max"); any other change of the quote closes it as before (a stale quote never charges).
+			if not self.__KeepLuckKnotUpgrade(snapshot):
+				self.__CloseLuckKnotUpgrade()
 			self.__HideStatToolTip()
 		self.luckKnotSnapshot = snapshot
+		if changed:
+			self.__RefreshLuckKnotUpgrade(snapshot)
 		if not self.isLoaded:
 			return
 		self.__CreateLuckKnotButton()
 		self.luckKnotPlus.Hide()
-		if self.luckKnotAvailable and snapshot and snapshot["code"] == 0 and snapshot["costs"]:
-			self.luckKnotPlus.Show()
+		self.luckKnotLevel.Hide()
+		if self.luckKnotAvailable and snapshot and snapshot["code"] == 0:
+			if snapshot["level"] > 0:
+				self.luckKnotLevel.SetNumber(str(snapshot["level"]))
+				# Native SetNumber creates glyphs without laying them out.
+				self.luckKnotLevel.SetPosition(28, 22)
+				self.luckKnotLevel.Show()
+			if snapshot["costs"]:
+				self.luckKnotPlus.Show()
 
 	def __UpgradeLuckKnot(self):
 		state = self.luckKnotSnapshot
@@ -966,11 +1139,48 @@ class CharacterWindow(ui.ScriptWindow):
 
 	def __ConfirmLuckKnotUpgrade(self):
 		quote = self.luckKnotUpgradeQuote
-		self.__CloseLuckKnotUpgrade()
-		if not self.luckKnotAvailable or not quote or quote != self.luckKnotSnapshot:
+		if self.luckKnotUpgradePending:
+			return
+		if not self.luckKnotAvailable or not quote or quote != self.luckKnotSnapshot or not quote["costs"]:
+			self.__CloseLuckKnotUpgrade()
 			return
 		if net.UpgradeLuckKnot():
 			self.luckKnotPlus.Hide()
+			# The dialog stays open; the next snapshot refreshes it so the player can upgrade again
+			self.luckKnotUpgradePending = True
+			if self.luckKnotUpgradeDialog:
+				self.luckKnotUpgradeDialog.SetPending(True)
+		else:
+			self.__CloseLuckKnotUpgrade()
+
+	def __KeepLuckKnotUpgrade(self, snapshot):
+		"""The open dialog survives the server's answer to its own confirmed upgrade: a new quote (code 0), or a
+		refusal / busy answer after which the client asks for the quote again (codes 1-5)."""
+		return bool(self.luckKnotUpgradeDialog and self.luckKnotUpgradePending and self.luckKnotAvailable
+			and isinstance(snapshot, dict) and snapshot.get("code") in (0, 1, 2, 3, 4, 5))
+
+	def __RefreshLuckKnotUpgrade(self, snapshot):
+		"""The same dialog again on the same spot with the server's new quote (stage, price, or "Max")."""
+		old = self.luckKnotUpgradeDialog
+		if not old or not self.luckKnotUpgradePending or not snapshot or snapshot.get("code") != 0:
+			return
+		try:
+			x, y = old.GetGlobalPosition()
+			centre = x + old.GetWidth() // 2
+		except Exception:
+			x = y = centre = None
+		old.Close()
+		self.luckKnotUpgradePending = False
+		self.luckKnotUpgradeQuote = snapshot
+		self.luckKnotUpgradeDialog = uiluckknot.UpgradeDialog(snapshot)
+		self.luckKnotUpgradeDialog.SetAcceptEvent(ui.__mem_func__(self.__ConfirmLuckKnotUpgrade))
+		self.luckKnotUpgradeDialog.SetCancelEvent(ui.__mem_func__(self.__CloseLuckKnotUpgrade))
+		self.luckKnotUpgradeDialog.Open()
+		if centre is not None:
+			try:
+				self.luckKnotUpgradeDialog.SetPosition(centre - self.luckKnotUpgradeDialog.GetWidth() // 2, y)
+			except Exception:
+				pass
 
 	def __CloseLuckKnotUpgrade(self):
 		# Hide() already runs inside ui.ScriptWindow.__init__, before __Initialize.
@@ -979,22 +1189,20 @@ class CharacterWindow(ui.ScriptWindow):
 			dialog.Close()
 		self.luckKnotUpgradeDialog = None
 		self.luckKnotUpgradeQuote = None
+		self.luckKnotUpgradePending = False
 
 	def __ShowLuckKnotToolTip(self):
-		self.toolTip.ClearToolTip()
-		self.toolTip.SetThinBoardSize(260)
-		self.toolTip.AutoAppendTextLine(localeInfo.LUCK_KNOT_NAME, 0xffffd36b - 0x100000000)
 		state = self.luckKnotSnapshot
+		lines = []
 		if not state or state["code"] != 0:
-			self.toolTip.AutoAppendTextLine(localeInfo.LUCK_KNOT_LOADING)
+			lines.append((localeInfo.LUCK_KNOT_LOADING, None))
 		else:
-			self.toolTip.AutoAppendTextLine(localeInfo.LUCK_KNOT_LEVEL % state["level"])
+			lines.append((localeInfo.LUCK_KNOT_LEVEL % state["level"], None))
 			labels = (localeInfo.LUCK_KNOT_METEOR, localeInfo.LUCK_KNOT_DOUBLE_METEOR,
 				localeInfo.LUCK_KNOT_DOUBLE_BOSS, localeInfo.LUCK_KNOT_RARITY)
 			for label, value in zip(labels, state["effects_bp"]):
-				self.toolTip.AutoAppendTextLine(label % bonuscolor.Number(value / 100.0), bonuscolor.Value(value))
-		self.toolTip.AlignHorizonalCenter()
-		self.toolTip.ShowToolTip()
+				lines.append((label % bonuscolor.Number(value / 100.0), bonuscolor.Value(value)))
+		self.__ShowPassiveToolTip(localeInfo.LUCK_KNOT_NAME, "luck_knot", lines, 260)
 
 	def __OnClickStatusPlusButton(self, statusKey):
 		try:
@@ -1067,6 +1275,8 @@ class CharacterWindow(ui.ScriptWindow):
 
 		if stateKey == "QUEST":
 			self.RefreshQuest()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def GetState(self):
 		return self.state
@@ -1169,6 +1379,8 @@ class CharacterWindow(ui.ScriptWindow):
 		if app.ENABLE_DETAILS_UI:
 			if self.chDetailsWnd and self.chDetailsWnd.IsShow():
 				self.chDetailsWnd.Refresh()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __RefreshStatusPlusButtonList(self):
 		if self.isLoaded == 0:
@@ -1286,6 +1498,8 @@ class CharacterWindow(ui.ScriptWindow):
 			if not self.toolTip:
 				return
 
+			if self.__R1Hint(desc):
+				return
 			descLen = len(desc)
 			self.toolTip.ClearToolTip()
 			width = max(100, min(11 * descLen, 200))
@@ -1302,6 +1516,8 @@ class CharacterWindow(ui.ScriptWindow):
 
 		def __ShowToolTipImg(self, event_type, text):
 			if "mouse_over_in" == event_type :
+				if self.__R1Hint(text):
+					return
 				textLen = len(text)
 
 				self.toolTip.ClearToolTip()
@@ -1339,6 +1555,8 @@ class CharacterWindow(ui.ScriptWindow):
 				self.toolTipSkill.SetSkillOnlyName(srcSlotIndex, skillIndex, overInSkillGrade)
 		else:
 			self.toolTipSkill.SetSkillNew(srcSlotIndex, skillIndex, skillGrade, skillLevel)
+		# rebuilt from the new level / grade on RefreshSkill while the mouse stays on the slot
+		self.toolTipSkill.RememberRefresh(self.OverInItem, slotNumber)
 
 	def OverOutItem(self):
 		# Window construction invokes Hide before __Initialize creates children.
@@ -1395,6 +1613,7 @@ class CharacterWindow(ui.ScriptWindow):
 		questShortcuts = getattr(self, "questShortcutList", ())
 		nativeQuestData = _GetRenderableQuestData()
 		questCount = len(questShortcuts) + len(nativeQuestData)
+		self.questTotalCount = questCount
 		visibleQuestCount = min(questCount, quest.QUEST_MAX_NUM)
 		questRange = range(quest.QUEST_MAX_NUM)
 		self.questIndexMap = {}
@@ -1478,12 +1697,19 @@ class CharacterWindow(ui.ScriptWindow):
 			self.questSlot.HideSlotBaseImage(i)
 
 		self.__UpdateQuestClock()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncQuestSafe()
 
 	def OnRunMouseWheel(self, nLen):
+		# The top window gets every notch over it first: only the quest page scrolls the quest list (it used to be
+		# scrolled, hidden, from every page and nothing else under the mouse got the wheel).
+		if "QUEST" != self.state or not self.questScrollBar.IsShow():
+			return False
 		if nLen > 0:
 			self.questScrollBar.OnUp()
 		else:
 			self.questScrollBar.OnDown()
+		return True
 
 	def __UpdateQuestClock(self):
 		if "QUEST" == self.state:
@@ -1557,11 +1783,17 @@ class CharacterWindow(ui.ScriptWindow):
 		self.toolTip.Show()
 
 	def __HideStatToolTip(self):
+		self.__R1HideHint()
 		self.permanentTaskTooltipCategory = None
 		# Also reached from Hide() inside ui.ScriptWindow.__init__.
 		toolTip = getattr(self, "toolTip", None)
 		if toolTip:
 			toolTip.Hide()
+		if getattr(self, "passiveToolTipShown", False):
+			self.passiveToolTipShown = False
+			skillToolTip = getattr(self, "toolTipSkill", None)
+			if skillToolTip:
+				skillToolTip.HideToolTip()
 
 	def OnPressEscapeKey(self):
 		self.Close()
@@ -1579,6 +1811,8 @@ class CharacterWindow(ui.ScriptWindow):
 		global SHOW_LIMIT_SUPPORT_SKILL_LIST
 
 		skillPage = self.skillPageDict[name]
+		# The engine count of a cell lies under its cover button; the same digits again above it (skillgradecount).
+		counts = (getattr(self, "skillGradeCounts", None) or {}).get(name)
 
 		startSlotIndex = skillPage.GetStartIndex()
 
@@ -1602,6 +1836,8 @@ class CharacterWindow(ui.ScriptWindow):
 				activeList[realSlotIndex] = skillPage.IsActivatedSlot(realSlotIndex)
 				cooltmList[realSlotIndex] = skillPage.GetSlotCoolTime(realSlotIndex)
 				skillPage.ClearSlot(realSlotIndex)
+				if counts:
+					counts.Clear(realSlotIndex)
 
 			if 0 == skillIndex:
 				continue
@@ -1624,6 +1860,8 @@ class CharacterWindow(ui.ScriptWindow):
 
 				skillPage.SetSkillSlotNew(slotIndex, skillIndex, max(skillLevel - 1, 0), skillLevel)
 				skillPage.SetSlotCount(slotIndex, skillLevel)
+				if counts:
+					counts.SetCount(slotIndex, skillLevel)
 
 			## ACTIVE
 			elif skill.SKILL_TYPE_ACTIVE == skillType:
@@ -1636,8 +1874,12 @@ class CharacterWindow(ui.ScriptWindow):
 						skillPage.SetSlotCount(realSlotIndex, 0)
 						skillPage.DisableCoverButton(realSlotIndex)
 						skillPage.DeactivateSlot(realSlotIndex) # hotfix
+						if counts:
+							counts.Clear(realSlotIndex)
 					else:
 						skillPage.SetSlotCountNew(realSlotIndex, skillGrade, skillLevel)
+						if counts:
+							counts.Set(realSlotIndex, skillGrade, skillLevel)
 
 					isActive = activeList.get(realSlotIndex, False)
 					coolTime,elapsedTime = cooltmList.get(realSlotIndex, (0,0))
@@ -1655,6 +1897,8 @@ class CharacterWindow(ui.ScriptWindow):
 					realSlotIndex = self.__GetETCSkillRealSlotIndex(slotIndex)
 					skillPage.SetSkillSlot(realSlotIndex, skillIndex, skillLevel)
 					skillPage.SetSlotCountNew(realSlotIndex, skillGrade, skillLevel)
+					if counts:
+						counts.Set(realSlotIndex, skillGrade, skillLevel)
 
 					if skill.CanUseSkill(skillIndex):
 						skillPage.SetCoverButton(realSlotIndex)
@@ -1666,6 +1910,9 @@ class CharacterWindow(ui.ScriptWindow):
 						skillPage.DeactivateSlot(realSlotIndex)
 
 			skillPage.RefreshSlot()
+
+		if counts:
+			counts.Sync()
 
 		## 쿨 타임 복원
 		self.__RestoreSlotCoolTime(skillPage)
@@ -1689,19 +1936,6 @@ class CharacterWindow(ui.ScriptWindow):
 			self.__RefreshSkillPage("SUPPORT", self.SUPPORT_PAGE_SLOT_COUNT)
 
 		self.RefreshSkillPlusButtonList()
-
-	def CanShowPlusButton(self, skillIndex, skillLevel, curStatPoint):
-		if skillIndex == 135:
-			return False
-		## 스킬이 있으면
-		if 0 == skillIndex:
-			return False
-
-		## 레벨업 조건을 만족한다면
-		if not skill.CanLevelUpSkill(skillIndex, skillLevel):
-			return False
-
-		return True
 
 	def __RefreshSkillPlusButton(self, name):
 		global HIDE_SUPPORT_SKILL_POINT
@@ -1737,12 +1971,13 @@ class CharacterWindow(ui.ScriptWindow):
 						if skillLevel < 20:
 							slotWindow.ShowSlotButton(self.__GetETCSkillRealSlotIndex(slotIndex))
 				else:
+					# One rule with "Zvýšit schopnost" (skillraise): the right point pool, grade 0, CanLevelUpSkill.
 					if "SUPPORT" == name:
 						if not SHOW_LIMIT_SUPPORT_SKILL_LIST or skillIndex in SHOW_LIMIT_SUPPORT_SKILL_LIST:
-							if self.CanShowPlusButton(skillIndex, skillLevel, statPoint):
+							if skillraise.CanTakePoint(player, skill, slotIndex, skillraise.PAGE_SUPPORT):
 								slotWindow.ShowSlotButton(slotIndex)
 					else:
-						if self.CanShowPlusButton(skillIndex, skillLevel, statPoint):
+						if skillraise.CanTakePoint(player, skill, slotIndex, skillraise.PAGE_ACTIVE):
 							slotWindow.ShowSlotButton(slotIndex)
 
 	if app.ENABLE_SKILL_COLOR_SYSTEM:
@@ -1851,6 +2086,8 @@ class CharacterWindow(ui.ScriptWindow):
 
 		supportStatPoint = max(0, player.GetStatus(player.SKILL_SUPPORT))
 		self.supportSkillPointValue.SetText(str(supportStatPoint))
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	## Skill Level Up Button
 	def OnPressedSlotButton(self, slotNumber):
@@ -2017,6 +2254,8 @@ class CharacterWindow(ui.ScriptWindow):
 		# Only the level-5 quest changes the server's actual specialization.
 		self.__SetSkillSlotData(race, group or 1, empire)
 		self.__SelectSkillGroup(self.selectedSkillTab)
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __SetSkillSlotData(self, race, group, empire=0):
 		## SkillIndex
@@ -2059,6 +2298,8 @@ class CharacterWindow(ui.ScriptWindow):
 		else:
 			self.buffPage.Hide()
 		self.RefreshSkill()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __CanUseSkillNow(self):
 		if 0 == net.GetMainActorSkillGroup():

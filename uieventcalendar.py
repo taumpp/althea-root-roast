@@ -462,7 +462,7 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 		self.titleBar.SetVisuals(*[DAY_VIEW_ART + "chrome/" + name for name in (
 			"titlebar_left.tga", "titlebar_center.tga", "titlebar_right.tga", "close_01.tga", "close_02.tga", "close_03.tga")])
 		self.titleBar.Hide()
-		self.CreateEventImage(self, 0, 0, DAY_VIEW_ART + "titlebar.png")
+		self.titleArt = self.CreateEventImage(self, 0, 0, DAY_VIEW_ART + "titlebar.png")
 		self.titleName.SetParent(self)
 		self.titleName.SetWindowHorizontalAlignLeft()
 		self.titleName.SetPosition(WINDOW_WIDTH // 2, 4)
@@ -474,7 +474,7 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 		self.SetTitleColor(LIGHT_TEXT_COLOR)
 		self.SetTitleName(localeInfo.EVENT_CALENDAR_TITLE)
 		self.SetCloseEvent(ui.__mem_func__(self.Close))
-		self.__BuildWindow()
+		self.__BuildLook()
 		self.SetCenterPosition()
 		self.Refresh()
 
@@ -504,6 +504,7 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 		self.Hide()
 		self.HideEventTooltip()
 		self.__Initialize()
+		self.r1 = None
 
 	def __Own(self, child):
 		self.children.append(child)
@@ -563,6 +564,24 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 			button.calendarLabel = self.CreateEventText(button, width // 2, 5, text, METADATA_TEXT_COLOR, "center", width)
 		button.Show()
 		return self.__Own(button)
+
+	def __BuildLook(self):
+		"""The R1 look (root/uir1calendar.py) unless Settings -> "Starý vzhled" chose the original window or R1 failed;
+		a failed R1 build is traced and leaves nothing behind, then the original window is built."""
+		self.r1 = None
+		try:
+			import uir1calendar
+			useR1 = uir1calendar.UseR1()
+		except Exception:
+			useR1 = False
+		if useR1:
+			kept = list(self.children)
+			self.r1 = uir1calendar.Build(self, globals())
+			if self.r1:
+				return
+			self.__Initialize()
+			self.children = kept
+		self.__BuildWindow()
 
 	def __BuildWindow(self):
 		# Preserve revision 5 content; only the outer Board chrome uses shipped art.
@@ -655,6 +674,11 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 		return ((localeInfo.EVENT_CALENDAR_DURATION_HOURS_SHORT if short else localeInfo.EVENT_CALENDAR_DURATION_HOURS) % (hours, minutes) if hours else
 			localeInfo.EVENT_CALENDAR_DURATION_MINUTES % minutes)
 
+	def EventOrder(self, row):
+		# Sort key of the day's rows: running first, then upcoming / scheduled / ended, each by id (R1 by start).
+		priority = {"active":0, "upcoming":1, "scheduled":2, "ended":3}
+		return (priority[self.GetEventState(row)], int(row[EVENT_ID]))
+
 	def GetEventStatus(self, row):
 		state = self.GetEventState(row)
 		if state == "upcoming":
@@ -684,8 +708,7 @@ class EventCalendarWindow(ui.BoardWithTitleBar):
 			button.Enable() if allowed else button.Disable()
 		rows = [row for dayRows in server_event_data.values() for row in dayRows.values()]
 		self.visibleEvents = eventcalendarlogic.EventsForDay(rows, self.selectedDate, EVENT_START_TIME, EVENT_END_TIME)
-		priority = {"active":0, "upcoming":1, "scheduled":2, "ended":3}
-		self.visibleEvents.sort(key=lambda row: (priority[self.GetEventState(row)], int(row[EVENT_ID])))
+		self.visibleEvents.sort(key=self.EventOrder)
 		# A status transition may move the selected row into another page.
 		for index, row in enumerate(self.visibleEvents):
 			if row[EVENT_ID] == self.selectedEventID:

@@ -1,3 +1,4 @@
+import chestpreview
 import ui
 import player
 import mouseModule
@@ -5,7 +6,6 @@ import net
 import app
 import snd
 import item
-import mountcorebonus
 import player
 import chat
 import grp
@@ -23,11 +23,17 @@ import ime
 import wndMgr
 import uiToolTip
 import itemrefineoverlay
+import dungeonequipmentbinding
 import itemrarityaura
 import itemsplitplanner
+import bonuscatalog
 import inventoryshortcutpolicy
+import npcsellprice
+import slotwindowpolicy
 import talismanrefine
+import craftingquickadd
 import exchangequickadd
+import virtualmarketquickadd
 import virtualquiver
 import uiresonance
 import auraprogression
@@ -62,6 +68,7 @@ WEAPON_ENHANCEMENT_TARGETS = {
 EQUIPMENT_UNIQUE3_INDEX = player.EQUIPMENT_SLOT_START + 11
 EQUIPMENT_UNIQUE4_INDEX = player.EQUIPMENT_SLOT_START + 12
 REFINE_OVERLAY_ITEM_TYPES = (
+	item.ITEM_TYPE_METIN,
 	item.ITEM_TYPE_WEAPON,
 	item.ITEM_TYPE_ARMOR,
 	item.ITEM_TYPE_ROD,
@@ -70,6 +77,20 @@ REFINE_OVERLAY_ITEM_TYPES = (
 	item.ITEM_TYPE_RING,
 	item.ITEM_TYPE_BELT,
 )
+
+
+# Owner 16. 10. 2026: the mount costume has its own wear cell 56
+# (WEAR_COSTUME_MOUNT_SKIN); wear cell 21 is the lion seal, shown only in the
+# mount window. The costume panel shows cell 56 at the old mount position.
+MOUNT_SKIN_WEAR_CELL = 56
+
+
+def CostumeSlotNumbers():
+	start = item.COSTUME_SLOT_START
+	numbers = [start + i for i in range(item.COSTUME_SLOT_COUNT) if i != 2]
+	numbers.append(start - 19 + MOUNT_SKIN_WEAR_CELL)
+	return numbers
+
 
 def ReprGetItemIndex(window):
 	return lambda pos : player.GetItemIndex(window, pos)
@@ -128,6 +149,8 @@ if inventoryshortcutpolicy.IsMultipleSelectEnabled(app.ENABLE_MULTIPLE_SELECT):
 			self.FragText.SetText("0 - 0 Fragments")
 			osfInfo.MULTIPLE_LIST = []
 			self.wndMultipleInventoryLayer.Show()
+			# The total follows the sale terms the server sends while items are marked.
+			npcsellprice.Watch(self.wndMultipleInventoryLayer, ui.__mem_func__(self.RefreshPrice))
 			self.AdjustPositionAndSize()
 	
 		def CloseInventory(self):
@@ -291,6 +314,15 @@ if inventoryshortcutpolicy.IsMultipleSelectEnabled(app.ENABLE_MULTIPLE_SELECT):
 			possibleFragments = gotItems * 8
 			self.FragText.SetText("0 - " + str(possibleFragments) + " Fragments")
 
+		def RefreshPrice(self):
+			total = 0
+			for slotNumber in osfInfo.MULTIPLE_LIST:
+				itemIndex = player.GetItemIndex(slotNumber)
+				if itemIndex:
+					item.SelectItem(itemIndex)
+					total += npcsellprice.BulkSellPrice(item.GetISellItemPrice(), player.GetItemCount(slotNumber), item.Is1GoldItem())
+			self.priceText.SetText(localeInfo.NumberToMoneyString(total))
+
 		def UpdatePrice(self, slotNumber, i):
 			itemIndex = player.GetItemIndex(slotNumber)
 			if itemIndex:
@@ -299,12 +331,8 @@ if inventoryshortcutpolicy.IsMultipleSelectEnabled(app.ENABLE_MULTIPLE_SELECT):
 				old = old.replace(" ", "")
 				old = old.replace("Yang", "")
 				old = old.replace(".", "")
-				add = item.GetISellItemPrice()
 				itemCount = player.GetItemCount(slotNumber)
-				if item.Is1GoldItem():
-					add = itemCount // add // 5
-				else:
-					add = add * itemCount // 5
+				add = npcsellprice.BulkSellPrice(item.GetISellItemPrice(), itemCount, item.Is1GoldItem())
 				
 				if i == 1:
 					new = int(old) + add
@@ -320,8 +348,6 @@ class InventoryWindow(ui.ScriptWindow):
 	USE_TYPE_TUPLE = (
 		"USE_CLEAN_SOCKET",
 		"USE_CHANGE_ATTRIBUTE",
-		"USE_ADD_ATTRIBUTE",
-		"USE_ADD_ATTRIBUTE2",
 		"USE_ADD_ACCESSORY_SOCKET",
 		"USE_PUT_INTO_ACCESSORY_SOCKET",
 		"USE_PUT_INTO_BELT_SOCKET",
@@ -384,18 +410,22 @@ class InventoryWindow(ui.ScriptWindow):
 
 		ui.ScriptWindow.__init__(self)
 		self.refineLevelOverlays = {}
+		self.dungeonLockOverlays = {}
 		self.virtualMarketDraftSlots = set()
 		self.virtualMarketDraftMouseSlots = set()
 		self.dragonCoin = 0
 		self.quickBuffButton = None
 		self.quickBuffSettingsButton = None
 		self.retiredArrowSlotCover = None
+		self.r1Skin = None
 
 		if inventoryshortcutpolicy.IsMultipleSelectEnabled(app.ENABLE_MULTIPLE_SELECT):
 			self.isOpenedMultipleWindowWhenClosingInventory = 0
 			self.IsClickMultipleInventory = False
 		self.wndInventoryBody = None
+		self.r1Rail = None
 		self.__LoadWindow()
+		self.__FollowLook()
 
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
@@ -409,6 +439,33 @@ class InventoryWindow(ui.ScriptWindow):
 
 	def GetInventoryBodyGlobalPosition(self):
 		return self.wndInventoryBody.GetGlobalPosition()
+
+	INVENTORY_RAIL_COLUMN_WIDTH = 42
+
+	def SetRailColumns(self, count, extra=0):
+		"""Widen the root leftwards for a second rail column (and the 10 px expand/collapse
+		tab, ``extra``); the body never moves.
+
+		The root is rail + 176 px body (inventorywindow.py). A second column adds
+		42 px on the left: the root moves left by the same amount, so the body,
+		its slots and every body-anchored window stay where they were.
+		"""
+		body = getattr(self, "wndInventoryBody", None)
+		if not body:
+			return
+		count = max(1, min(2, int(count)))
+		railWidth = self.INVENTORY_RAIL_COLUMN_WIDTH * count + max(0, int(extra))
+		delta = railWidth - body.GetLocalPosition()[0]
+		if not delta:
+			return
+		(x, y) = self.GetGlobalPosition()
+		self.SetPosition(x - delta, y)
+		self.SetSize(self.GetWidth() + delta, self.GetHeight())
+		body.SetPosition(railWidth, 0)
+		if app.ENABLE_WINDOW_RESIZE:
+			position = getattr(self, "resizeDic", {}).get("position")
+			if position:
+				self.resizeDic["position"] = (position[0] - delta, position[1])
 
 	def Show(self):
 		self.__LoadWindow()
@@ -518,9 +575,7 @@ class InventoryWindow(ui.ScriptWindow):
 				if app.ENABLE_SPECIAL_SHINING_SYSTEM:
 					self.visibleBtnList.append(self.GetChild("ShiningWeaponToolTipButton")) ## 6
 					self.visibleBtnList.append(self.GetChild("ShiningArmorToolTipButton")) ## 7
-				if app.ENABLE_MOUNT_COSTUME_SYSTEM:
-					self.mountVisibilityButtonIndex = len(self.visibleBtnList)
-					self.visibleBtnList.append(self.GetChild("MountToolTipButton"))
+				# the mount slot has no "hide costume" eye (it did nothing).
 
 			if app.ENABLE_BRAVE_CAPE_RENEWAL:
 				self.wndBraveCape = None
@@ -643,11 +698,6 @@ class InventoryWindow(ui.ScriptWindow):
 
 				self.visibleBtnList[7].SetToggleUpEvent(ui.__mem_func__(self.VisibleCostume), 8, 0)
 				self.visibleBtnList[7].SetToggleDownEvent(ui.__mem_func__(self.VisibleCostume), 8, 1)
-
-			if app.ENABLE_MOUNT_COSTUME_SYSTEM:
-				mountButton = self.visibleBtnList[self.mountVisibilityButtonIndex]
-				mountButton.SetToggleUpEvent(ui.__mem_func__(self.VisibleCostume), 9, 0)
-				mountButton.SetToggleDownEvent(ui.__mem_func__(self.VisibleCostume), 9, 1)
 
 		## MoneySlot
 		self.wndMoneySlot.SetEvent(ui.__mem_func__(self.OpenPickMoneyDialog))
@@ -789,15 +839,99 @@ class InventoryWindow(ui.ScriptWindow):
 		if self.quickBuffButton:
 			self.quickBuffButton.SetEvent(ui.__mem_func__(self.__ActivateQuickBuffs))
 		if self.quickBuffSettingsButton:
-			self.quickBuffSettingsButton.SetEvent(ui.__mem_func__(self.__OpenQuickBuffSettings))
+			self.quickBuffSettingsButton.SetEvent(ui.__mem_func__(self.__ToggleQuickBuffSettings))
 
 		## Refresh
 		self.SetInventoryPage(0)
 		self.SetEquipmentPage(0)
 		self.RefreshItemSlot()
 		self.RefreshStatus()
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""R1 look (root/uiinventoryr1.py) unless Settings -> "Starý vzhled" chose the original one; a build
+		failure undoes every change and keeps the original look (traced to syserr)."""
+		self.r1Skin = None
+		try:
+			import uir1
+			if not uir1.UseR1():
+				return
+			import uiinventoryr1
+			self.r1Skin = uiinventoryr1.InventorySkin(self)
+			self.r1Skin.SyncSlotsSafe()
+			refresh = getattr(self, "RefreshStatus", None)
+			if refresh is not None:
+				refresh()			# the money bar as the R1 yang price
+		except Exception:
+			self.r1Skin = None
+			try:
+				import uir1
+				uir1.TraceFailure("the inventory")
+			except Exception:
+				pass
+
+	def __FollowLook(self):
+		try:
+			import uir1
+			uir1.FollowLook(self)
+		except Exception:
+			pass
+
+	def SyncR1Look(self):
+		"""Settings switched the look (uir1.LookChanged): the R1 look dressed into the live window or undone (the
+		original frame, title bar, tabs and slots back), the rail with it. A failure keeps the original look (traced)."""
+		import uir1
+		wanted = uir1.UseR1()
+		skin = getattr(self, "r1Skin", None)
+		rail = self.r1Rail() if getattr(self, "r1Rail", None) else None
+		if wanted and not skin:
+			self.__ApplyR1Look()
+			if rail is not None:
+				self.BindR1Rail(rail)
+		elif not wanted and skin:
+			self.r1Skin = None
+			try:
+				skin.Undo()
+			finally:
+				skin.Destroy()
+				if rail is not None:
+					rail.SetR1Look(False)
+		else:
+			return
+		if rail is not None and hasattr(rail, "RefreshRail"):
+			rail.RefreshRail()
+
+	def BindR1Rail(self, rail):
+		"""The shortcut rail (uitaskbar.ExpandedTaskBar) takes the look of this inventory."""
+		try:
+			from _weakref import ref
+			self.r1Rail = ref(rail)
+		except TypeError:
+			self.r1Rail = None
+		skin = getattr(self, "r1Skin", None)
+		if not skin:
+			return
+		try:
+			skin.BindRail(rail)
+		except Exception:
+			try:
+				import uir1
+				uir1.TraceFailure("the inventory rail")
+				rail.SetR1Look(False)
+			except Exception:
+				pass
 
 	def Destroy(self):
+		try:
+			import uir1
+			uir1.UnfollowLook(self)
+		except Exception:
+			pass
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.Destroy()
+		self.r1Skin = None
+		self.r1Rail = None
+		dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
 		self.__ClearRefineLevelOverlays()
 		self.virtualMarketDraftSlots.clear()
 		self.virtualMarketDraftMouseSlots.clear()
@@ -920,13 +1054,16 @@ class InventoryWindow(ui.ScriptWindow):
 		if app.ENABLE_SEARCH_FIELD:
 			if self.wndSearchEdit and self.wndSearchEdit.IsFocus():
 				self.wndSearchEdit.KillFocus()
+			if self.wndSearchEdit and self.wndSearchEdit.GetText():
+				self.wndSearchEdit.SetText("")
+				self.__RefreshInventorySearchGrid()
 		if self.interface:
 			self.interface.CloseTalismanWindow()
 		self.Hide()
 
-	def __OpenQuickBuffSettings(self):
+	def __ToggleQuickBuffSettings(self):
 		if self.interface:
-			self.interface.OpenQuickBuffSettings()
+			self.interface.ToggleQuickBuffSettings()
 
 	def __ActivateQuickBuffs(self):
 		if self.interface:
@@ -961,8 +1098,8 @@ class InventoryWindow(ui.ScriptWindow):
 		#############
 		
 		if isIn:
-			if nLen > 0:
-				# 0 | 1 | 2 | 3
+			if nLen < 0:
+				# a notch down = the next page, up = the previous one (uiwheel.Pages, the special inventory)
 				if self.inventoryPageIndex >= 3:
 					self.SetInventoryPage(0)
 				else:
@@ -1027,6 +1164,8 @@ class InventoryWindow(ui.ScriptWindow):
 					self.wndItem.Show()
 
 			self.RefreshBagSlotWindow()
+			if getattr(self, "r1Skin", None):
+				self.r1Skin.SyncSafe()
 	else:
 		def SetInventoryPage(self, page):
 			self.inventoryPageIndex = page
@@ -1040,6 +1179,8 @@ class InventoryWindow(ui.ScriptWindow):
 					self.wndItem.Show()
 
 			self.RefreshBagSlotWindow()
+			if getattr(self, "r1Skin", None):
+				self.r1Skin.SyncSafe()
 
 	if app.ENABLE_HIDE_COSTUME_SYSTEM:
 		def RefreshVisibleCostume(self):
@@ -1068,8 +1209,8 @@ class InventoryWindow(ui.ScriptWindow):
 				shiningArmor = osfInfo.HIDDEN_SHINING_ARMOR
 				self.SetHideEvent(7, shiningArmor)
 
-			if app.ENABLE_MOUNT_COSTUME_SYSTEM:
-				self.SetHideEvent(self.mountVisibilityButtonIndex, osfInfo.HIDDEN_MOUNT)
+			if getattr(self, "r1Skin", None):
+				self.r1Skin.SyncSlotsSafe()	# R1 eyes (worn or hidden costumes only, hidden = R1 red)
 
 		def SetHideEvent(self, slot, hide = False):
 			if hide:
@@ -1112,6 +1253,8 @@ class InventoryWindow(ui.ScriptWindow):
 			self.mask2.Show()
 			self.imageTab[1].Down()
 		self.RefreshEquipSlotWindow()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def ShowInventory(self):
 		if self.mask1:
@@ -1296,61 +1439,19 @@ class InventoryWindow(ui.ScriptWindow):
 		return self.inventoryPageIndex * player.INVENTORY_PAGE_SIZE + local
 
 	def __HideRefineLevelOverlayGroup(self, group):
-		for key, overlay in self.refineLevelOverlays.items():
-			if key[0] == group:
-				overlay.Hide()
+		itemrefineoverlay.HideGroup(self.refineLevelOverlays, group)
 
 	def __ClearRefineLevelOverlays(self):
-		for overlay in self.refineLevelOverlays.values():
-			overlay.Hide()
-		self.refineLevelOverlays = {}
+		itemrefineoverlay.Clear(self.refineLevelOverlays)
 
 	def __SetRefineLevelOverlay(self, group, slotWindow, renderingSlot, itemVnum):
-		key = (group, renderingSlot)
-		overlay = self.refineLevelOverlays.get(key)
-
-		if not itemVnum:
-			if overlay:
-				overlay.Hide()
-			return
-
-		item.SelectItem(itemVnum)
-		if item.GetItemType() not in REFINE_OVERLAY_ITEM_TYPES:
-			if overlay:
-				overlay.Hide()
-			return
-
-		refineLevel = itemrefineoverlay.ExtractRefineLevel(item.GetItemName())
-		if refineLevel is None:
-			if overlay:
-				overlay.Hide()
-			return
-
-		itemWidth, itemHeight = item.GetItemSize()
-		slotPosition = slotWindow.GetSlotLocalPosition(renderingSlot)
-		if slotPosition is None:
-			if overlay:
-				overlay.Hide()
-			return
-		slotX, slotY = slotPosition
-
-		if not overlay:
-			overlay = ui.TextLine()
-			overlay.SetParent(slotWindow)
-			overlay.AddFlag("not_pick")
-			overlay.SetHorizontalAlignRight()
-			overlay.SetOutline()
-			overlay.SetPackedFontColor(0xFFFFFFFF)
-			self.refineLevelOverlays[key] = overlay
-
-		overlay.SetPosition(*itemrefineoverlay.GetOverlayPosition(
-			slotX, slotY, itemWidth, itemHeight))
-		overlay.SetText("+%d" % refineLevel)
-		overlay.Show()
+		itemrefineoverlay.SetOverlay(self.refineLevelOverlays,
+			(group, renderingSlot), slotWindow, itemVnum, REFINE_OVERLAY_ITEM_TYPES)
 
 	def RefreshBagSlotWindow(self):
 		if not self.wndItem:
 			return
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.wndItem)
 		self.__HideRefineLevelOverlayGroup("bag")
 
 		getItemVNum = player.GetItemIndex
@@ -1386,6 +1487,7 @@ class InventoryWindow(ui.ScriptWindow):
 			itemVnum = getItemVNum(slotNumber)
 			setItemVNum(i, itemVnum, itemCount)
 			itemrarityaura.ApplyInventory(self.wndItem, i, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndItem, i, slotNumber, player.GetItemIndex(slotNumber))
 			self.__SetRefineLevelOverlay("bag", self.wndItem, i, itemVnum)
 
 			if app.ENABLE_BUFF_SYSTEM and itemVnum == osfInfo.SUPPORT_ITEM_VNUM:
@@ -1418,6 +1520,13 @@ class InventoryWindow(ui.ScriptWindow):
 					player.SetAutoPotionInfo(potionType, player.INVENTORY, slotNumber)
 				else:
 					self.wndItem.DeactivateSlot(tempSlotNum)
+
+			# an active automatic cape spins like the moon elixir.
+			if constInfo.IS_AUTO_BRAVE_CAPE(itemVnum):
+				if player.GetItemMetinSocket(slotNumber, constInfo.AUTO_BRAVE_CAPE_ACTIVE_SOCKET):
+					self.wndItem.ActivateSlotOld(i)
+				else:
+					self.wndItem.DeactivateSlot(i)
 
 			if app.ENABLE_GROWTH_PET_SYSTEM:
 				if constInfo.IS_PET_ITEM(itemVnum):
@@ -1553,14 +1662,15 @@ class InventoryWindow(ui.ScriptWindow):
 	def RefreshCostumeSlotWindow(self, slotWindow):
 		if not slotWindow:
 			return
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, slotWindow)
 
 		getItemVNum = player.GetItemIndex
 		getItemCount = player.GetItemCount
-		for i in range(item.COSTUME_SLOT_COUNT):
-			slotNumber = item.COSTUME_SLOT_START + i
+		for slotNumber in CostumeSlotNumbers():
 			itemVnum = getItemVNum(slotNumber)
 			slotWindow.SetItemSlot(slotNumber, itemVnum, 0)
 			itemrarityaura.ApplyInventory(slotWindow, slotNumber, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, slotWindow, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 			if app.ENABLE_CHANGE_LOOK_SYSTEM:
 				if player.GetChangeLookVnum(
 						player.EQUIPMENT, slotNumber
@@ -1579,6 +1689,7 @@ class InventoryWindow(ui.ScriptWindow):
 				itemVnum = getItemVNum(slotNumber)
 				slotWindow.SetItemSlot(slotNumber, itemVnum, itemCount)
 				itemrarityaura.ApplyInventory(slotWindow, slotNumber, slotNumber)
+				dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, slotWindow, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 				if app.ENABLE_CHANGE_LOOK_SYSTEM:
 					if player.GetChangeLookVnum(
 							player.EQUIPMENT, slotNumber
@@ -1603,6 +1714,7 @@ class InventoryWindow(ui.ScriptWindow):
 			self.retiredArrowSlotCover.Show()
 
 	def RefreshEquipSlotWindow(self):
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.wndEquip)
 		self.__HideRefineLevelOverlayGroup("equip")
 		getItemVNum=player.GetItemIndex
 		getItemCount=player.GetItemCount
@@ -1616,6 +1728,7 @@ class InventoryWindow(ui.ScriptWindow):
 			itemVnum = getItemVNum(slotNumber)
 			setItemVNum(slotNumber, itemVnum, itemCount)
 			itemrarityaura.ApplyInventory(self.wndEquip, slotNumber, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 			self.__SetRefineLevelOverlay("equip", self.wndEquip, slotNumber, itemVnum)
 
 			if app.ENABLE_CHANGE_LOOK_SYSTEM:
@@ -1631,6 +1744,7 @@ class InventoryWindow(ui.ScriptWindow):
 			itemVnum = getItemVNum(slotNumber)
 			setItemVNum(slotNumber, itemVnum, itemCount)
 			itemrarityaura.ApplyInventory(self.wndEquip, slotNumber, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 			self.__SetRefineLevelOverlay("equip", self.wndEquip, slotNumber, itemVnum)
 
 			if app.ENABLE_CHANGE_LOOK_SYSTEM:
@@ -1639,10 +1753,10 @@ class InventoryWindow(ui.ScriptWindow):
 				else:
 					self.wndEquip.EnableSlotCoverImage(slotNumber, False)
 
-		for i in range(item.COSTUME_SLOT_COUNT):
-			slotNumber = item.COSTUME_SLOT_START + i
+		for slotNumber in CostumeSlotNumbers():
 			setItemVNum(slotNumber, getItemVNum(slotNumber), 0)
 			itemrarityaura.ApplyInventory(self.wndEquip, slotNumber, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 
 		if app.ENABLE_NEW_EQUIPMENT_SYSTEM:
 			for i in range(player.NEW_EQUIPMENT_SLOT_COUNT):
@@ -1653,6 +1767,7 @@ class InventoryWindow(ui.ScriptWindow):
 				itemVnum = getItemVNum(slotNumber)
 				setItemVNum(slotNumber,getItemVNum(slotNumber),itemCount)
 				itemrarityaura.ApplyInventory(self.wndEquip, slotNumber, slotNumber)
+				dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 				self.__SetRefineLevelOverlay("equip", self.wndEquip, slotNumber, itemVnum)
 
 			if app.ENABLE_CHANGE_LOOK_SYSTEM:
@@ -1664,6 +1779,8 @@ class InventoryWindow(ui.ScriptWindow):
 		self.__RefreshRetiredArrowSlot()
 		self.wndEquip.RefreshSlot()
 		self.RefreshCostumeSlotWindow(self.wndCostume)
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSlotsSafe()		# type outlines of the empty slots, costume eyes
 
 	def RefreshItemSlot(self):
 		# Native RefreshSlot emits hover-out/in even for an unrelated update.
@@ -1686,7 +1803,12 @@ class InventoryWindow(ui.ScriptWindow):
 
 	def RefreshStatus(self):
 		money = player.GetElk()
-		self.wndMoney.SetText(localeInfo.NumberToMoneyString(money))
+		if getattr(self, "r1Skin", None):
+			# R1 look: the one R1 yang price of the client ("1.234.567 Yang", root/uir1price.py)
+			import uir1price
+			self.wndMoney.SetText(uir1price.FormatYang(money))
+		else:
+			self.wndMoney.SetText(localeInfo.NumberToMoneyString(money))
 
 		if app.ENABLE_GEM_SYSTEM:
 			if self.wndGem:
@@ -1697,10 +1819,10 @@ class InventoryWindow(ui.ScriptWindow):
 		self.tooltipItem = tooltipItem
 
 	def RefreshCostumeSlot(self):
-		for i in range(item.COSTUME_SLOT_COUNT):
-			slotNumber = item.COSTUME_SLOT_START + i
+		for slotNumber in CostumeSlotNumbers():
 			self.wndEquip.SetItemSlot(slotNumber, player.GetItemIndex(slotNumber), 0)
 			itemrarityaura.ApplyInventory(self.wndEquip, slotNumber, slotNumber)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndEquip, slotNumber, slotNumber, player.GetItemIndex(slotNumber))
 
 	def SellItem(self):
 		if self.sellingSlotitemIndex == player.GetItemIndex(self.sellingSlotNumber):
@@ -1781,13 +1903,7 @@ class InventoryWindow(ui.ScriptWindow):
 			attachedItemCount = mouseModule.mouseController.GetAttachedItemCount()
 			attachedItemIndex = mouseModule.mouseController.GetAttachedItemIndex()
 
-			if player.SLOT_TYPE_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_SKILL_BOOK_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_UPGRADE_ITEMS_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_STONE_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_GIFT_BOX_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_SWITCH_INVENTORY == attachedSlotType or\
-				player.SLOT_TYPE_COSTUME_INVENTORY == attachedSlotType:
+			if slotwindowpolicy.IsInventorySlotType(attachedSlotType):
 
 				if attachedSlotPos >= player.DRAGON_SOUL_EQUIPMENT_SLOT_START and attachedSlotPos < player.DRAGON_SOUL_EQUIPMENT_SLOT_END:
 					mouseModule.mouseController.DeattachObject()
@@ -1879,6 +1995,8 @@ class InventoryWindow(ui.ScriptWindow):
 				tabStrip.Show()
 				self.SetEquipmentPage(self.ExtraPageIndex)
 		self.__UpdateTitleBarSearchToggleToolTip()
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.SyncSafe()
 
 	def __UpdateTitleBarSearchToggleToolTip(self):
 		if not self.sortInventoryButton:
@@ -1901,6 +2019,7 @@ class InventoryWindow(ui.ScriptWindow):
 		if not self.wndItemSRC:
 			return
 		self.__HideRefineLevelOverlayGroup("search")
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.wndItemSRC)
 		for x in range(5 * 9):
 			self.wndItemSRC.ClearSlot(x)
 		self.wndItemSRC.RefreshSlot()
@@ -1982,6 +2101,7 @@ class InventoryWindow(ui.ScriptWindow):
 			self.__InventorySearchMarkArea(dest, w, h, used_cells, dest)
 			self.wndItemSRC.SetItemSlot(dest, itemVNum, itemCount)
 			itemrarityaura.ApplyInventory(self.wndItemSRC, dest, i)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.wndItemSRC, dest, i, player.GetItemIndex(i))
 			self.__SetRefineLevelOverlay("search", self.wndItemSRC, dest, itemVNum)
 			if app.ENABLE_BUFF_SYSTEM and itemVNum == osfInfo.SUPPORT_ITEM_VNUM:
 				if player.GetItemMetinSocket(i, osfInfo.SUPPORT_ACTIVE_SOCKET):
@@ -2031,20 +2151,15 @@ class InventoryWindow(ui.ScriptWindow):
 			attachedSlotType = mouseModule.mouseController.GetAttachedType()
 			attachedSlotPos = mouseModule.mouseController.GetAttachedSlotNumber()
 			attachedItemVID = mouseModule.mouseController.GetAttachedItemIndex()
+			attachedItemCount = mouseModule.mouseController.GetAttachedItemCount()
 
 			if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
-				if player.SLOT_TYPE_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_SKILL_BOOK_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_UPGRADE_ITEMS_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_STONE_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_GIFT_BOX_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_SWITCH_INVENTORY == attachedSlotType or\
-					player.SLOT_TYPE_COSTUME_INVENTORY == attachedSlotType:
+				if slotwindowpolicy.IsInventorySlotType(attachedSlotType):
 
-					self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex)
+					self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex, attachedItemCount)
 			else:
 				if player.SLOT_TYPE_INVENTORY == attachedSlotType:
-					self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex)
+					self.__DropSrcItemToDestItemInInventory(attachedItemVID, attachedSlotPos, itemSlotIndex, attachedItemCount)
 
 			mouseModule.mouseController.DeattachObject()
 		else:
@@ -2113,7 +2228,7 @@ class InventoryWindow(ui.ScriptWindow):
 
 				snd.PlaySound("sound/ui/pick.wav")
 
-	def __DropSrcItemToDestItemInInventory(self, srcItemVID, srcItemSlotPos, dstItemSlotPos):
+	def __DropSrcItemToDestItemInInventory(self, srcItemVID, srcItemSlotPos, dstItemSlotPos, srcItemCount=0):
 		if srcItemSlotPos == dstItemSlotPos:
 			return
 
@@ -2134,14 +2249,28 @@ class InventoryWindow(ui.ScriptWindow):
 			if player.GetChangeLookWindowOpen() == 1:
 				return
 
-		if srcItemVID in (61021, 61022):
-			if not player.IsEquipmentSlot(dstItemSlotPos) and player.GetItemIndex(dstItemSlotPos) == 61020:
+		action, usable = self.__ItemToItemUse(srcItemVID, srcItemSlotPos, dstItemSlotPos)
+
+		if action == "SERVICE_CERTIFICATE":
+			if usable:
+				self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos, serviceCertificate=True)
+			else:
+				chat.AppendChat(chat.CHAT_TYPE_INFO, "Přetáhni certifikát na sundanou šerpu v inventáři.")
+			if self.interface:
+				self.interface.SetUseItemMode(False)
+			return
+
+		if action == "TRANSFORM":
+			if usable:
 				self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
 			return
 
-		if (getattr(net, "IsResonanceAvailable", lambda: False)()
-				and uiresonance.IsResonanceKey(srcItemVID)
-				and uiresonance.IsSupportedHostVnum(player.GetItemIndex(dstItemSlotPos))):
+		## [MT-462]
+		if action == "STACK":
+			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, srcItemCount)
+			return
+
+		if action == "RESONANCE_KEY" and usable:
 			if self.interface:
 				self.interface.OpenResonanceUnlockDialog(
 					dstItemSlotPos, srcItemSlotPos
@@ -2149,62 +2278,46 @@ class InventoryWindow(ui.ScriptWindow):
 				self.interface.SetUseItemMode(False)
 			return
 
-		if (getattr(net, "IsResonanceAvailable", lambda: False)()
-				and uiresonance.IsSealVnum(srcItemVID)
-				and uiresonance.IsSupportedHostVnum(player.GetItemIndex(dstItemSlotPos))):
+		if action == "RESONANCE_SEAL" and usable:
 			if self.interface:
 				self.interface.InsertResonanceSealDirect(
 					dstItemSlotPos, srcItemSlotPos
 				)
 			return
 
-		## [MT-462]
-		player.GetItemIndex(srcItemSlotPos)
-		if player.GetItemIndex(srcItemSlotPos) == player.GetItemIndex(dstItemSlotPos) \
-			and (player.GetItemFlags(srcItemSlotPos) & item.ITEM_FLAG_STACKABLE) \
-			and player.IsEquipmentSlot(dstItemSlotPos) == False:
-			self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, 0)
-			return
-
-		if srcItemVID in WEAPON_ENHANCEMENT_TARGETS:
-			resultVnum = WEAPON_ENHANCEMENT_TARGETS[srcItemVID].get(player.GetItemIndex(dstItemSlotPos), 0)
-			if resultVnum:
+		if action == "WEAPON_ENHANCEMENT":
+			if usable:
+				resultVnum = WEAPON_ENHANCEMENT_TARGETS[srcItemVID].get(player.GetItemIndex(dstItemSlotPos), 0)
 				self.refineDialog.OpenWeaponEnhancement(srcItemSlotPos, dstItemSlotPos, resultVnum)
 				if self.interface:
 					self.interface.SetUseItemMode(False)
 			return
 
-		if srcItemVID in (RARITY_SCROLL_VNUM, RARITY_REROLL_VNUM, RARITY_TARGETED_VNUM):
+		# The dialog explains a target the server refuses.
+		if action == "RARITY":
 			self.interface.OpenRarityDialog(srcItemVID, dstItemSlotPos)
 			self.interface.SetUseItemMode(False)
 			return
 
-		if app.ENABLE_SOUL_BIND_SYSTEM:
-			# cyh itemseal 2013 11 08
-			if item.IsSealScroll(srcItemVID):
-				if player.CanSealItem(srcItemVID, player.INVENTORY, dstItemSlotPos):
-					self.__OpenQuestionDialog(srcItemSlotPos, dstItemSlotPos)
+		# cyh itemseal 2013 11 08
+		if action == "SEAL" and usable:
+			self.__OpenQuestionDialog(srcItemSlotPos, dstItemSlotPos)
 
-		if item.IsRefineScroll(srcItemVID):
+		# The server words the refusal of a target these sources do not fit.
+		if action == "REFINE":
 			self.RefineItem(srcItemSlotPos, dstItemSlotPos)
 			self.interface.SetUseItemMode(False)
 
-		#elif item.IsMetin(srcItemVID):
-			#self.AttachMetinToItem(srcItemSlotPos, dstItemSlotPos)
-		#Fix: Spirit stones - stacking.
-		elif item.IsMetin(srcItemVID) and not item.IsMetin(player.GetItemIndex(dstItemSlotPos)):
+		elif action == "METIN":
 			self.AttachMetinToItem(srcItemSlotPos, dstItemSlotPos)
 
-		elif item.IsDetachScroll(srcItemVID):
+		elif action == "DETACH":
 			self.DetachMetinFromItem(srcItemSlotPos, dstItemSlotPos)
 
-		elif item.IsKey(srcItemVID):
+		elif action in ("KEY", "APPLY", "RARE_ATTR", "AURA"):
 			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
 
-		elif (player.GetItemFlags(srcItemSlotPos) & ITEM_FLAG_APPLICABLE) == ITEM_FLAG_APPLICABLE:
-			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
-
-		elif item.GetUseType(srcItemVID) in self.USE_TYPE_TUPLE:
+		elif action == "USE_TYPE":
 			if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 				useType = item.GetUseType(srcItemVID)
 				if "USE_ELEMENT_UPGRADE" == useType:
@@ -2216,18 +2329,6 @@ class InventoryWindow(ui.ScriptWindow):
 				elif "USE_ELEMENT_CHANGE" == useType:
 					if not uiRefine.RefineElementChangeDialog.CanRefineElementChange(player.INVENTORY, srcItemSlotPos, player.INVENTORY, dstItemSlotPos, True, False):
 						return
-			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
-
-		elif app.ENABLE_PERMA_ACCESSORY and item.GetUseType(srcItemVID) == "USE_REMOVE_PERMANENT_ORE":
-			if not self.__CanRemovePermanentOre(dstItemSlotPos):
-				return
-			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
-
-
-		elif app.ENABLE_67TH_BONUS and (srcItemVID == item.ADD_RARE_ATTRIBUTE_VNUM or srcItemVID == item.CHANGE_RARE_ATTRIBUTE_VNUM):
-			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
-
-		elif app.ENABLE_AURA_SYSTEM and (srcItemVID == 49980 or srcItemVID == 49970):
 			self.__SendUseItemToItemPacket(srcItemSlotPos, dstItemSlotPos)
 
 		else:
@@ -2253,7 +2354,7 @@ class InventoryWindow(ui.ScriptWindow):
 				if item.IsEquipmentVID(srcItemVID):
 					self.__UseItem(srcItemSlotPos)
 			else:
-				self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, 0)
+				self.__SendMoveItemPacket(srcItemSlotPos, dstItemSlotPos, srcItemCount)
 				# net.SendItemMovePacket(srcItemSlotPos, dstItemSlotPos, 0)
 
 	def __OpenQuestionDialog(self, srcItemPos, dstItemPos):
@@ -2304,12 +2405,7 @@ class InventoryWindow(ui.ScriptWindow):
 				self.popup = popup
 				return
 
-			itemPrice = item.GetISellItemPrice()
-
-			if item.Is1GoldItem():
-				itemPrice = itemCount // itemPrice // 5
-			else:
-				itemPrice = itemPrice * itemCount // 5
+			itemPrice = npcsellprice.SellPrice(item.GetISellItemPrice(), itemCount, item.Is1GoldItem())
 
 			item.GetItemName(itemIndex)
 			itemName = item.GetItemName()
@@ -2320,6 +2416,8 @@ class InventoryWindow(ui.ScriptWindow):
 			self.questionDialog.SetCancelEvent(ui.__mem_func__(self.OnCloseQuestionDialog))
 			self.questionDialog.Open()
 			self.questionDialog.count = itemCount
+			# The shown price is void once the server changes the sale terms.
+			npcsellprice.Watch(self.questionDialog, ui.__mem_func__(self.OnCloseQuestionDialog))
 
 			constInfo.SET_ITEM_QUESTION_DIALOG_STATUS(1)
 
@@ -2472,13 +2570,9 @@ class InventoryWindow(ui.ScriptWindow):
 
 		if mouseModule.mouseController.isAttached():
 			attachedItemType = mouseModule.mouseController.GetAttachedType()
-			if player.SLOT_TYPE_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_SKILL_BOOK_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_UPGRADE_ITEMS_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_STONE_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_GIFT_BOX_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_SWITCH_INVENTORY == attachedItemType or\
-				player.SLOT_TYPE_COSTUME_INVENTORY == attachedItemType and app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
+			# The same sources the drop accepts (SelectItemSlot).
+			if (slotwindowpolicy.IsInventorySlotType(attachedItemType) if app.ENABLE_SPECIAL_INVENTORY_SYSTEM
+					else player.SLOT_TYPE_INVENTORY == attachedItemType):
 
 				attachedSlotPos = mouseModule.mouseController.GetAttachedSlotNumber()
 				attachedItemVNum = mouseModule.mouseController.GetAttachedItemIndex()
@@ -2491,179 +2585,166 @@ class InventoryWindow(ui.ScriptWindow):
 		self.ShowToolTip(overInvenSlotPos)
 
 	def __IsUsableItemToItem(self, srcItemVNum, srcSlotPos):
-		if srcItemVNum in (61021, 61022):
-			return True
 		# 다른 아이템에 사용할 수 있는 아이템인가?
-
-		if (getattr(net, "IsResonanceAvailable", lambda: False)()
-				and uiresonance.IsResonanceKey(srcItemVNum)):
+		if self.__ItemToItemUse(srcItemVNum, srcSlotPos)[0] is not None:
 			return True
-		elif srcItemVNum in (RARITY_SCROLL_VNUM, RARITY_REROLL_VNUM, RARITY_TARGETED_VNUM):
-			return True
-		elif item.IsRefineScroll(srcItemVNum):
-			return True
-		elif app.ENABLE_SOUL_BIND_SYSTEM and item.IsSealScroll(srcItemVNum):
-			return True
-		elif app.ENABLE_67TH_BONUS and (srcItemVNum == item.ADD_RARE_ATTRIBUTE_VNUM or srcItemVNum == item.CHANGE_RARE_ATTRIBUTE_VNUM):
-			return True
-		elif app.ENABLE_AURA_SYSTEM and (srcItemVNum == 49980 or srcItemVNum == 49970):
-			return True
-		elif item.IsMetin(srcItemVNum):
-			return True
-		elif item.IsDetachScroll(srcItemVNum):
-			return True
-		elif item.IsKey(srcItemVNum):
-			return True
-		elif item.IsItemUsedForDragonSoul(srcItemVNum):
-			return True
-		elif (player.GetItemFlags(srcSlotPos) & ITEM_FLAG_APPLICABLE) == ITEM_FLAG_APPLICABLE:
-			return True
-		elif app.ENABLE_CHANGE_LOOK_SYSTEM and item.IsChangeLookClearScroll(srcItemVNum):
-			return True
-		elif app.ENABLE_GROWTH_PET_SYSTEM and self.__IsUsablePetItem(srcItemVNum):
-			return True
-		else:
-			if item.GetUseType(srcItemVNum) in self.USE_TYPE_TUPLE:
-				return True
-
-		return False
+		# Used on a stone in the Dragon Soul window, not on an inventory item.
+		return bool(item.IsItemUsedForDragonSoul(srcItemVNum))
 
 	def __CanUseSrcItemToDstItem(self, srcItemVNum, srcSlotPos, dstSlotPos):
-		if srcItemVNum in (61021, 61022):
-			return (srcSlotPos != dstSlotPos and not player.IsEquipmentSlot(dstSlotPos)
-				and player.GetItemIndex(dstSlotPos) == 61020)
-		if srcItemVNum == 79850:
-			return (not player.IsEquipmentSlot(dstSlotPos)
-				and 10750 <= player.GetItemIndex(dstSlotPos) <= 10754)
-		if 10750 <= player.GetItemIndex(dstSlotPos) <= 10754 and item.GetUseType(srcItemVNum) in (
-			"USE_CHANGE_ATTRIBUTE", "USE_CHANGE_ATTRIBUTE2", "USE_ADD_ATTRIBUTE", "USE_ADD_ATTRIBUTE2"):
-			return False
-		if srcItemVNum == mountcorebonus.SEAL_VNUM:
-			return mountcorebonus.CanUseSeal(srcItemVNum, player.GetItemIndex(dstSlotPos))
 		# 대상 아이템에 사용할 수 있는가?
-		if srcSlotPos == dstSlotPos:
-			return False
+		return bool(self.__ItemToItemUse(srcItemVNum, srcSlotPos, dstSlotPos)[1])
+
+	# One decision for using an item on an inventory item: the cursor after a
+	# pick-up (no target yet), the target highlight and the drop all ask here.
+	# Returns (action, usable): what a drop does with this source and whether
+	# the server accepts this target. Without a target only the source counts.
+	def __ItemToItemUse(self, srcItemVNum, srcSlotPos, dstSlotPos=None):
+		anyTarget = dstSlotPos is None
+		if not anyTarget and srcSlotPos == dstSlotPos:
+			return (None, False)
+		dstItemVNum = 0 if anyTarget else player.GetItemIndex(dstSlotPos)
+		dstWorn = not anyTarget and player.IsEquipmentSlot(dstSlotPos)
+
+		if srcItemVNum in (61021, 61022):
+			return ("TRANSFORM", anyTarget or (not dstWorn and dstItemVNum == 61020))
+
+		if (not anyTarget and not dstWorn and player.GetItemIndex(srcSlotPos) == dstItemVNum
+				and (player.GetItemFlags(srcSlotPos) & item.ITEM_FLAG_STACKABLE)):
+			#Fix: Spirit stones - stacking.
+			return ("STACK", bool(item.IsMetin(srcItemVNum)))
+
+		item.SelectItem(srcItemVNum)
+		if item.GetItemType() == item.ITEM_TYPE_USE and item.GetItemSubType() == item.USE_SPECIAL:
+			if item.GetValue(5):
+				import uiserviceitem
+				if uiserviceitem.SingleTargetKind(srcItemVNum):
+					return ("SERVICE_CERTIFICATE", anyTarget or uiserviceitem.CanApplyCertificate(srcSlotPos, dstSlotPos))
+
+		if getattr(net, "IsResonanceAvailable", lambda: False)():
+			if uiresonance.IsResonanceKey(srcItemVNum):
+				return ("RESONANCE_KEY", anyTarget or uiresonance.IsSupportedHostVnum(dstItemVNum))
+			if uiresonance.IsSealVnum(srcItemVNum):
+				return ("RESONANCE_SEAL", anyTarget or uiresonance.IsSupportedHostVnum(dstItemVNum))
 
 		if srcItemVNum in WEAPON_ENHANCEMENT_TARGETS:
-			return player.GetItemIndex(dstSlotPos) in WEAPON_ENHANCEMENT_TARGETS[srcItemVNum]
+			return ("WEAPON_ENHANCEMENT", anyTarget or dstItemVNum in WEAPON_ENHANCEMENT_TARGETS[srcItemVNum])
 
-		if (getattr(net, "IsResonanceAvailable", lambda: False)()
-				and uiresonance.IsResonanceKey(srcItemVNum)):
-			return uiresonance.IsSupportedHostVnum(player.GetItemIndex(dstSlotPos))
-		elif srcItemVNum in (RARITY_SCROLL_VNUM, RARITY_REROLL_VNUM, RARITY_TARGETED_VNUM):
-			return not player.IsEquipmentSlot(dstSlotPos)
-		elif item.IsRefineScroll(srcItemVNum):
-			if talismanrefine.RefineRejectionKey(srcItemVNum, player.GetItemIndex(dstSlotPos)):
-				return False
-			if player.REFINE_OK == player.CanRefine(srcItemVNum, dstSlotPos):
-				return True
-		elif app.ENABLE_SOUL_BIND_SYSTEM and item.IsSealScroll(srcItemVNum):
-			if player.CanSealItem(srcItemVNum, player.INVENTORY, dstSlotPos):
-				return True
-		#elif item.IsMetin(srcItemVNum):
-			#if player.ATTACH_METIN_OK == player.CanAttachMetin(srcItemVNum, dstSlotPos):
-				#return True
-		#Fix: Spirit stones - stacking.
-		elif item.IsMetin(srcItemVNum):
-			if player.ATTACH_METIN_OK == player.CanAttachMetin(srcItemVNum, dstSlotPos) or (item.IsMetin(player.GetItemIndex(dstSlotPos)) and player.GetItemIndex(dstSlotPos) == srcItemVNum):
-				return True
-		elif app.ENABLE_PERMA_ACCESSORY and self.__CanRemovePermanentOre(dstSlotPos):
-				return True
-		elif item.IsDetachScroll(srcItemVNum):
-			if player.DETACH_METIN_OK == player.CanDetach(srcItemVNum, dstSlotPos):
-				return True
-		elif item.IsKey(srcItemVNum):
-			if player.CanUnlock(srcItemVNum, dstSlotPos):
-				return True
-		elif (player.GetItemFlags(srcSlotPos) & ITEM_FLAG_APPLICABLE) == ITEM_FLAG_APPLICABLE:
-			return True
-		elif app.ENABLE_67TH_BONUS and srcItemVNum == item.ADD_RARE_ATTRIBUTE_VNUM:
-			if self.__CanAddRareItemAttr(dstSlotPos):
-				return True
-		elif app.ENABLE_67TH_BONUS and srcItemVNum == item.CHANGE_RARE_ATTRIBUTE_VNUM:
-			if self.__CanChangeRareItemAttrList(dstSlotPos):
-				return True
-		elif app.ENABLE_AURA_SYSTEM and (srcItemVNum == 49980 or srcItemVNum == 49970):
-			if self.CanUseToAura(dstSlotPos):
-				return True
-		elif app.ENABLE_CHANGE_LOOK_SYSTEM and player.CanChangeLookClearItem(srcItemVNum, player.INVENTORY, dstSlotPos):
-			return True
-		elif app.ENABLE_GROWTH_PET_SYSTEM and self.__CanUseSrcPetItemToDstPetItem(srcItemVNum, srcSlotPos, dstSlotPos):
-			return True
-		else:
-			useType = item.GetUseType(srcItemVNum)
+		if srcItemVNum in (RARITY_SCROLL_VNUM, RARITY_REROLL_VNUM, RARITY_TARGETED_VNUM):
+			# The server refuses a worn item; the bonus catalog names the
+			# families it takes and the prototypes it refuses among them.
+			# The talisman test serves a catalog that predates those rows.
+			return ("RARITY", anyTarget or (not dstWorn and bonuscatalog.AcceptsRarity(dstItemVNum)
+				and not talismanrefine.IsTalisman(dstItemVNum)))
 
-			if "USE_CLEAN_SOCKET" == useType:
-				if self.__CanCleanBrokenMetinStone(dstSlotPos):
-					return True
-			elif "USE_CHANGE_ATTRIBUTE" == useType:
-				if self.__CanChangeItemAttrList(dstSlotPos):
-					return True
-			elif "USE_ADD_ATTRIBUTE" == useType:
-				if self.__CanAddItemAttr(dstSlotPos):
-					return True
-			elif "USE_ADD_ATTRIBUTE2" == useType:
-				if self.__CanAddItemAttr2(dstSlotPos):
-					return True
-			elif "USE_ADD_ACCESSORY_SOCKET" == useType:
-				if self.__CanAddAccessorySocket(dstSlotPos):
-					return True
-			elif "USE_PUT_INTO_ACCESSORY_SOCKET" == useType:
-				if self.__CanPutAccessorySocket(dstSlotPos, srcItemVNum):
-					return True
-			elif "USE_PUT_INTO_BELT_SOCKET" == useType:
-				dstItemVNum = player.GetItemIndex(dstSlotPos)
+		if app.ENABLE_SOUL_BIND_SYSTEM and item.IsSealScroll(srcItemVNum):
+			return ("SEAL", anyTarget or bool(player.CanSealItem(srcItemVNum, player.INVENTORY, dstSlotPos)))
 
-				item.SelectItem(dstItemVNum)
+		if item.IsRefineScroll(srcItemVNum):
+			return ("REFINE", anyTarget or (not talismanrefine.RefineRejectionKey(srcItemVNum, dstItemVNum)
+				and player.REFINE_OK == player.CanRefine(srcItemVNum, dstSlotPos)))
 
-				if item.ITEM_TYPE_BELT == item.GetItemType():
-					return True
-			elif "USE_CHANGE_COSTUME_ATTR" == useType:
-				if self.__CanChangeCostumeAttrList(dstSlotPos):
-					return True
-			elif "USE_RESET_COSTUME_ATTR" == useType:
-				if self.__CanResetCostumeAttr(dstSlotPos):
-					return True
-			elif "USE_TIME_CHARGE_PER" == useType:
-				if self.__CanExtendTime(dstSlotPos):
-					return True
-			elif "USE_TIME_CHARGE_FIX" == useType:
-				if self.__CanExtendTime(dstSlotPos):
-					return True
+		if item.IsMetin(srcItemVNum) and (anyTarget or not item.IsMetin(dstItemVNum)):
+			return ("METIN", anyTarget or player.ATTACH_METIN_OK == player.CanAttachMetin(srcItemVNum, dstSlotPos))
 
-			elif app.ENABLE_AURA_SYSTEM and "USE_PUT_INTO_AURA_SOCKET" == useType:
-				dstItemVnum = player.GetItemIndex(dstSlotPos)
-				item.SelectItem(dstItemVnum)
-				if (item.ITEM_TYPE_COSTUME == item.GetItemType() and 
-					item.COSTUME_TYPE_AURA == item.GetItemSubType() and 
-					player.GetItemMetinSocket(dstSlotPos, player.ITEM_SOCKET_AURA_BOOST) == 0):
+		if item.IsDetachScroll(srcItemVNum):
+			return ("DETACH", anyTarget or player.DETACH_METIN_OK == player.CanDetach(srcItemVNum, dstSlotPos))
+
+		if item.IsKey(srcItemVNum):
+			return ("KEY", anyTarget or bool(player.CanUnlock(srcItemVNum, dstSlotPos)))
+
+		if (player.GetItemFlags(srcSlotPos) & ITEM_FLAG_APPLICABLE) == ITEM_FLAG_APPLICABLE:
+			return ("APPLY", True)
+
+		useType = item.GetUseType(srcItemVNum)
+		if useType in self.USE_TYPE_TUPLE:
+			return ("USE_TYPE", anyTarget or self.__CanUseTypeOnItem(useType, srcItemVNum, srcSlotPos, dstSlotPos))
+
+		if app.ENABLE_67TH_BONUS and srcItemVNum == item.ADD_RARE_ATTRIBUTE_VNUM:
+			return ("RARE_ATTR", anyTarget or bool(self.__CanAddRareItemAttr(dstSlotPos)))
+
+		if app.ENABLE_67TH_BONUS and srcItemVNum == item.CHANGE_RARE_ATTRIBUTE_VNUM:
+			return ("RARE_ATTR", anyTarget or bool(self.__CanChangeRareItemAttrList(dstSlotPos)))
+
+		if app.ENABLE_AURA_SYSTEM and (srcItemVNum == 49980 or srcItemVNum == 49970):
+			return ("AURA", anyTarget or bool(self.CanUseToAura(dstSlotPos)))
+
+		if app.ENABLE_CHANGE_LOOK_SYSTEM and item.IsChangeLookClearScroll(srcItemVNum):
+			if anyTarget or player.CanChangeLookClearItem(srcItemVNum, player.INVENTORY, dstSlotPos):
+				return ("CHANGE_LOOK_CLEAR", True)
+
+		if app.ENABLE_GROWTH_PET_SYSTEM:
+			if anyTarget:
+				if self.__IsUsablePetItem(srcItemVNum):
+					return ("PET", True)
+			elif self.__CanUseSrcPetItemToDstPetItem(srcItemVNum, srcSlotPos, dstSlotPos):
+				return ("PET", True)
+
+		return (None, False)
+
+	def __CanUseTypeOnItem(self, useType, srcItemVNum, srcSlotPos, dstSlotPos):
+		if "USE_CLEAN_SOCKET" == useType:
+			if self.__CanCleanBrokenMetinStone(dstSlotPos):
+				return True
+		elif "USE_CHANGE_ATTRIBUTE" == useType:
+			# The server bonus catalog names the item family of every changer.
+			if bonuscatalog.CanUseChanger(srcItemVNum, player.GetItemIndex(dstSlotPos),
+					player.IsEquipmentSlot(dstSlotPos), self.__HasItemBonus(dstSlotPos)):
+				return True
+		elif "USE_ADD_ACCESSORY_SOCKET" == useType:
+			if self.__CanAddAccessorySocket(dstSlotPos):
+				return True
+		elif "USE_PUT_INTO_ACCESSORY_SOCKET" == useType:
+			if self.__CanPutAccessorySocket(dstSlotPos, srcItemVNum):
+				return True
+		elif "USE_PUT_INTO_BELT_SOCKET" == useType:
+			dstItemVNum = player.GetItemIndex(dstSlotPos)
+
+			item.SelectItem(dstItemVNum)
+
+			if item.ITEM_TYPE_BELT == item.GetItemType():
+				return True
+		elif "USE_CHANGE_COSTUME_ATTR" == useType:
+			if self.__CanChangeCostumeAttrList(dstSlotPos):
+				return True
+		elif "USE_RESET_COSTUME_ATTR" == useType:
+			if self.__CanResetCostumeAttr(dstSlotPos):
+				return True
+		elif "USE_TIME_CHARGE_PER" == useType:
+			if self.__CanExtendTime(dstSlotPos):
+				return True
+		elif "USE_TIME_CHARGE_FIX" == useType:
+			if self.__CanExtendTime(dstSlotPos):
+				return True
+
+		elif app.ENABLE_AURA_SYSTEM and "USE_PUT_INTO_AURA_SOCKET" == useType:
+			dstItemVnum = player.GetItemIndex(dstSlotPos)
+			item.SelectItem(dstItemVnum)
+			if (item.ITEM_TYPE_COSTUME == item.GetItemType() and
+				item.COSTUME_TYPE_AURA == item.GetItemSubType() and
+				player.GetItemMetinSocket(dstSlotPos, player.ITEM_SOCKET_AURA_BOOST) == 0):
+				return True
+
+		elif app.ENABLE_PERMA_ACCESSORY and useType == "USE_REMOVE_PERMANENT_ORE":
+			if self.__CanRemovePermanentOre(dstSlotPos):
+				return True
+
+		elif app.ENABLE_ATTR_6TH_7TH and "USE_CHANGE_ATTRIBUTE2" == useType:
+			# A talisman heart rerolls only with its own enchant.
+			if (bonuscatalog.TargetKind(player.GetItemIndex(dstSlotPos)) != "talisman_heart"
+					and self.__CanChangeItemAttr67List(player.INVENTORY, dstSlotPos)):
+				return True
+
+		elif app.ENABLE_REFINE_ELEMENT_SYSTEM:
+			if "USE_ELEMENT_UPGRADE" == useType:
+				if uiRefine.RefineElementDialog.CanRefineElementUpgrade(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
 					return True
-
-				else:
-					dstItemVnum = player.GetItemIndex(dstSlotPos)
-					item.SelectItem(dstItemVnum)
-					if item.ITEM_TYPE_COSTUME == item.GetItemType() and item.COSTUME_TYPE_AURA == item.GetItemSubType():
-						if player.GetItemMetinSocket(dstSlotPos, player.ITEM_SOCKET_AURA_BOOST) == 0:
-							return True
-
-			elif app.ENABLE_PERMA_ACCESSORY and useType == "USE_REMOVE_PERMANENT_ORE":
-				if self.__CanRemovePermanentOre(dstSlotPos):
+			elif "USE_ELEMENT_DOWNGRADE" == useType:
+				if uiRefine.RefineElementDialog.CanRefineElementDowngrade(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
 					return True
-
-			elif app.ENABLE_ATTR_6TH_7TH and "USE_CHANGE_ATTRIBUTE2" == useType:
-				if self.__CanChangeItemAttr67List(player.INVENTORY, dstSlotPos):
+			elif "USE_ELEMENT_CHANGE" == useType:
+				if uiRefine.RefineElementChangeDialog.CanRefineElementChange(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
 					return True
-
-			elif app.ENABLE_REFINE_ELEMENT_SYSTEM:
-				if "USE_ELEMENT_UPGRADE" == useType:
-					if uiRefine.RefineElementDialog.CanRefineElementUpgrade(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
-						return True
-				elif "USE_ELEMENT_DOWNGRADE" == useType:
-					if uiRefine.RefineElementDialog.CanRefineElementDowngrade(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
-						return True
-				elif "USE_ELEMENT_CHANGE" == useType:
-					if uiRefine.RefineElementChangeDialog.CanRefineElementChange(player.INVENTORY, srcSlotPos, player.INVENTORY, dstSlotPos, False, False):
-						return True
 
 		return False
 
@@ -2738,23 +2819,10 @@ class InventoryWindow(ui.ScriptWindow):
 
 		return False
 
-	def __CanChangeItemAttrList(self, dstSlotPos):
-		dstItemVNum = player.GetItemIndex(dstSlotPos)
-		if dstItemVNum == 0:
-			return False
-
-		item.SelectItem(dstItemVNum)
-
-		if not item.GetItemType() in (item.ITEM_TYPE_WEAPON, item.ITEM_TYPE_ARMOR):
-			return False
-
-		attrCount = 0
+	def __HasItemBonus(self, dstSlotPos):
 		for i in range(player.METIN_SOCKET_MAX_NUM):
 			if player.GetItemAttribute(dstSlotPos, i)[0] != 0:
-				attrCount += 1
-
-		if attrCount > 0:
-			return True
+				return True
 
 		return False
 
@@ -2857,48 +2925,6 @@ class InventoryWindow(ui.ScriptWindow):
 				return True
 
 			return False
-
-	def __CanAddItemAttr(self, dstSlotPos):
-		dstItemVNum = player.GetItemIndex(dstSlotPos)
-		if dstItemVNum == 0:
-			return False
-
-		item.SelectItem(dstItemVNum)
-
-		if not item.GetItemType() in (item.ITEM_TYPE_WEAPON, item.ITEM_TYPE_ARMOR):
-			return False
-
-		attrCount = 0
-		for i in range(player.METIN_SOCKET_MAX_NUM):
-			# 2020.02.13.Owsap - Fix Attribute Count
-			if player.GetItemAttribute(dstSlotPos, i)[0] != 0:
-				attrCount += 1
-
-		if attrCount < 4:
-			return True
-
-		return False
-
-	# 2020.02.13.Owsap - Fix Attribute Count
-	def __CanAddItemAttr2(self, dstSlotPos):
-		dstItemVNum = player.GetItemIndex(dstSlotPos)
-		if dstItemVNum == 0:
-			return False
-
-		item.SelectItem(dstItemVNum)
-
-		if not item.GetItemType() in (item.ITEM_TYPE_WEAPON, item.ITEM_TYPE_ARMOR):
-			return False
-
-		attrCount = 0
-		for i in range(player.METIN_SOCKET_MAX_NUM):
-			if player.GetItemAttribute(dstSlotPos, i)[0] != 0:
-				attrCount += 1
-
-		if attrCount == 4:
-			return True
-
-		return False
 
 	def __CanChangeCostumeAttrList(self, dstSlotPos):
 		dstItemVNum = player.GetItemIndex(dstSlotPos)
@@ -3076,6 +3102,11 @@ class InventoryWindow(ui.ScriptWindow):
 						chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.ACCE_NOT_SEALITEM)
 						return
 
+				# the absorb window takes only a sash and a weapon (armour stays, with a message)
+				if self.wndAcceAbsorption and self.wndAcceAbsorption.IsShow() and \
+						self.wndAcceAbsorption.RefuseMaterial(player.INVENTORY, slotIndex, 255):
+					return
+
 				acce.Add(player.INVENTORY, slotIndex, 255)
 				return
 
@@ -3118,6 +3149,13 @@ class InventoryWindow(ui.ScriptWindow):
 		# Ctrl keeps the wiki lookup above; any other right-click while an
 		# exchange is open offers the item instead of using it (ALTHEA-601).
 		if exchangequickadd.TryAddInventoryItem(self.interface, slotIndex):
+			return
+
+		if craftingquickadd.TryAddInventoryItem(self.interface, slotIndex):
+			return
+
+		# With "Můj obchod" open the item goes to the first free shop slot.
+		if virtualmarketquickadd.TryAddInventoryItem(self.interface, slotIndex):
 			return
 
 		if app.ENABLE_AURA_SYSTEM:
@@ -3166,6 +3204,8 @@ class InventoryWindow(ui.ScriptWindow):
 				return
 
 		if app.ENABLE_SHOW_CHEST_DROP:
+			if not chestpreview.CanPreview(ItemVNum):
+				return
 			if player.GetItemTypeBySlot(slotIndex) in (
 					item.ITEM_TYPE_GIFTBOX, item.ITEM_TYPE_GACHA,
 					item.ITEM_TYPE_TREASURE_BOX):
@@ -3176,6 +3216,11 @@ class InventoryWindow(ui.ScriptWindow):
 		# ALTHEA-641: a bow no longer needs arrows or a quiver to shoot.
 		if virtualquiver.RefusesEquip(slotIndex):
 			virtualquiver.NotifyNoLongerNeeded()
+			return
+
+		# Exorcism Scroll and Concentrated Reading are used only in
+		# the skill reading windows; a right click does nothing and sends nothing.
+		if inventoryshortcutpolicy.IsReadingSupportItem(ItemVNum):
 			return
 
 		if item.IsFlag(item.ITEM_FLAG_CONFIRM_WHEN_USE):
@@ -3199,7 +3244,10 @@ class InventoryWindow(ui.ScriptWindow):
 		self.__SendUseItemPacket(self.questionDialog.slotIndex)
 		self.OnCloseQuestionDialog()
 
-	def __SendUseItemToItemPacket(self, srcSlotPos, dstSlotPos):
+	def __SendUseItemToItemPacket(self, srcSlotPos, dstSlotPos, serviceCertificate=False):
+		if inventoryshortcutpolicy.IsReadingSupportItem(player.GetItemIndex(srcSlotPos)):
+			return
+
 		if self.IsVirtualMarketDraftSlot(srcSlotPos) or self.IsVirtualMarketDraftSlot(dstSlotPos):
 			self.__ShowVirtualMarketDraftLocked()
 			return
@@ -3212,9 +3260,17 @@ class InventoryWindow(ui.ScriptWindow):
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.DONT_USE_ITEM_WHEN_SHOW_CONFIRM)
 			return
 
+		if serviceCertificate:
+			import uiserviceitem
+			uiserviceitem.QueueCertificate(srcSlotPos, dstSlotPos)
+			return
+
 		net.SendItemUseToItemPacket(srcSlotPos, dstSlotPos)
 
 	def __SendUseItemPacket(self, slotPos):
+		if inventoryshortcutpolicy.IsReadingSupportItem(player.GetItemIndex(slotPos)):
+			return
+
 		if self.IsVirtualMarketDraftSlot(slotPos):
 			self.__ShowVirtualMarketDraftLocked()
 			return
@@ -3380,7 +3436,14 @@ class InventoryWindow(ui.ScriptWindow):
 		## 0 or 1
 		return self.inventoryPageIndex
 
-	def OverInToolTip(self, arg):
+	def OverInToolTip(self, arg, widget=None):
+		if widget is not None:
+			# R1 look: the one R1 hint above the icon (Yang, Gemy), as every one-line hint.
+			import uir1
+			if uir1.UseR1():
+				self.toolTip.Hide()
+				uir1.ShowHint(None, widget, arg)
+				return
 		arglen = len(str(arg))
 		pos_x, pos_y = wndMgr.GetMousePosition()
 
@@ -3391,14 +3454,18 @@ class InventoryWindow(ui.ScriptWindow):
 		self.toolTip.Show()
 
 	def OverOutToolTip(self):
+		import uir1
+		for widget in (getattr(self, "wndMoneyIcon", None), getattr(self, "wndGemIcon", None)):
+			if widget is not None:
+				uir1.HideHint(widget)
 		self.toolTip.Hide()
 
 	def EventProgress(self, event_type, idx):
 		if "mouse_over_in" == str(event_type):
 			if idx == 0:
-				self.OverInToolTip(localeInfo.CHEQUE_SYSTEM_UNIT_YANG)
+				self.OverInToolTip(localeInfo.CHEQUE_SYSTEM_UNIT_YANG, getattr(self, "wndMoneyIcon", None))
 			elif app.ENABLE_GEM_SYSTEM and idx == 1 :
-				self.OverInToolTip(localeInfo.GEM_SYSTEM_NAME)
+				self.OverInToolTip(localeInfo.GEM_SYSTEM_NAME, getattr(self, "wndGemIcon", None))
 			else:
 				return
 		elif "mouse_over_out" == str(event_type):
@@ -3660,6 +3727,7 @@ class InventoryWindow(ui.ScriptWindow):
 
 		def __CanUsePetBagItem(self, slotIndex):
 			if not player.GetItemMetinSocket(player.INVENTORY, slotIndex, 2):
+				chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.PET_BAG_EMPTY_HINT)
 				return False
 				
 			(limitType, limitValue) = item.GetLimit(0)

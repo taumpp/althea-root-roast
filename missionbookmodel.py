@@ -42,6 +42,8 @@ class MissionState(object):
         if not 1 <= mission <= len(rows) or ready not in (0, 1):
             return False
         objectives = rows[mission - 1][1]
+        if not objectives:
+            return False
         counts = (p1, p2, p3)
         if any(count < 0 or count > (objectives[i][2] if i < len(objectives) else 0)
                for i, count in enumerate(counts)):

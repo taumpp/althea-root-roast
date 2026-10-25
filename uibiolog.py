@@ -808,7 +808,7 @@ class BiologWindow(ui.Window):
 		if data[14]:
 			return (
 				_Text("BIO_REWARD_CHOICE_COUNT", u"Výběr 1 ze 3"),
-				_Text("BIO_REWARD_CHOICE_TYPES", u"HP / Obrana / Útok"),
+				_Text("BIO_REWARD_CHOICE_TYPES", u"ZB / Obrana / Útok"),
 			)
 		rewards = [(data[offset], data[offset + 1]) for offset in (6, 8, 10, 12) if data[offset]]
 		if not rewards:
@@ -989,7 +989,7 @@ class BiologWindow(ui.Window):
 				iconVnum = bio_data[self.bioLevel][1]
 			accepted = interface.PushBiologReadyNotification(
 				_Text("BIO_READY_NOTIFICATION_TITLE", u"Biologický výzkum"),
-				_Text("BIO_READY_NOTIFICATION_MESSAGE", u"Můžete znovu odevzdávat"),
+				_Text("BIO_READY_NOTIFICATION_MESSAGE", u"Můžeš znovu odevzdávat"),
 				iconVnum,
 				self.cooldownSignature,
 			)
@@ -1135,7 +1135,8 @@ class BiologWindow(ui.Window):
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.BIO_CANNOT_ASSIGNMENT)
 			return
 		net.SendChatPacket("/bio mission %d %d" % (
-			self.checkBoxElixirPercent.IsDown(), self.checkBoxElixirTime.IsDown(),
+			self.mode == "mission" and self.checkBoxElixirPercent.IsDown(),
+			self.mode == "mission" and self.checkBoxElixirTime.IsDown(),
 		))
 
 	def ClickGift(self, index):

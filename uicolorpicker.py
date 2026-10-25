@@ -35,6 +35,8 @@ def HexToRgb(value):
 class ColorPickerDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'confirmButton')
 		self.isLoaded = False
 		self.selectedRgb = 0
 		self.onConfirm = None

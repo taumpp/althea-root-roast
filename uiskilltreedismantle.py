@@ -14,6 +14,7 @@ SLOT_IMAGE = "d:/ymir work/ui/public/Slot_Base.sub"
 INFO_BUTTON_ICON = "d:/ymir work/ui/game/skill_tree_v2/info_book.png"
 INFO_VISIBLE_ROWS = 15
 INFO_ROW_HEIGHT = 20
+INFO_FOOTER_KEY = "info_footer"
 
 
 def _IsInventorySource(slotType, cell):
@@ -60,11 +61,23 @@ def _Button(parent, x, y, size, value, callback):
 	return button
 
 
+def _BuildInfoR1(window):
+	"""The R1 look of the values window (uiskilltreeinfor1) or None for the original look ("Starý vzhled")."""
+	try:
+		import uiskilltreeinfor1
+	except Exception:
+		return None
+	return uiskilltreeinfor1.Build(window)
+
+
 class SkillTreePointInfo(ui.BoardWithTitleBar):
+	footerKey = INFO_FOOTER_KEY
+
 	def __init__(self, owner):
 		self.owner = _OwnerProxy(owner)
 		self.sources = []
 		self.firstRow = 0
+		self.r1 = None
 		ui.BoardWithTitleBar.__init__(self)
 		self.AddFlag("movable")
 		self.AddFlag("float")
@@ -122,6 +135,7 @@ class SkillTreePointInfo(ui.BoardWithTitleBar):
 		self.scroll.SetMiddleBarSize(float(INFO_VISIBLE_ROWS) / 23.0)
 		self.scroll.Show()
 		ui.BoardWithTitleBar.Hide(self)
+		self.r1 = _BuildInfoR1(self)
 
 	def Open(self, sources):
 		# The catalog groups four sigils, fourteen dungeon/boss drops, then five
@@ -161,7 +175,7 @@ class SkillTreePointInfo(ui.BoardWithTitleBar):
 			pointText.SetText(skilltreelocale.FormatPointAmount(points))
 			pointText.Show()
 			line.Show()
-		self.footer.SetText(skilltreelocale.GetDismantleText("info_footer") % (
+		self.footer.SetText(skilltreelocale.GetDismantleText(self.footerKey) % (
 			self.firstRow + 1,
 			min(self.firstRow + INFO_VISIBLE_ROWS, len(self.sources)),
 			len(self.sources)))
@@ -185,6 +199,9 @@ class SkillTreePointInfo(ui.BoardWithTitleBar):
 
 	def Destroy(self):
 		self.Close()
+		if self.r1:
+			self.r1.Destroy()
+		self.r1 = None
 		self.owner = None
 
 	def OnPressEscapeKey(self):
@@ -201,21 +218,23 @@ class SkillTreeDismantleWindow(ui.BoardWithTitleBar):
 		self.lastRejected = False
 		self.info = None
 		ui.BoardWithTitleBar.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.AddFlag("movable")
 		self.AddFlag("float")
-		self.SetSize(150, 195)
+		self.SetSize(250, 247)
 		self.SetTitleName(skilltreelocale.GetDismantleText("title"))
 		self.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.body = ui.Bar()
 		self.body.SetParent(self)
 		self.body.SetPosition(7, 29)
-		self.body.SetSize(136, 159)
+		self.body.SetSize(236, 211)
 		self.body.SetColor(0xff080809)
 		self.body.AddFlag("not_pick")
 		self.body.Show()
 		self.grid = ui.GridSlotWindow()
 		self.grid.SetParent(self)
-		self.grid.SetPosition(27, 45)
+		self.grid.SetPosition(77, 45)
 		self.grid.ArrangeSlot(0, 3, 3, 32, 32, 0, 0)
 		self.grid.SetSlotBaseImage(SLOT_IMAGE, 1, 1, 1, 1)
 		self.grid.SetSelectEmptySlotEvent(ui.__mem_func__(self.SelectEmptySlot))
@@ -223,18 +242,27 @@ class SkillTreeDismantleWindow(ui.BoardWithTitleBar):
 		self.grid.SetUnselectItemSlotEvent(ui.__mem_func__(self.RemoveSlot))
 		self.grid.SetUseSlotEvent(ui.__mem_func__(self.RemoveSlot))
 		self.grid.Show()
-		self.sumText = _Text(self, 75, 143, u"0", True)
+		self.sumText = _Text(self, 125, 143, u"0", True)
 		self.sumText.SetPackedFontColor(0xffd4ae6b)
-		self.infoButton = _Button(self, 8, 166, "43x21", u"", self.OpenInfo)
+		self.balanceText = _Text(self, 125, 161, u"", True)
+		self.capacityText = _Text(self, 125, 179, u"", True)
+		self.statusText = _Text(self, 125, 197, u"", True)
+		self.statusText.SetPackedFontColor(0xffef7070)
+		self.infoButton = _Button(self, 58, 218, "43x21", u"", self.OpenInfo)
 		self.infoIcon = ui.ImageBox()
 		self.infoIcon.SetParent(self.infoButton)
 		self.infoIcon.SetPosition(12, 1)
 		self.infoIcon.LoadImage(INFO_BUTTON_ICON)
 		self.infoIcon.AddFlag("not_pick")
 		self.infoIcon.Show()
-		self.acceptButton = _Button(self, 54, 166, "88x21",
+		self.acceptButton = _Button(self, 104, 218, "88x21",
 			skilltreelocale.GetDismantleText("action"), self.Accept)
 		ui.BoardWithTitleBar.Hide(self)
+		try:
+			import uir1frame
+			uir1frame.Dress(self)
+		except Exception:
+			pass
 
 	def Open(self):
 		if not self.IsShow():
@@ -262,15 +290,32 @@ class SkillTreeDismantleWindow(ui.BoardWithTitleBar):
 			points += sources[vnum] * count
 		self.grid.RefreshSlot()
 		self.canAccept = bool(points and not self.busy and self.owner.CanDismantle(points))
-		if self.lastRejected:
-			self.sumText.SetText(skilltreelocale.GetDismantleText("rejected_short"))
-		elif self.busy:
-			self.sumText.SetText(skilltreelocale.GetDismantleText("pending_short"))
-		elif points and not self.canAccept:
-			self.sumText.SetText(skilltreelocale.GetDismantleText("unavailable_short"))
+		self.sumText.SetText(skilltreelocale.GetDismantleText("summary") %
+			skilltreelocale.FormatPointAmount(points))
+		budget = self.owner.GetDismantlePointBudget()
+		capacity = 0
+		if budget is not None:
+			balance, cap = budget
+			capacity = max(0, cap - balance)
+			self.balanceText.SetText(skilltreelocale.GetDismantleText("balance") % (
+				skilltreelocale.FormatPointAmount(balance), skilltreelocale.FormatPointAmount(cap)))
+			self.capacityText.SetText(skilltreelocale.GetDismantleText("capacity") %
+				skilltreelocale.FormatPointAmount(capacity))
+			self.balanceText.Show()
+			self.capacityText.Show()
 		else:
-			self.sumText.SetText(skilltreelocale.GetDismantleText("summary") %
-				skilltreelocale.FormatPointAmount(points))
+			self.balanceText.Hide()
+			self.capacityText.Hide()
+		if self.busy:
+			self.statusText.SetText(skilltreelocale.GetDismantleText("pending_short"))
+		elif budget is not None and points > capacity:
+			self.statusText.SetText(skilltreelocale.GetDismantleText("cap_exceeded"))
+		elif self.lastRejected:
+			self.statusText.SetText(skilltreelocale.GetDismantleText("rejected_short"))
+		elif points and not self.canAccept:
+			self.statusText.SetText(skilltreelocale.GetDismantleText("unavailable_short"))
+		else:
+			self.statusText.SetText(u"")
 		if self.canAccept:
 			self.acceptButton.Enable()
 		else:

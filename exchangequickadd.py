@@ -174,7 +174,7 @@ def TryAddInventoryItem(interface, slotIndex):
 
 	if exchange.GetAcceptFromTarget():
 		_Info(_Text("EXCHANGE_QUICK_ADD_PARTNER_ACCEPTED",
-			"Protistrana už výměnu potvrdila, nyní nelze přidat předmět."))
+			"Druhá strana už výměnu potvrdila. Předmět teď přidat nejde."))
 		return True
 
 	if player.IsAntiFlagBySlot(slotIndex, item.ANTIFLAG_GIVE) or _IsSealed(slotIndex):

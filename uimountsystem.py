@@ -1,3 +1,4 @@
+import dungeonequipmentbinding
 import app
 from mountexpeditiontexts import ExpeditionTexts
 import chat
@@ -12,6 +13,7 @@ import uiScriptLocale
 import uitooltip
 import WikiRenderTarget
 import uimountk1 as K1
+import uir1
 from uimountfeed import MountFeedWindow, InventoryStack, IsInventorySource
 
 from uimountmodel import MountSystemViewModel, ELEMENT_NAMES, ELEMENT_ASSETS, GEAR_BONUSES
@@ -24,6 +26,7 @@ from uimountwidgets import (
 )
 
 
+# Wear cell 21 holds the lion seal (owner 16. 10.); the mount costume is cell 56.
 MOUNT_SKIN_WEAR_CELL = 21
 GEAR_SLOT_COUNT = 5
 MOUNT_LAYOUT = {
@@ -65,6 +68,7 @@ def _Locale(key, fallback):
 	return getattr(uiScriptLocale, key, fallback)
 
 
+
 class MountSystemWindow(ui.BoardWithTitleBar):
 	WINDOW_WIDTH = 500
 	WINDOW_HEIGHT = 500
@@ -75,11 +79,17 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 	def __init__(self):
 		# Window.__init__ dispatches to our Hide before building the board.
 		self.feedWindow = None
+		self.dungeonLockOverlays = {}
 		self.tooltipItem = None
+		# tooltipItem is the interface-wide item tooltip; the inventory and
+		# other windows use it too, so only hide it when this window showed it.
+		self.ownsItemToolTip = False
 		self.infoTooltip = None
 		self.renderIndex = None
 		self.renderView = None
 		self.taskRows = []
+		self.r1 = None
+		self.r1Failed = False
 		ui.BoardWithTitleBar.__init__(self)
 		self.AddFlag("movable")
 		self.AddFlag("float")
@@ -98,6 +108,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		self.snapshotPending = False
 		self.equipmentRefreshSignature = None
 		self.infoTooltip = uitooltip.ToolTip(260)
+		self.__R1InfoTooltip()
 		self.slotRows = {}
 		self.elementRows = []
 		self.displayedElementId = None
@@ -121,7 +132,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		)
 		self.loadingText = K1.Text(
 			self, self.WINDOW_WIDTH // 2, 38,
-			_Locale("MOUNT_SYSTEM_LOADING", u"Načítání…"),
+			_Locale("MOUNT_SYSTEM_LOADING", u"Načítání..."),
 			size=11, color=K1.MUTED, align="center",
 		)
 		self.loadingText.Hide()
@@ -201,16 +212,16 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			self.equipmentSlots[name] = slot
 
 		self.progressSection = K1.Section(self.mountPage, 284, 18, 200, u"Duše mounta")
-		self.__Label(self.mountPage, 342, 106, u"Pečeť / vzhled", color=K1.GOLD, bold=True)
-		for x, label in ((64, u"Sedlo · Lv. 5"), (157, u"Podkovy · Lv. 10"), (250, u"Uzda · Lv. 15"), (343, u"Zbroj · Lv. 20"), (436, u"Jádro · Lv. 25")):
+		self.__Label(self.mountPage, 342, 106, u"Pečeť lva", color=K1.GOLD, bold=True)
+		for x, label in ((64, u"Sedlo | Lv. 5"), (157, u"Podkovy | Lv. 10"), (250, u"Uzda | Lv. 15"), (343, u"Zbroj | Lv. 20"), (436, u"Jádro | Lv. 25")):
 			self.__Label(self.mountPage, x, 437, label, size=11, align="center")
 		for y in (132, 243):
 			K1.Image(self.mountPage, 298, y - 23, "divider_172x1.png")
 		K1.Image(self.mountPage, 298, 123, "level_48x64.png")
 		self.__Label(self.mountPage, 315, 166, u"Lv.", size=11, color=K1.GOLD, align="center")
-		self.soulLevel = self.__Label(self.mountPage, 315, 188, u"—", size=18, color=K1.GOLD, align="center", bold=True)
+		self.soulLevel = self.__Label(self.mountPage, 315, 188, u"-", size=18, color=K1.GOLD, align="center", bold=True)
 		self.__Label(self.mountPage, 356, 155, u"Zkušenosti", color=K1.GOLD, bold=True)
-		self.soulPercent = self.__Label(self.mountPage, 470, 209, u"—", size=17, color=K1.BLUE, align="right", bold=True)
+		self.soulPercent = self.__Label(self.mountPage, 470, 209, u"-", size=17, color=K1.BLUE, align="right", bold=True)
 		self.soulSegments = []
 		for index in range(4):
 			segment = K1.SoulOrb(
@@ -218,16 +229,16 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 				index + 1,
 			)
 			self.soulSegments.append(segment)
-		self.soulExp = self.__Label(self.mountPage, 298, 229, u"—", color=K1.BLUE)
+		self.soulExp = self.__Label(self.mountPage, 298, 229, u"-", color=K1.BLUE)
 		self.__Label(self.mountPage, 298, 255, u"Rychlost mounta", size=11, color=K1.GOLD)
-		self.soulSpeed = self.__Label(self.mountPage, 470, 255, u"—", color=K1.GREEN, align="right")
-		self.__Label(self.mountPage, 298, 276, u"2 % / úroveň · při jízdě", size=11, color=K1.MUTED)
+		self.soulSpeed = self.__Label(self.mountPage, 470, 255, u"-", color=K1.GREEN, align="right")
+		self.__Label(self.mountPage, 298, 276, u"2% / úroveň | při jízdě", size=11, color=K1.MUTED)
 		self.__Label(self.mountPage, 298, 302, u"Další výbava", color=K1.GOLD)
 		self.unlockRows = []
 		for y in (324,):
 			self.unlockRows.append((
 				self.__Label(self.mountPage, 298, y, u"", color=K1.MUTED),
-				self.__Label(self.mountPage, 470, y, u"—", color=K1.MUTED, align="right"),
+				self.__Label(self.mountPage, 470, y, u"-", color=K1.MUTED, align="right"),
 			))
 		feedX, feedY, unusedWidth, unusedHeight = MOUNT_LAYOUT["feed_action"]
 		self.feedButton = SemanticButton(
@@ -242,7 +253,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		for index in range(6):
 			row = K1.ElementRow(self.elementsPage, lambda index=index: self.__ToggleElement(index))
 			row.SetPosition(16, 50 + index * 58)
-			row.SetData({"element_id": index, "name": ELEMENT_NAMES[index], "icon": ELEMENT_ASSETS[index], "state": "normal", "bonus_text": u"—", "opened": False})
+			row.SetData({"element_id": index, "name": ELEMENT_NAMES[index], "icon": ELEMENT_ASSETS[index], "state": "normal", "bonus_text": u"-", "opened": False})
 			self.elementRows.append(row)
 		self.coreInfo = ui.Window()
 		self.coreInfo.SetParent(self.elementsPage)
@@ -254,12 +265,12 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		K1.Surface(self.coreInfo, 0, 0, 218, 57)
 		CreateImage(self.elementsPage, 25, 416, "slot_hint_prismatic_32x32.png")
 		self.__Label(self.elementsPage, 68, 447, u"Prizmatické jádro", color=K1.GOLD, bold=True)
-		self.overallCount = self.__Label(self.elementsPage, 68, 469, u"—", size=11, color=K1.MUTED)
+		self.overallCount = self.__Label(self.elementsPage, 68, 469, u"-", size=11, color=K1.MUTED)
 		K1.Surface(self.elementsPage, 242, 50, 242, 411)
 		self.detailBackdrop = K1.Image(self.elementsPage, 245, 53, "detail_fire_236x111.png")
 		self.detailIcon = CreateImage(self.elementsPage, 257, 77, "element_fire_24.png")
 		self.detailBonusTitle = self.__Label(self.elementsPage, 293, 111, u"Bonus větve", color=K1.GOLD)
-		self.detailBonus = self.__Label(self.elementsPage, 467, 155, u"—", size=23, color=K1.BLUE, align="right", bold=True)
+		self.detailBonus = self.__Label(self.elementsPage, 467, 155, u"-", size=23, color=K1.BLUE, align="right", bold=True)
 		self.detailProgress = K1.Progress(self.elementsPage, 258, 149, 210)
 		self.tasksIcon = K1.Image(self.elementsPage, 258, 176, "glyph_tasks_24.png")
 		self.tasksHeading = self.__Label(self.elementsPage, 290, 215, u"ÚKOLY VĚTVE", color=K1.GOLD, bold=True)
@@ -305,7 +316,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			self.mountPage.Hide()
 			self.elementsPage.Show()
 			self.SetTitleName(
-				_Locale("MOUNT_SYSTEM_ELEMENTS_TITLE", u"Elementární výpravy")
+				_Locale("MOUNT_SYSTEM_ELEMENTS_TITLE", u"Živelné výpravy")
 			)
 			self.__HideRenderTarget()
 		else:
@@ -366,7 +377,14 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			self.pendingSequence = None
 		self.snapshotPending = False
 		self.loadingText.Hide()
-		self.__OverOutEquipment()
+		# the soul level-up of the last snapshot (uimountmodel; owner 21. 10. 2026: the emptied bar looked like lost EXP)
+		levelUp = getattr(self.model, "soul_level_up", 0)
+		if levelUp:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, _Locale(
+				"MOUNT_SYSTEM_SOUL_LEVEL_UP", u"Duše mounta: úroveň %d") % levelUp)
+		# Snapshots also follow kills anywhere (expedition progress), so a
+		# tooltip the inventory shows under a resting cursor must stay.
+		self.__ReleaseOwnedToolTips()
 		self.__RefreshMountPage()
 		self.__RefreshElementsPage()
 		self.__SetInteractive(True)
@@ -379,6 +397,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 	def RefreshEquipment(self):
 		if not self.IsShow() or not self.__CanMutate():
 			return
+		self.__RefreshDungeonLocks()
 		wearCells = (MOUNT_SKIN_WEAR_CELL,) + tuple(range(46, 46 + GEAR_SLOT_COUNT))
 		actual = tuple(player.GetItemIndex(self.__GlobalWearSlot(cell)) for cell in wearCells)
 		snapshot = (self.model.skin_vnum,) + tuple(row["item_vnum"] for row in self.model.gear)
@@ -413,6 +432,13 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			value.SetText(u"Odemčeno")
 			K1.SetColor(value, K1.GREEN)
 
+	def __RefreshDungeonLocks(self):
+		for name, widget in self.equipmentSlots.items():
+			wear = MOUNT_SKIN_WEAR_CELL if name == "skin" else 46 + GEAR_LAYOUT_TO_SUBTYPE[name]
+			cell = self.__GlobalWearSlot(wear)
+			dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, widget.slot,
+				0, cell, player.GetItemIndex(cell))
+
 	def __RefreshSlots(self):
 		skinRow = {
 			"item_vnum": self.model.skin_vnum,
@@ -426,6 +452,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			row = self.model.gear[subtype]
 			self.equipmentSlots[name].SetRow(row)
 			self.slotRows[name] = row
+		self.__RefreshDungeonLocks()
 		if self.model.gear and not self.model.gear[4]["empty"]:
 			self.model.set_prismatic_equipped(True)
 
@@ -460,7 +487,8 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		self.detailProgress.SetValue(selected["bonus_basis_points"], 2000)
 		for task in selected["tasks"]:
 			taskId = task["task_id"]
-			taskRow = K1.TaskRow(self.taskViewport.content, lambda taskId=taskId: self.__SubmitTask(taskId))
+			rowClass = getattr(self, "taskRowClass", None) or K1.TaskRow       # R1 rows while uimountr1 is applied
+			taskRow = rowClass(self.taskViewport.content, lambda taskId=taskId: self.__SubmitTask(taskId))
 			taskRow.SetData(task, self.__TaskName(task), len(self.taskRows) + 1)
 			taskRow.SetEnabled(self.capability and self.pendingSequence is None and self.model.revision >= 0)
 			self.taskRows.append(taskRow)
@@ -564,6 +592,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		globalSlot = self.__GlobalWearSlot(wearCell)
 		if player.GetItemIndex(globalSlot):
 			self.tooltipItem.SetInventoryItem(globalSlot, player.INVENTORY, appendShortcuts=False)
+			self.ownsItemToolTip = True
 		elif key != "skin" and self.infoTooltip:
 			self.infoTooltip.ClearToolTip()
 			self.infoTooltip.AppendTextLine(row["name"])
@@ -574,8 +603,15 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 
 	def __OverOutEquipment(self):
 		self.__HideInfo()
+		self.ownsItemToolTip = False
 		if self.tooltipItem:
 			self.tooltipItem.HideToolTip()
+
+	def __ReleaseOwnedToolTips(self):
+		self.__HideInfo()
+		if getattr(self, "ownsItemToolTip", False) and self.tooltipItem:
+			self.tooltipItem.HideToolTip()
+		self.ownsItemToolTip = False
 
 	def __OverInCore(self):
 		self.infoTooltip.ClearToolTip()
@@ -585,6 +621,17 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		for bonus in GEAR_BONUSES[4]:
 			self.infoTooltip.AppendTextLine(bonus)
 		self.infoTooltip.ShowToolTip()
+
+	def __R1InfoTooltip(self):
+		"""In the R1 look the info box of the locked slots and the prismatic core is the one R1 hint
+		(uir1.HintTooltip: the name above the vein, long lines wrapped inside its width - the 260 px board let
+		"Nasazení vyžaduje maximální úrovně Duše a dokončení všech výprav." run past both edges)."""
+		try:
+			import uir1
+			if uir1.UseR1():
+				self.infoTooltip = uir1.HintTooltip()
+		except Exception:
+			pass
 
 	def __HideInfo(self):
 		if self.infoTooltip is not None:
@@ -668,7 +715,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		if not mouseModule.mouseController.isAttached():
 			chat.AppendChat(
 				chat.CHAT_TYPE_INFO,
-				u"Nejprve uchopte požadovaný item v inventáři.",
+				u"Nejdřív vezmi potřebný předmět v inventáři.",
 			)
 			return None
 		if mouseModule.mouseController.GetAttachedType() != player.SLOT_TYPE_INVENTORY:
@@ -749,7 +796,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 			return
 		self.feedWindow.basket.stop()
 		self.pendingSequence = None
-		chat.AppendChat(chat.CHAT_TYPE_INFO, u"Potvrzení krmení nedorazilo. Obnovuji stav; zkontroluj zbývající krystaly.")
+		chat.AppendChat(chat.CHAT_TYPE_INFO, u"Potvrzení krmení nedorazilo. Zkontroluj zbývající krystaly.")
 		self.__RequestSnapshot()
 
 	def __SubmitTask(self, taskId):
@@ -812,9 +859,36 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		self.__SetInteractive(True)
 		return False
 
+	def __LoadR1(self):
+		"""The R1 look (root/uimountr1.py) drawn into this window unless Settings -> "Starý vzhled" chose the original
+		look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uimountr1
+			self.r1 = uimountr1.MountSkin(self)
+		except Exception:
+			uir1.TraceFailure("the mount window")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+		else:
+			return
+		if self.taskRows:                     # the task rows of the other look: built again
+			self.__RefreshElementsPage()
+
 	def Open(self):
 		if not self.capability:
 			return False
+		self.__SyncLook()
 		if self.feedWindow:
 			self.feedWindow.Close()
 			self.feedWindow.basket.stop()
@@ -851,6 +925,7 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		return self.Open()
 
 	def ResetRuntime(self):
+		dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
 		self.Close()
 		if self.feedWindow:
 			self.feedWindow.basket.stop()
@@ -871,20 +946,24 @@ class MountSystemWindow(ui.BoardWithTitleBar):
 		self.__ShowElementDetail(False)
 		self.detailSection.label.SetText(u"Vyber živel")
 		self.detailHint.SetText(u"Vyber živel vlevo")
-		self.soulLevel.SetText(u"—")
-		self.soulPercent.SetText(u"—")
-		self.soulExp.SetText(u"—")
-		self.soulSpeed.SetText(u"—")
+		self.soulLevel.SetText(u"-")
+		self.soulPercent.SetText(u"-")
+		self.soulExp.SetText(u"-")
+		self.soulSpeed.SetText(u"-")
 		for orb in self.soulSegments:
 			orb.SetValue(0)
 		for label, value in self.unlockRows:
 			label.SetText(u"")
-			value.SetText(u"—")
+			value.SetText(u"-")
 		for index, row in enumerate(self.elementRows):
-			row.SetData({"element_id": index, "name": ELEMENT_NAMES[index], "icon": ELEMENT_ASSETS[index], "state": "normal", "bonus_text": u"—", "opened": False})
-		self.overallCount.SetText(u"—")
+			row.SetData({"element_id": index, "name": ELEMENT_NAMES[index], "icon": ELEMENT_ASSETS[index], "state": "normal", "bonus_text": u"-", "opened": False})
+		self.overallCount.SetText(u"-")
 
 	def Destroy(self):
+		dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
+		if getattr(self, "r1", None):
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.ResetRuntime()
 		if self.feedWindow:
 			self.feedWindow.Destroy()

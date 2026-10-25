@@ -1,6 +1,7 @@
 """Session-scoped album presentation. Progress and rewards come from the server."""
 import json
 import re
+import time
 
 def Number(value, maximum=(1 << 64) - 1):
 	if isinstance(value, bool) or not re.match(r"^[0-9]+\Z", str(value)):
@@ -56,12 +57,18 @@ class AlbumState(object):
 		self.bonuses = []
 		self.attack = self.magicAttack = self.bookPower = 0
 		self.albumUtc = 0
+		self.clockAnchor = None
 		self.notifications = []
 		self.visualNotifications = []
 		# Independent presentation receipts: the book must not consume popup queues.
 		self.discoveryReceipts = {}
 		self.unreadCaptures = 0
 		self.generation += 1
+
+	def NowUtc(self):
+		if self.clockAnchor is None:
+			return 0
+		return self.albumUtc + max(0, int(time.monotonic() - self.clockAnchor))
 
 	def Begin(self, digest, epoch, profile, active):
 		try:
@@ -163,6 +170,17 @@ class AlbumState(object):
 				# server; new paired servers report a pinned physical channel.
 				row["channel"] = Number(item.get("channel", 0), 255)
 				row["shared_hub"] = Number(item.get("shared_hub", 0), 1)
+				if 'area_id' in item:
+					area = item['area_id']
+					if not isinstance(area, str) or not re.match(r'^[a-z0-9_-]{1,64}\Z', area):
+						raise ValueError('invalid hunt area identity')
+					row['area_id'] = area
+					for name in ('x', 'y', 'radius'):
+						row[name] = Number(item[name], 1000000)
+					row['hunt_from'] = Number(item['hunt_from'])
+					row['hunt_until'] = Number(item['hunt_until'])
+					if not row['radius'] or row['hunt_until'] < row['hunt_from']:
+						raise ValueError('invalid occurrence window')
 				for name in ("map_name", "direction"):
 					text = item[name]
 					if not isinstance(text, str) or not text or len(text) > 128:
@@ -185,7 +203,7 @@ class AlbumState(object):
 				if not name:
 					continue
 				if previous["phase"] == 0 and current["phase"] == 1:
-					changes.append(("clue", name, current["map_name"], current["direction"], pet["when"]))
+					changes.append(("clue", name, current["map_name"], pet["when"]))
 					visuals.append(dict(kind="clue", id=pet["id"], name=name, channel=current["channel"]))
 				elif previous["phase"] == 1 and current["phase"] == 2:
 					changes.append(("capture", name))
@@ -205,6 +223,7 @@ class AlbumState(object):
 		self.pets, self.bonuses = candidate, bonuses
 		self.attack, self.magicAttack, self.bookPower = attack, magic, book
 		self.albumUtc, self.available = utc, True
+		self.clockAnchor = time.monotonic()
 		self.generation += 1
 
 	def ConsumeNotifications(self):

@@ -80,7 +80,7 @@ class InlineQueuePage:
             self._Slider(field,label,y)
         v.section(T('Obal','Body'),1100)
         for index,row in enumerate(design.APPROVED_CATALOG):
-            self._Choice(design.PRESET,row[0],row[2].replace(' · Althea',''),
+            self._Choice(design.PRESET,row[0],row[2].replace(' | Althea',''),
                          (index%2)*174,1138+(index//2)*40)
         v.section(T('Prstenec','Ring'),1642)
         for index,(value,label) in enumerate(design.APPROVED_RINGS):
@@ -182,7 +182,7 @@ class InlineQueuePage:
                 enabled=design.Supports(draft[0],field,draft)
                 slider.Enable() if enabled else slider.Disable()
                 slider.a6_label.SetFontColor(*(INK if enabled else DIM))
-                text.SetText(design.DisplayValue(field,draft[field]) if enabled else '—')
+                text.SetText(design.DisplayValue(field,draft[field]) if enabled else '-')
             for field,value,button,lines,toggle in self.choices:
                 selected = self.controller.previewVnum==value if field=='model' else draft[field]==value
                 enabled = field in ('model',design.PRESET) or design.Supports(draft[0],field,draft)

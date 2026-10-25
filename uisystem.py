@@ -12,14 +12,36 @@ import constInfo
 import osfInfo
 import localeInfo
 import globalhub
+import uiunstuck
 
 if app.ENABLE_MOVE_CHANNEL:
 	import chat
 
 if app.ENABLE_NEW_GAMEOPTION:
-	import uisettings as uiGameOptionNew
+	# Settings kit look (c9 v4 2026-10-05, v5): host of the new settings window or the original A7 one (settingslook).
+	# An import problem keeps the original window (traced), never a broken system menu.
+	try:
+		import uisettingsc9 as uiGameOptionNew
+	except Exception:
+		import dbg
+		import traceback
+		dbg.TraceError("settings kit look: %s" % traceback.format_exc())
+		import uisettings as uiGameOptionNew
 
 SYSTEM_MENU_FOR_PORTAL = False
+
+
+def _UseKitMenu():
+	"""ESC menu V1.1 (root/uiescmenu.py, 2026-10-05): the kit menu unless Settings -> "Starý vzhled"
+	chose the original look (settingslook); an import problem keeps the original menu."""
+	try:
+		import uiescmenu
+	except Exception:
+		import dbg
+		import traceback
+		dbg.TraceError("esc menu: %s" % traceback.format_exc())
+		return False
+	return uiescmenu.UseKitLook()
 
 
 def LoadChannelInfo():
@@ -92,6 +114,20 @@ def RequestChannelChange(channel_index):
 	SaveChannelInfo(channel_index)
 	return True
 
+def RequestAdjacentChannelChange(step):
+	if not app.ENABLE_MOVE_CHANNEL or step not in (-1, 1):
+		return False
+	current = net.GetChannelNumber()
+	map_index = net.GetMapIndex()
+	# Keep blocked locations on the same guarded path as direct CH buttons.
+	if globalhub.IsGlobalHub(current, map_index) or current == 99 or map_index >= 10000:
+		return RequestChannelChange(1)
+	count = GetChannelCount()
+	if count < 2 or not 1 <= current <= count:
+		return False
+	return RequestChannelChange((current - 1 + step) % count + 1)
+
+
 ###################################################################################################
 ## System
 class SystemDialog(ui.ScriptWindow):
@@ -108,6 +144,8 @@ class SystemDialog(ui.ScriptWindow):
 		self.eventPrepareExit = None
 		self.systemOptionDlg = None
 		self.gameOptionDlg = None
+		self.escMenu = None
+		self.loadedLook = None
 
 		if app.ENABLE_MOVE_CHANNEL:
 			self.channelButtons = []
@@ -116,8 +154,80 @@ class SystemDialog(ui.ScriptWindow):
 	def LoadDialog(self):
 		if SYSTEM_MENU_FOR_PORTAL:
 			self.__LoadSystemMenu_ForPortal()
+			self.loadedLook = "portal"
+		elif _UseKitMenu() and self.__LoadSystemMenu_Kit():
+			self.loadedLook = "kit"
 		else:
 			self.__LoadSystemMenu_Default()
+			self.loadedLook = "legacy"
+
+	def __LoadSystemMenu_Kit(self):
+		"""ESC menu V1.1 drawn by uiescmenu into this window; every item calls the handler of the original menu.
+		False (traced) when it cannot be built: the original menu is loaded instead."""
+		try:
+			import uiescmenu
+		except Exception:
+			return False
+		actions = {
+			"shop": ui.__mem_func__(self.__ClickInGameShopButton),
+			"wiki": ui.__mem_func__(self.__ClickWikiButton),
+			"help": ui.__mem_func__(self.__ClickHelpButton),
+			"options": ui.__mem_func__(self.__ClickGameOptionButton),
+			"change": ui.__mem_func__(self.__ClickChangeCharacterButton),
+			"logout": ui.__mem_func__(self.__ClickLogOutButton),
+			"unstuck": ui.__mem_func__(self.__ClickDebugButton),
+			"exit": ui.__mem_func__(self.__ClickExitButton),
+			"back": ui.__mem_func__(self.Close),
+			"channel": ui.__mem_func__(self.__ClickKitChannelButton),
+		}
+		features = {
+			"shop": bool(getattr(app, "ENABLE_ITEMSHOP", False)),
+			"wiki": bool(getattr(app, "ENABLE_WIKI", False)),
+			"channels": bool(getattr(app, "ENABLE_MOVE_CHANNEL", False)),
+		}
+		try:
+			self.escMenu = uiescmenu.EscMenu(self, actions, features, osfInfo.GetInterfaceInstance)
+		except Exception:
+			self.escMenu = None
+			# The R1 skin failed (traced): the gold kit menu for the rest of the session; then the original menu.
+			retried = False
+			try:
+				import uikit
+				if uikit.SkinFailed("esc menu"):
+					self.escMenu = uiescmenu.EscMenu(self, actions, features, osfInfo.GetInterfaceInstance)
+					retried = True
+			except Exception:
+				self.escMenu = None
+			if not retried:
+				import dbg
+				import traceback
+				dbg.TraceError("esc menu: %s" % traceback.format_exc())
+				return False
+		self.AddFlag("movable")
+		self.AddFlag("float")
+		self.SetCenterPosition()
+		return True
+
+	def __DestroyKitMenu(self):
+		if self.escMenu is not None:
+			self.escMenu.Destroy()
+		self.escMenu = None
+
+	def __SyncLook(self):
+		"""Settings -> "Starý vzhled" / "Nový vzhled" switches this menu too: rebuilt on a change."""
+		if self.loadedLook not in ("kit", "legacy"):
+			return
+		if ("kit" if _UseKitMenu() else "legacy") == self.loadedLook:
+			return
+		self.__DestroyKitMenu()
+		for child in getattr(self, "Children", ()) or ():
+			if hasattr(child, "Hide"):
+				child.Hide()   # the original board must not linger until it is collected
+		self.ClearDictionary()
+		if app.ENABLE_MOVE_CHANNEL:
+			self.channelButtons = []
+			self.globalHubChannelLabel = None
+		self.LoadDialog()
 
 	def __LoadSystemMenu_Default(self):
 		pyScrLoader = ui.PythonScriptLoader()
@@ -162,6 +272,7 @@ class SystemDialog(ui.ScriptWindow):
 		self.GetChild("cancel_button").SAFE_SetEvent(self.Close)
 
 	def Destroy(self):
+		self.__DestroyKitMenu()
 		self.ClearDictionary()
 
 		if self.gameOptionDlg:
@@ -183,7 +294,10 @@ class SystemDialog(ui.ScriptWindow):
 			self.eventPrepareExit()
 
 	def OpenDialog(self):
-		if app.ENABLE_MOVE_CHANNEL:
+		self.__SyncLook()
+		if self.escMenu is not None:
+			self.escMenu.Open()
+		elif app.ENABLE_MOVE_CHANNEL:
 			self.__RefreshChannelButtons()
 		self.Show()
 
@@ -230,6 +344,15 @@ class SystemDialog(ui.ScriptWindow):
 		if RequestChannelChange(channel_index):
 			self.Close()
 
+	def __ClickKitChannelButton(self, channel_index):
+		"""A channel cell of the kit menu: the channel bar's switch path (minimappanel.Invoke -> the keybinding
+		callback -> RequestChannelChange); the request itself when that path has no callback."""
+		import uiescmenu
+		if uiescmenu.SwitchChannel(channel_index, osfInfo.GetInterfaceInstance()):
+			self.Close()
+		elif RequestChannelChange(channel_index):
+			self.Close()
+
 	def __ClickChangeCharacterButton(self):
 		self.Close()
 		self.__PrepareExit()
@@ -244,8 +367,9 @@ class SystemDialog(ui.ScriptWindow):
 		net.ExitApplication()
 
 	def __ClickDebugButton(self):
+		# Unstuck: the confirmation first; "/unstuck" is sent from it, the server's countdown follows (uiunstuck).
 		self.Close()
-		net.SendChatPacket("/unstuck")
+		uiunstuck.controller.Request()
 
 	def __ClickExitButton(self):
 		self.Close()
@@ -298,11 +422,19 @@ class SystemDialog(ui.ScriptWindow):
 			osfInfo.GetInterfaceInstance().OpenItemShopWindow()		
 
 	def Close(self):
+		if self.escMenu is not None:
+			self.escMenu.HideTip()		# "Zpět do hry | Esc" stayed on screen after a click on that button
 		self.Hide()
 		return True
 
 	def OnBlockMode(self, mode):
-		uiGameOptionNew.blockMode = mode
+		# The A7 module owns the block state (settings backend, compact chat) in both looks: with the kit host
+		# (uisettingsc9) a write to uiGameOptionNew alone left uisettings.blockMode at 0 until Settings was opened,
+		# and the next toggle would send /setblockmode from 0.
+		import uisettings
+		uisettings.blockMode = mode
+		if uiGameOptionNew is not uisettings:
+			uiGameOptionNew.blockMode = mode
 		if self.gameOptionDlg:
 			self.gameOptionDlg.OnBlockMode(mode)
 		#self.optionDialog.OnBlockMode(mode)

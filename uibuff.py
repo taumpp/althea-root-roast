@@ -12,12 +12,16 @@ import wndMgr
 import osfInfo
 import uiCommon
 
-# VIP elf outfits (server-src vip_elf_appearance.h): elf-form Buffi only.
-VIP_ELF_OUTFITS = (49101, 49102, 49104, 49106, 49109)
-
-
 def IsVipElfOutfit(vnum):
-	return vnum in VIP_ELF_OUTFITS
+	# Elf-form Buffi only; the range has one definition, in constInfo.
+	return constInfo.IS_VIP_ELF_OUTFIT(vnum)
+
+def SyncR1(window):
+	"""The R1 look (root/uibuffr1.py) repeats the values the window just changed."""
+	skin = getattr(window, "r1Skin", None)
+	if skin:
+		skin.SyncSafe()
+
 
 AFFECT_DICT = {
 		item.APPLY_INT : localeInfo.TOOLTIP_INT,
@@ -112,6 +116,7 @@ class SupportMainGui(ui.ScriptWindow):
 		self.expMode = 1
 		self.form = 0
 		self.expModeButtons = []
+		self.r1Skin = None
 		
 		self.childrenList = []
 		
@@ -160,6 +165,9 @@ class SupportMainGui(ui.ScriptWindow):
 		return True
 		
 	def Destroy(self):
+		if getattr(self, "r1Skin", None):
+			self.r1Skin.Destroy()
+		self.r1Skin = None
 		self.minimizeBtn.Hide()
 		self.minimizeBtn.Destroy()
 		self.minimizeBtn = None
@@ -322,6 +330,18 @@ class SupportMainGui(ui.ScriptWindow):
 			import exception
 			exception.Abort("PetInformationWindow.LoadWindow.BindObject")
 
+		self.__ApplyR1Look()
+
+	def __ApplyR1Look(self):
+		"""R1 look (root/uibuffr1.py) unless Settings -> "Starý vzhled" chose the original one; a build failure
+		undoes every change and keeps the original look (traced to syserr, not tried again this session)."""
+		self.r1Skin = None
+		try:
+			import uibuffr1
+			self.r1Skin = uibuffr1.Build(self)
+		except Exception:
+			self.r1Skin = None
+
 	def clickMinimize(self):
 		if self.equipSlot:
 			if self.equipSlot.IsShow():
@@ -381,6 +401,10 @@ class SupportMainGui(ui.ScriptWindow):
 		skillRealLvl = osfInfo.SUPPORT_SKILLS[skill]["REAL_LVL"]
 		
 		self.toolTipSkill.SetSupportSkill(skillIndex, skillLevel, skillGrade, skillRealLvl)
+		# the open tooltip is rebuilt from the new level when SetSkillLvl brings it
+		remember = getattr(self.toolTipSkill, "RememberRefresh", None)
+		if remember:
+			remember(self.SetupSkillTooltip, skill)
 			
 	def OverOutSkill(self):
 		if 0 != self.toolTipSkill:
@@ -416,6 +440,7 @@ class SupportMainGui(ui.ScriptWindow):
 			self.skillLock_5.Show()
 			self.upgradeBtn_4.Hide()
 			self.upgradeBtn_5.Hide()
+		SyncR1(self)
 
 	def OnClickUpgradeSkill(self, skill):
 		if self.interface:
@@ -509,6 +534,13 @@ class SupportMainGui(ui.ScriptWindow):
 			self.upgradeBtn_5.Hide()
 		elif self.healingSkillsUnlocked:
 			self.upgradeBtn_5.Show()
+		# the open reading window shows the new level
+		if self.interface and hasattr(self.interface, "RefreshReadingWindows"):
+			self.interface.RefreshReadingWindows()
+		# and so does an open Buffi skill tooltip (this window's or the reading window's)
+		tooltip = getattr(self.interface, "tooltipSkill", None) if getattr(self, "interface", None) else None
+		if tooltip and hasattr(tooltip, "RefreshShown"):
+			tooltip.RefreshShown()
 
 	def SetDefaultInfo(self):
 		self.supportname.SetText("")
@@ -546,7 +578,7 @@ class SupportMainGui(ui.ScriptWindow):
 				self.equipSlot.wndEquip.EnableSlot(2)
 
 		self.SetPremiumSkill(healingUnlocked)
-		self.progressLevelText.SetText("Buffi Lv. %d" % level)
+		self.progressLevelText.SetText("Úroveň %d" % level)
 		self.progressPassiveText.SetText("Pasivní body: %d" % passivePoints)
 		if requiredExp > 0:
 			self.progressGauge.SetPercentage(min(currentExp, requiredExp), requiredExp)
@@ -559,14 +591,15 @@ class SupportMainGui(ui.ScriptWindow):
 			self.progressStatusText.SetText("Maximální úroveň")
 			self.progressStatusText.SetPackedFontColor(0xffECC576)
 		elif not healingUnlocked:
-			self.progressStatusText.SetText("EXP od úrovně hráče 90")
+			self.progressStatusText.SetText("BZK od úrovně hráče 90")
 			self.progressStatusText.SetPackedFontColor(0xffB8B8B8)
 		elif self.expMode == 0:
-			self.progressStatusText.SetText("EXP Buffky vypnuto")
+			self.progressStatusText.SetText("Získávání EXP vypnuto")
 			self.progressStatusText.SetPackedFontColor(0xffD69A72)
 		else:
-			self.progressStatusText.SetText("Získávání EXP aktivní")
+			self.progressStatusText.SetText("Získávání BZK aktivní")
 			self.progressStatusText.SetPackedFontColor(0xff8AC28F)
+		SyncR1(self)
 
 	def RefreshExpModeButtons(self):
 		for index, button in enumerate(self.expModeButtons):
@@ -582,6 +615,7 @@ class SupportMainGui(ui.ScriptWindow):
 	def SetInteligence(self, inteligence):
 		self.supportInt.SetText("%s %d" % (localeInfo.SUPPORT_INT, int(inteligence)))
 		player.SetSupportIntPoint(inteligence)
+		SyncR1(self)
 		
 	def SetArmor(self, vnum):
 		osfInfo.SUPPORT_EQUIPMENT[osfInfo.SUPPORT_SLOT_ARMOR] = vnum
@@ -612,6 +646,7 @@ class SupportMainGui(ui.ScriptWindow):
 			self.supportname.SetText(localeInfo.UNNAMED)
 		else:
 			self.supportname.SetText(name)
+		SyncR1(self)
 
 	def OnSelectItemSlot(self, selectedSlotPos):
 		if self.form and selectedSlotPos == osfInfo.SUPPORT_SLOT_HAIR:

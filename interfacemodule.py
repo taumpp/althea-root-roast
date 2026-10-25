@@ -7,6 +7,7 @@ import systemSetting
 import wndMgr
 import chat
 import app
+import startuptiming
 import player
 import uiTaskBar
 import uiCharacter
@@ -14,6 +15,7 @@ import uiInventory
 import uiRarity
 import uiresonance
 import inventoryshortcutpolicy
+import growthpetpresentation
 import uiCostumeInventory
 import uiDragonSoul
 import uiChat
@@ -21,6 +23,7 @@ import uiMessenger
 import uiUnifiedMessenger
 import unifiedmessengermodel
 import unifiedmessengernotifications
+import duelchallenge
 import systemnotifications
 import uiwarpstate
 import featureavailability
@@ -60,11 +63,11 @@ import uiGameButton
 import uinoticeboard
 import uiCube
 import uiskilltree
-import uigmpanel
 import uiMountSystem
 import uipermanenttasks
 import uidailytasks
 import uiquickbuff
+import uiinputguard
 import uiTalisman
 import uiquickequip
 if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
@@ -153,12 +156,13 @@ if app.ENABLE_MAINTENANCE_SYSTEM:
 
 if app.ENABLE_SHOW_CHEST_DROP:
 	import uiChestDrop
+	import chestpreview
 
 if app.ENABLE_GROWTH_PET_SYSTEM:
 	import uiPetInfo 
 
 if app.ENABLE_PLAYER_RANKING:
-	import uirankinfo
+	import uiglobalrankings as uirankinfo
 
 if app.ENABLE_BIOLOG_SYSTEM:
 	import uiBiolog
@@ -214,10 +218,7 @@ if app.ENABLE_ATTR_6TH_7TH:
 	import uiAttr67Add
 
 if app.ENABLE_WIKI:
-	import uiWiki
-
-if app.ENABLE_BOSS_TRACK:
-	import uiBossTrack
+	import uiwikiplayer as uiWiki
 
 if app.ENABLE_GUILD_DRAGONLAIR_SYSTEM:
 	import uiGuildDragonLairRanking
@@ -227,12 +228,16 @@ if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 
 IsQBHide = 0
 IsWisperHide = 0
+WHISPER_NAME_LABEL_WIDTH = 72
+UNIFIED_MESSENGER_MINIMIZED_NAME = "Messenger"
+UNIFIED_MESSENGER_MINIMIZED_LABEL_WIDTH = 96
 
 class UnifiedMessengerRouter(object):
 	def __init__(self, interface):
 		self.interface = interface
 		self.window = None
 		self.recoveryNotices = set()
+		self.localMessages = []
 		self.notifications = unifiedmessengernotifications.NotificationController(
 			messengerHistory, self.__PresentIncoming, snd, app,
 			app.GetGlobalTime)
@@ -253,6 +258,11 @@ class UnifiedMessengerRouter(object):
 		if not self.Available():
 			return False
 		return self.__Window().Open(name, key)
+
+	def RestoreMinimized(self, name, key):
+		if not self.Available():
+			return False
+		return self.__Window().RestoreMinimized(name, key)
 
 	def OpenWithDraft(self, name, draft):
 		if not self.Available():
@@ -275,8 +285,164 @@ class UnifiedMessengerRouter(object):
 		self.notifications.NotifyIncoming("", self.__NotificationSnapshot(), name)
 		return True
 
+	def ReceiveLocal(self, name, line, gameMaster=False):
+		# A whisper kept only in the native buffer (system or error notice,
+		# a line the executable could not import) has no history row: keep it
+		# for this session so its letter opens Messages, not the classic dialog.
+		name = str(name or "")
+		model = unifiedmessengermodel
+		body = model.local_message_body(name, line)
+		if not name or not body or not self.Available():
+			return False
+		import time
+		rowID = model.next_local_row_id(self.__LatestStoredRowID(),
+			[row[0] for row in self.localMessages])
+		self.localMessages.append(model.local_message_row(
+			rowID, name, body, int(time.time() * 1000), gameMaster))
+		self.__TrimLocalMessages()
+		snapshot = self.__NotificationSnapshot()
+		decision = self.notifications.NotifyIncoming("", snapshot, name)
+		window = self.window
+		if window and snapshot["visible"] and window.IsConversationOpen(name):
+			window.OnLocalMessage()
+		elif not decision.get("toast"):
+			# No history row and no list entry: the letter is its only trace.
+			self.__PresentIncoming("", name)
+		return True
+
+	def ReceiveDuel(self, name, line, identifier, replaced=()):
+		# A duel challenge is also a row of the challenger's thread with
+		# Přijmout / Odmítnout (the chat keeps its line). A newer challenge of
+		# the same player replaces the pending row instead of stacking rows.
+		# The thread gets its unread badge and the usual letter (same setting
+		# as a whisper); no popup, sound or application flash (spam).
+		name = str(name or "")
+		model = unifiedmessengermodel
+		if not name or not identifier or not self.Available():
+			return False
+		replaced = set(int(value) for value in replaced or ())
+		if replaced:
+			self.localMessages = [row for row in self.localMessages
+				if model.duel_identifier(row) not in replaced]
+		import time
+		rowID = model.next_local_row_id(self.__LatestStoredRowID(),
+			[row[0] for row in self.localMessages])
+		body = model.local_message_body(name, line) or \
+			duelchallenge.CHALLENGE_TEXTS[0] % name
+		self.localMessages.append(model.local_duel_row(
+			rowID, name, body, int(time.time() * 1000), identifier))
+		self.__TrimLocalMessages()
+		window = self.window
+		if window and window.loaded and window.IsConversationOpen(name):
+			duelchallenge.challenges.MarkRead(name)
+		else:
+			duelchallenge.challenges.MarkUnread(identifier)
+			# The usual letter at the screen edge with the challenger's name,
+			# by the same rule as a whisper (the setting "Upozornění na novou
+			# zprávu", none while Messages is shown): one per player, a newer
+			# challenge flashes the same letter. No sound or application flash.
+			if self.notifications.Decision("", self.__NotificationSnapshot(), name)["toast"]:
+				self.__PresentIncoming("", name)
+		if window:
+			window.OnLocalDuel(name)
+		return True
+
+	def ReceiveDuelOutgoing(self, name, identifier):
+		# The player's own request (the server confirmed it with the PVP
+		# packet): a row of the thread with the challenged player, with its
+		# state only. No letter or unread count (the player sent it).
+		name = duelchallenge.known_name(name)
+		model = unifiedmessengermodel
+		if not name or not identifier or not self.Available():
+			return False
+		import time
+		rowID = model.next_local_row_id(self.__LatestStoredRowID(),
+			[row[0] for row in self.localMessages])
+		self.localMessages.append(model.local_duel_row(rowID, name,
+			duelchallenge.OUTGOING_TEXT % name, int(time.time() * 1000),
+			identifier, player.GetName() or "?"))
+		self.__TrimLocalMessages()
+		if self.window:
+			self.window.OnLocalDuel(name)
+		return True
+
+	def ReceiveDuelResult(self, name, body):
+		# The result of a duel with `name`: a row of that thread (from
+		# "Souboj"); no letter or unread count, the player was in the fight.
+		name = str(name or "")
+		model = unifiedmessengermodel
+		if not name or not body or not self.Available():
+			return False
+		import time
+		rowID = model.next_local_row_id(self.__LatestStoredRowID(),
+			[row[0] for row in self.localMessages])
+		row = model.local_message_row(rowID, name, body, int(time.time() * 1000))
+		self.localMessages.append(row[:4] + (duelchallenge.RESULT_SENDER,) + row[5:])
+		self.__TrimLocalMessages()
+		if self.window:
+			self.window.OnLocalDuel(name)
+		return True
+
+	def __TrimLocalMessages(self):
+		dropped = self.localMessages[:-unifiedmessengermodel.LOCAL_MESSAGE_LIMIT]
+		del self.localMessages[:-unifiedmessengermodel.LOCAL_MESSAGE_LIMIT]
+		identifiers = set(unifiedmessengermodel.duel_identifier(row) for row in dropped)
+		identifiers.discard(0)
+		if identifiers:
+			duelchallenge.challenges.MarkRead(identifiers=identifiers)
+
+	def LocalMessages(self, name):
+		# By the thread key: the player's own duel request carries their name.
+		key = unifiedmessengermodel.provisional_key(name)
+		return [row for row in self.localMessages if row[2] == key]
+
+	def LocalConversations(self):
+		# Threads with a duel row: listed (with their unread count) even when
+		# the player has no stored conversation with the challenger.
+		model = unifiedmessengermodel
+		latest = {}
+		for row in self.localMessages:
+			identifier = model.duel_identifier(row)
+			if identifier:
+				challenge = duelchallenge.challenges.Get(identifier)
+				peer = duelchallenge.known_name(challenge["name"] if challenge else row[4])
+				if peer:  # never a conversation without a resolved name
+					latest[peer.lower()] = (peer, row)
+		return [{"name": peer, "last_activity": int(row[6]),
+			"unread": duelchallenge.challenges.UnreadCount(peer),
+			"preview": row[5]} for peer, row in latest.values()]
+
+	def MarkLocalRead(self, name):
+		return duelchallenge.challenges.MarkRead(name)
+
+	def __LatestStoredRowID(self):
+		lister = getattr(messengerHistory, "ListConversationSummaries", None)
+		if not lister:
+			return 0
+		try:
+			# Summary rows end with (last_body, last_row_id).
+			return max([0] + [int(row[6] or 0) for row in lister() if len(row) >= 7])
+		except Exception:
+			return 0
+
 	def __PresentIncoming(self, key, name):
+		if self.IsMinimized():
+			# One "Messenger" letter with the unread count instead of a letter
+			# per sender: its click restores the window as it was left.
+			self.RefreshMinimized(True)
+			return
 		self.interface.ShowUnifiedMessengerNotification(key, name)
+
+	def IsMinimized(self):
+		minimized = getattr(self.window, "IsMinimized", None)
+		return bool(minimized and minimized())
+
+	def RefreshMinimized(self, flash=False):
+		if not self.IsMinimized():
+			return False
+		self.interface.ShowUnifiedMessengerMinimized(
+			self.window.MinimizedUnread(), flash)
+		return True
 
 	def __NotificationSnapshot(self):
 		window = self.window
@@ -292,6 +458,19 @@ class UnifiedMessengerRouter(object):
 			return False
 		return self.__Window().Toggle()
 
+	def ToggleUnread(self):
+		# The chat's Zprávy envelope: closes Messages when it is shown,
+		# otherwise opens it on the newest unread thread (no name dialog).
+		if not self.Available():
+			return False
+		window = self.__Window()
+		if window.loaded and window.IsShow():
+			window.Close()
+			return True
+		if self.IsMinimized():
+			return window.Open()
+		return window.OpenLatestUnread()
+
 	def IsOpen(self, name):
 		if not self.Available():
 			return None
@@ -299,7 +478,9 @@ class UnifiedMessengerRouter(object):
 
 	def Capability(self, enabled, pid, maxBody, pendingPerPair, pendingPerSender, retentionSeconds):
 		if enabled:
+			self.notifications.RestoreUnread(self.__NotificationSnapshot())
 			return
+		self.interface.ClearUnifiedMessengerNotifications()
 		self.Destroy()
 
 	def PlayerLookupCapability(self, enabled):
@@ -318,8 +499,15 @@ class UnifiedMessengerRouter(object):
 		if event == 3:
 			self.notifications.NotifyIncoming(
 				key, self.__NotificationSnapshot())
+		elif event == 5:
+			# A guild chat line (another member's notifies like a whisper).
+			self.notifications.NotifyGuildLine(
+				key, self.__NotificationSnapshot())
 		if self.window:
 			self.window.OnHistoryChanged(key, event)
+		# Read elsewhere, deleted, or new with the letter setting off: the
+		# minimized letter keeps the current count (no extra flash).
+		self.RefreshMinimized()
 
 	def Typing(self, pid, name, active):
 		if self.window:
@@ -342,15 +530,36 @@ class UnifiedMessengerRouter(object):
 		if self.window:
 			self.window.Destroy()
 		self.window = None
+		self.localMessages = []
+		duelchallenge.challenges.MarkRead()
 
 class Interface(object):
 	CHARACTER_STATUS_TAB = 1
 	CHARACTER_SKILL_TAB = 2
 
+	def ShowAchievementNotice(self, kind, subject, value, name):
+		if self.achievementNotice is None:
+			import uiachievementnotice
+			self.achievementNotice = uiachievementnotice.AchievementNoticeWindow()
+			self.achievementNotice.protectedRects = ui.__mem_func__(self.AchievementProtectedRects)
+		if self.IsHideUiMode or self.petAlbumArrivalVisible:
+			self.achievementNotice.Suspend()
+		self.achievementNotice.Add(kind, subject, value, name)
+
+	def AchievementProtectedRects(self):
+		result = self.NoticeProtectedRects()
+		# Personal pet progress has priority. Do not cover the approved album card.
+		for window in (self.petAlbumNotice, self.noticeBoard):
+			if window and window.IsShow():
+				x, y = window.GetGlobalPosition()
+				result.append((x, y, x + window.GetWidth(), y + window.GetHeight()))
+		return result
+
 	def ShowPetAlbumNotice(self, notice):
 		if self.petAlbumNotice is None:
 			import uipetalbumnotice
 			self.petAlbumNotice = uipetalbumnotice.PetAlbumNoticeWindow()
+			self.petAlbumNotice.protectedRects = ui.__mem_func__(self.NoticeProtectedRects)
 		if self.IsHideUiMode or self.petAlbumArrivalVisible:
 			self.petAlbumNotice.Suspend()
 		self.petAlbumNotice.Add(notice)
@@ -387,12 +596,15 @@ class Interface(object):
 		systemSetting.SetInterfaceHandler(self)
 		self.unifiedMessengerRouter = UnifiedMessengerRouter(self)
 		self.wndFeatureComingSoon = None
+		self.wndCraftContractReply = None
+		self.wndContractHandIn = None
 		self.featureAvailabilityListener = None
 		self.windowOpenPosition = 0
 		self.dlgWhisperWithoutTarget = None
 		self.inputDialog = None
 		self.noticeBoard = None
 		self.petAlbumNotice = None
+		self.achievementNotice = None
 		self.petAlbumArrivalVisible = False
 		self.tipBoard = None
 		self.bigBoard = None
@@ -459,10 +671,12 @@ class Interface(object):
 		self.dailyTasksSnapshot = None
 		self.dailyTasksSnapshotPending = False
 		self.wndGMPanel = None
+		self.gmPanelQuery = None
 		self.wndCustomPorts = None
 		self.afkSystem = None
 		self.dropTrackerSystem = None
 		self.quickBuffSystem = None
+		self.inputGuardSystem = None
 		self.wndGuild = None
 		self.wndGuildBuilding = None
 		if app.ENABLE_SKILL_SELECT_GUI:
@@ -543,6 +757,7 @@ class Interface(object):
 
 		if app.ENABLE_SHOW_CHEST_DROP:
 			self.dlgChestDrop = None
+			self.chestPreviewBroker = None
 
 		if app.ENABLE_DUNGEON_INFO:
 			self.wndDungeonTrack = None
@@ -551,6 +766,14 @@ class Interface(object):
 		self.wndGameNotification = None
 		self.wndCountdownHUD = None
 		self.wndMissionBooks = None
+		self.wndCraftBook = None
+		self.craftBookModel = None
+		self.craftMasteryModel = None
+		self.craftContractModel = None      # craft contracts in the Denní úkoly window (craftcontractmodel)
+		self.craftContractRequester = None
+		self.craftTitlesModel = None
+		self.woodCheck = None
+		self.miningCheck = None
 		self.systemNotifications = None
 		self.countdownLaunchers = []
 		self.countdownKnownDungeons = set()
@@ -574,9 +797,6 @@ class Interface(object):
 
 		if app.ENABLE_RANKING_SYSTEM:
 			self.wndRankingBoardWindow = None
-
-		if app.ENABLE_BOSS_TRACK:
-			self.wndBossTrack = None
 
 		if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 			self.wndAutoHunting = None
@@ -633,7 +853,7 @@ class Interface(object):
 		from _weakref import proxy
 		self.wndMessenger.SetWhisperButtonEvent(lambda n,i=proxy(self):i.OpenWhisperDialog(n))
 		self.wndMessenger.SetUnifiedMessengerButtonEvent(
-			ui.__mem_func__(self.OpenUnifiedMessenger))
+			ui.__mem_func__(self.ToggleUnifiedMessenger))
 		self.wndMessenger.SetGuildButtonEvent(ui.__mem_func__(self.ToggleGuildWindow))
 
 	def __MakeGuildWindow(self):
@@ -656,7 +876,7 @@ class Interface(object):
 
 		self.wndChat = wndChat
 		self.wndChat.BindInterface(self)
-		self.wndChat.SetSendWhisperEvent(ui.__mem_func__(self.OpenWhisperDialogWithoutTarget))
+		self.wndChat.SetSendWhisperEvent(ui.__mem_func__(self.OpenMessagesFromChat))
 		self.wndChat.SetOpenChatLogEvent(ui.__mem_func__(self.ToggleChatLogWindow))
 
 	if app.ENABLE_WIKI:
@@ -673,6 +893,29 @@ class Interface(object):
 			if self.wndWiki == None:
 				self.wndWiki = uiWiki.EncyclopediaofGame()
 				self.wndWiki.LoadGuidePage()
+
+		def OnWikiCatalog(self, action, *args):
+			if self.wndWiki is not None:
+				self.wndWiki.Feed(action, *args)
+
+		def OnLiveCatalog(self, *args):
+			# The server changed a live catalog: the session catalogue is marked, never refetched here.
+			if self.wndWiki is not None:
+				self.wndWiki.OnLiveCatalog(*args)
+
+		def UseWikiCatalog(self):
+			# TAB may be the first consumer, before the first status callback.
+			self.MakeWiki()
+			if self.wndWiki is not None:
+				self.wndWiki.UseCatalog()
+
+		def WarmWiki(self):
+			self.MakeWiki()
+			self.wndWiki.OnGameReady()
+
+		def UpdateWiki(self):
+			if self.wndWiki is not None:
+				self.wndWiki.OnUpdate(pump=True)
 
 	def __MakeTaskBar(self):
 		wndTaskBar = uiTaskBar.TaskBar()
@@ -693,6 +936,7 @@ class Interface(object):
 		self.wndExpandedTaskBar = uiTaskBar.ExpandedTaskBar()
 		self.wndExpandedTaskBar.LoadWindow()
 		self.wndExpandedTaskBar.BindInventoryWindow(self.wndInventory)
+		self.wndExpandedTaskBar.BindInterface(self)
 		self.wndExpandedTaskBar.SetToggleButtonEvent(uiTaskBar.ExpandedTaskBar.BUTTON_QUICK_EQUIP, ui.__mem_func__(self.ToggleQuickEquipWindow))
 		if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 			self.wndExpandedTaskBar.SetToggleButtonEvent(uiTaskBar.ExpandedTaskBar.BUTTON_SPECIAL_INVENTORY, ui.__mem_func__(self.ToggleSpecialInventoryWindow))
@@ -752,14 +996,21 @@ class Interface(object):
 		self.wndSkillTree.Hide()
 		self.wndMiniMap.SetSkillTreeButtonEvent(ui.__mem_func__(self.ToggleSkillTreeWindow))
 
-	def __MakeGMPanelWindow(self):
-		self.wndGMPanel = uigmpanel.GMPanelWindow()
-		self.wndGMPanel.Hide()
+	def __MakeGMPanelQuery(self):
+		# The panel is built by OnGMPanelResult once the server grants an
+		# action. Until then this holds the request state the panel keeps for
+		# itself, and hands it over so request ids stay increasing. "catalog"
+		# collects what the server describes ahead of a granting result.
+		self.gmPanelQuery = {"requestID": 0, "openAfterQuery": False, "capabilitiesLoaded": False,
+			"catalog": None}
 
 	def __MakeWindows(self):
+		startupTiming = startuptiming.Timer("windows")
 		self.wndCharacter = uiCharacter.CharacterWindow()
+		startupTiming.Mark("wndCharacter")
 		self.wndCharacter.SetPermanentTaskBonuses(0, 0)
 		self.wndPermanentTasks = uipermanenttasks.PermanentTasksWindow()
+		startupTiming.Mark("wndPermanentTasks")
 		self.wndPermanentTasks.SetSnapshotRequestEvent(
 			ui.__mem_func__(self.RequestPermanentTasksSnapshot),
 		)
@@ -774,21 +1025,32 @@ class Interface(object):
 			self.wndDailyTasks.SetHandInEvent(
 				ui.__mem_func__(self.RequestDailyTaskHandIn)
 			)
+			self.wndDailyTasks.SetHandInNearEvent(
+				ui.__mem_func__(self.IsCraftContractHandInNear)
+			)
+		startupTiming.Mark("wndDailyTasks")
 
 		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
 			self.wndCustomPorts = uicustomports.CustomPortsWindow()
+		startupTiming.Mark("wndCustomPorts")
 
 		if getattr(app, "ENABLE_AFK_SYSTEM", 0):
 			self.afkSystem = uiafksystem.AfkSystem()
 			self.afkSystem.BindTipBoard(self.tipBoard)
+		startupTiming.Mark("afkSystem")
 
 		if getattr(app, "ENABLE_DROP_TRACKER", 0):
 			self.dropTrackerSystem = uidroptracker.DropTrackerSystem()
+		startupTiming.Mark("dropTrackerSystem")
 
 		self.quickBuffSystem = uiquickbuff.QuickBuffSystem()
+		startupTiming.Mark("quickBuffSystem")
+		self.inputGuardSystem = uiinputguard.InputGuardSystem()
 		self.wndInventory = uiInventory.InventoryWindow()
+		startupTiming.Mark("wndInventory")
 		self.wndInventory.BindInterfaceClass(self)
 		self.wndQuickEquip = uiquickequip.QuickEquipWindow()
+		startupTiming.Mark("wndQuickEquip")
 		self.wndQuickEquip.SetCloseEvent(ui.__mem_func__(self.__QuickEquipClosed))
 		if uiTalisman.IsSupported():
 			candidate = uiTalisman.TalismanWindow()
@@ -797,6 +1059,7 @@ class Interface(object):
 				self.wndTalisman.SetCloseEvent(
 					ui.__mem_func__(self.CloseTalismanWindow)
 				)
+		startupTiming.Mark("wndTalisman")
 		self.talismanSetAvailable = self.wndTalisman is not None
 		if self.wndTalisman:
 			self.wndTalisman.SetCapability(self.talismanSetAvailable)
@@ -806,10 +1069,13 @@ class Interface(object):
 				self.talismanSetAvailable,
 			)
 		self.wndRarity = uiRarity.RarityDialog()
+		startupTiming.Mark("wndRarity")
 		self.wndRarity.BindInterface(self)
 		self.wndResonance = uiresonance.ResonanceWindow()
+		startupTiming.Mark("wndResonance")
 		self.wndCostumeInventory = \
 			uiCostumeInventory.CostumeInventoryWindow(self.wndInventory)
+		startupTiming.Mark("wndCostumeInventory")
 
 		if app.ENABLE_DRAGON_SOUL_SYSTEM:
 			self.wndDragonSoul = uiDragonSoul.DragonSoulWindow()
@@ -818,37 +1084,48 @@ class Interface(object):
 		else:
 			wndDragonSoul = None
 			wndDragonSoulRefine = None
+		startupTiming.Mark("wndDragonSoul")
 
 		self.wndMiniMap = uiMiniMap.MiniMap()
+		startupTiming.Mark("wndMiniMap")
 		self.wndMountSystem = uiMountSystem.MountSystemWindow()
+		startupTiming.Mark("wndMountSystem")
 		if app.ENABLE_DUNGEON_INFO:
 			self.wndMiniMap.BindInterfaceClass(self)
 		if not osfInfo.OPEN_SAFEBOX_MALL_IN_SPECIAL_INV:
 			self.wndSafebox = uiSafebox.SafeboxWindow()
 			if app.WJ_ENABLE_TRADABLE_ICON:
 				self.wndSafebox.BindInterface(self)
+		startupTiming.Mark("wndSafebox")
 
 		if app.ENABLE_SWITCHBOT_SYSTEM:
 			self.wndSwitchbot = uiSwitchbot.SwitchbotWindow()
+		startupTiming.Mark("wndSwitchbot")
 
 		if app.ENABLE_SKILLBOOK_COMB_SYSTEM:
 			self.wndSkillBookCombination = uiSkillBookCombination.SkillBookCombinationWindow()
+		startupTiming.Mark("wndSkillBookCombination")
 
 		if app.ENABLE_CHANGE_LOOK_SYSTEM:
 			self.wndChangeLook = uiChangeLook.ChangeLookWindow()
+		startupTiming.Mark("wndChangeLook")
 
 		if app.ENABLE_RENDER_TARGET_PREVIEW:
 			self.wndRenderTargetView = uiRenderTargetView.RenderTargetWindow()
+		startupTiming.Mark("wndRenderTargetView")
 
 		if app.ENABLE_DUNGEON_TIME_WINDOW:
 			self.wndDungeonTime = uiDungeonTime.DungeonTimeWindow()
+		startupTiming.Mark("wndDungeonTime")
 
 		if app.ENABLE_RANKING_SYSTEM:
 			self.wndRankingBoardWindow = uiRankingBoard.RankingBoardWindow()
+		startupTiming.Mark("wndRankingBoardWindow")
 
 		if app.ENABLE_BUFF_SYSTEM:
 			self.wndSupportPG = uiBuff.SupportMainGui()
 			self.wndSupportUpgrade = uiBuffUpgrade.SupportUpgrade()
+		startupTiming.Mark("wndSupportPG")
 
 		if app.ENABLE_ATTR_6TH_7TH:
 			wndAttr67Add = uiAttr67Add.Attr67AddWindow()
@@ -856,24 +1133,30 @@ class Interface(object):
 				wndAttr67Add.BindInterface(self)
 				wndAttr67Add.SetInven(self.wndInventory)
 			self.wndAttr67Add = wndAttr67Add
+		startupTiming.Mark("wndAttr67Add")
 
 		if not osfInfo.OPEN_SAFEBOX_MALL_IN_SPECIAL_INV:
 			self.wndMall = uiSafebox.MallWindow()
+		startupTiming.Mark("wndMall")
 		wndChatLog = uiChat.ChatLogWindow()
 		wndChatLog.BindInterface(self)
 		self.wndChatLog = wndChatLog
 
 		if app.ENABLE_SHOP_SEARCH:
 			self.wndShopSearch = uishopsearch.ShopSearchWindow(self)
+		startupTiming.Mark("wndShopSearch")
 
 		if app.ENABLE_KINGDOMS_WAR:
 			self.wndKingdomsWar = uikingdomswar.Window()
+		startupTiming.Mark("wndKingdomsWar")
 
 		if app.ENABLE_MINI_GAME_CATCH_KING:
 			self.wndCatchKingGame = uiMiniGameCatchKing.MiniGameCatchKing()
+		startupTiming.Mark("wndCatchKingGame")
 
 		if app.ENABLE_SKILL_SELECT_GUI:
 			self.wndSkillSelect = uiselectskill.SkillSelectWindow()
+		startupTiming.Mark("wndSkillSelect")
 
 		if app.ENABLE_DRAGON_SOUL_SYSTEM:
 			self.wndDragonSoul.SetDragonSoulRefineWindow(self.wndDragonSoulRefine)
@@ -882,6 +1165,7 @@ class Interface(object):
 
 		if app.ENABLE_GUILD_DRAGONLAIR_SYSTEM:
 			self.wndGuildDragonLairRanking = uiGuildDragonLairRanking.GuildDragonLairRankingDialog()
+		startupTiming.Mark("wndGuildDragonLairRanking")
 
 		if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 			if inventoryshortcutpolicy.IsMultipleSelectEnabled(app.ENABLE_MULTIPLE_SELECT):
@@ -895,19 +1179,27 @@ class Interface(object):
 				if app.WJ_ENABLE_TRADABLE_ICON:
 					self.wndSafebox.BindInterface(self)
 				self.wndSpecialInventory.BindSafeboxAndMallClass(self.wndSafebox, self.wndMall)
+		startupTiming.Mark("wndSpecialInventory")
 
 		if app.ENABLE_CAPTCHA_SYSTEM and not getattr(app, "ENABLE_CAPTCHA_V2", 0):
 			self.wndCaptcha = uiCaptcha.CaptchaDialog()
 			self.wndCaptcha.BindInterface(self)
+		startupTiming.Mark("wndCaptcha")
 
 		if app.ENABLE_OFFLINE_SHOP:
 			self.wndSellHistory = uiSellHistory.SellLogWindow()
+		startupTiming.Mark("wndSellHistory")
 
 		if app.ENABLE_SHOW_CHEST_DROP:
+			self.chestPreviewBroker = chestpreview.ChestPreviewBroker(net.SendChestDropInfoByVnum)
 			self.dlgChestDrop = uiChestDrop.ChestDropWindow()
+			self.dlgChestDrop.SetPreviewService(ui.__mem_func__(self.RequestChestPreview),
+				ui.__mem_func__(self.CancelChestPreview))
+		startupTiming.Mark("chestPreviewBroker")
 
 		if app.ENABLE_MAINTENANCE_SYSTEM:
-			self.wndMaintenance = uiMaintenance.MaintenanceBoard()
+			self.wndMaintenance = uiMaintenance.MaintenanceIndicator()
+		startupTiming.Mark("wndMaintenance")
 
 		if app.ENABLE_AURA_SYSTEM:
 			wndAura = uiAura.AuraWindow()
@@ -926,9 +1218,11 @@ class Interface(object):
 				if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 					if self.wndSpecialInventory:
 						self.wndAura.SetSpecialInven(self.wndSpecialInventory)
+		startupTiming.Mark("wndAura")
 
 		if app.ENABLE_FAST_READ_STONE_AND_SKILLBOOK:
 			self.wndUpgradeSkill = uiSkillUpgrade.SkillUpgradeWindow()
+		startupTiming.Mark("wndUpgradeSkill")
 
 		if app.ENABLE_GROWTH_PET_SYSTEM:
 			self.wndPetInfoWindow = uiPetInfo.PetInformationWindow()
@@ -936,25 +1230,34 @@ class Interface(object):
 			self.wndInventory.SetPetHatchingWindow(self.wndPetInfoWindow.GetPetHatchingWindow())
 			self.wndInventory.SetPetFeedWindow(self.wndPetInfoWindow.GetPetFeedWindow())
 			self.wndInventory.SetPetNameChangeWindow(self.wndPetInfoWindow.GetPetNameChangeWindow())
+		startupTiming.Mark("wndPetInfoWindow")
 
 		if app.ENABLE_PLAYER_RANKING:
 			self.wndRankInfo = uirankinfo.RankInfo()
+		startupTiming.Mark("wndRankInfo")
 
 		if app.ENABLE_LOADING_PERFORMANCE:
 			self.wndWarpShower = uiWarpShower.WarpShowerWindow()
+		startupTiming.Mark("wndWarpShower")
 
 		if app.ENABLE_FISHING_GAME:
 			self.wndFishingGame = uiFishingGame.FishGame()
+		startupTiming.Mark("wndFishingGame")
 
 		if CAPTCHA_WINDOW_ENABLED:
 			self.wndCaptchaNew = uiCaptchaNew.CaptchaWindow()
+		startupTiming.Mark("wndCaptchaNew")
 
 		if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 			self.wndAutoHunting = uiAutoHuntingSystem.AutoHuntingSystemWindow()
 			self.wndAutoHunting.LoadAutoWindow()
+		startupTiming.Mark("wndAutoHunting")
+		startupTiming.Finish()
 
 	def __MakeDialogs(self):
+		startupTiming = startuptiming.Timer("dialogs")
 		self.dlgExchange = uiExchange.ExchangeDialog()
+		startupTiming.Mark("dlgExchange")
 		self.dlgExchange.LoadDialog()
 		self.dlgExchange.SetCenterPosition()
 		if app.WJ_ENABLE_TRADABLE_ICON:
@@ -962,24 +1265,29 @@ class Interface(object):
 		self.dlgExchange.Hide()
 
 		self.dlgPointReset = uiPointReset.PointResetDialog()
+		startupTiming.Mark("dlgPointReset")
 		self.dlgPointReset.LoadDialog()
 		self.dlgPointReset.Hide()
 
 		self.dlgShop = uiShop.ShopDialog()
+		startupTiming.Mark("dlgShop")
 		self.dlgShop.LoadDialog()
 		if app.WJ_ENABLE_TRADABLE_ICON:
 			self.dlgShop.BindInterface(self)
 		self.dlgShop.Hide()
 
 		self.dlgRestart = uiRestart.RestartDialog()
+		startupTiming.Mark("dlgRestart")
 		self.dlgRestart.LoadDialog()
 		self.dlgRestart.Hide()
 
 		if app.ENABLE_TELEPORT_WINDOW:
 			self.wndTeleportPanel = uiTeleportPanel.TeleportPanel()
 			self.wndTeleportAtlas = uiTeleport.TeleportAtlasWindow()
+		startupTiming.Mark("wndTeleportPanel")
 
 		self.dlgSystem = uiSystem.SystemDialog()
+		startupTiming.Mark("dlgSystem")
 		self.dlgSystem.LoadDialog()
 		self.dlgSystem.SetOpenHelpWindowEvent(ui.__mem_func__(self.OpenHelpWindow))
 		self.dlgSystem.SetPrepareExitEvent(
@@ -989,12 +1297,15 @@ class Interface(object):
 		self.dlgSystem.Hide()
 
 		self.dlgPassword = uiSafebox.PasswordDialog()
+		startupTiming.Mark("dlgPassword")
 		self.dlgPassword.Hide()
 
 		self.hyperlinkItemTooltip = uiToolTip.HyperlinkItemToolTip()
+		startupTiming.Mark("hyperlinkItemTooltip")
 		self.hyperlinkItemTooltip.Hide()
 
 		self.tooltipItem = uiToolTip.ItemToolTip()
+		startupTiming.Mark("tooltipItem")
 		if app.ENABLE_DS_SET or app.ENABLE_RENDER_TARGET_PREVIEW:
 			self.tooltipItem.BindInterface(self)
 		self.tooltipItem.Hide()
@@ -1008,14 +1319,17 @@ class Interface(object):
 			self.wndResonance.SetItemToolTip(self.tooltipItem)
 
 		self.tooltipSkill = uiToolTip.SkillToolTip()
+		startupTiming.Mark("tooltipSkill")
 		self.tooltipSkill.Hide()
 
 		self.privateShopBuilder = uiPrivateShopBuilder.PrivateShopBuilder()
+		startupTiming.Mark("privateShopBuilder")
 		if app.WJ_ENABLE_TRADABLE_ICON:
 			self.privateShopBuilder.BindInterface(self)
 		self.privateShopBuilder.Hide()
 
 		self.dlgRefineNew = uiRefine.RefineDialogNew()
+		startupTiming.Mark("dlgRefineNew")
 		self.dlgRefineNew.BindInterface(self)
 		if app.WJ_ENABLE_TRADABLE_ICON:
 			self.dlgRefineNew.SetInven(self.wndInventory)
@@ -1031,10 +1345,12 @@ class Interface(object):
 			if app.WJ_ENABLE_TRADABLE_ICON:
 				self.dlgRefineElementChange.SetInven(self.wndInventory)
 			self.dlgRefineElementChange.Hide()
+		startupTiming.Mark("dlgRefineElement")
 
 		if app.ENABLE_GROWTH_PET_SYSTEM:
 			self.tooltipPetSkill = uiToolTip.PetSkillToolTip()
 			self.tooltipPetSkill.Hide()
+		startupTiming.Mark("tooltipPetSkill")
 
 		if app.ENABLE_BUFF_SYSTEM:
 			self.wndSupportPG.SetItemToolTip(self.tooltipItem)
@@ -1042,6 +1358,7 @@ class Interface(object):
 			self.wndSupportPG.BindInterface(self)
 			self.wndSupportUpgrade.SetItemToolTip(self.tooltipItem)	
 			self.wndSupportUpgrade.SetSkillToolTip(self.tooltipSkill)
+		startupTiming.Finish()
 
 	def GetInventoryWnd(self):
 		return self.wndInventory
@@ -1136,18 +1453,38 @@ class Interface(object):
 
 	def __MakeTipBoard(self):
 		self.noticeBoard = uinoticeboard.NoticeBoard()
+		self.noticeBoard.protectedRects = ui.__mem_func__(self.NoticeProtectedRects)
 		self.tipBoard = uinoticeboard.NoticeSink(self.noticeBoard, 1)
 		self.bigBoard = uinoticeboard.NoticeSink(self.noticeBoard, 4)
 		if app.ENABLE_12ZI:
 			self.missionBoard = uinoticeboard.MissionSink(self.noticeBoard)
 
+	def ShowAltheaMeteorNotice(self):
+		if self.noticeBoard:
+			import noticestyle
+			self.noticeBoard.Add(uiScriptLocale.ALTHEA_METEOR_APPEARED, noticestyle.METEOR_STYLE)
+
+	def NoticeProtectedRects(self):
+		import noticeplacement
+		return noticeplacement.protected_rectangles(self.uitargetBoard)
+
 	def UpdateNoticeBoard(self, arrivalVisible=False):
 		self.petAlbumArrivalVisible = bool(arrivalVisible)
+		if (self.wndGameNotification and self.wndGameNotification.blockedAt is not None
+				and not arrivalVisible and not self.IsHideUiMode):
+			self.wndGameNotification.OnUpdate()
 		if self.petAlbumNotice:
 			if arrivalVisible or self.IsHideUiMode:
 				self.petAlbumNotice.Suspend()
 			else:
 				self.petAlbumNotice.Resume()
+				self.petAlbumNotice.OnUpdate()
+		if self.achievementNotice:
+			if arrivalVisible or self.IsHideUiMode:
+				self.achievementNotice.Suspend()
+			else:
+				self.achievementNotice.Resume()
+				self.achievementNotice.OnUpdate()
 		if self.noticeBoard:
 			self.noticeBoard.Update(arrivalVisible)
 
@@ -1191,6 +1528,7 @@ class Interface(object):
 
 	def MakeGameNotification(self):
 		self.wndGameNotification = uigamenotification.GameNotificationManager()
+		self.wndGameNotification.protectedRects = ui.__mem_func__(self.NoticeProtectedRects)
 
 	def PushGameNotification(self, title, message, iconVnum=0):
 		if not self.wndGameNotification:
@@ -1219,7 +1557,7 @@ class Interface(object):
 
 	if PVP_MATCHMAKING_ENABLED:
 		def MakePvPMatchmakingWindow(self):
-			self.wndPvPMatchmaking = uipvpmatchmaking.PvPMatchmakingWindow()
+			self.wndPvPMatchmaking = uipvpmatchmaking.CreateWindow()
 
 		def TogglePvPMatchmakingWindow(self):
 			if not self.wndPvPMatchmaking:
@@ -1242,8 +1580,6 @@ class Interface(object):
 	def __FeatureWindows(self, name):
 		windows = []
 		if name == featureavailability.RANKINGS:
-			if app.ENABLE_PLAYER_RANKING:
-				windows.append(getattr(self, "wndRankInfo", None))
 			if app.ENABLE_RANKING_SYSTEM:
 				windows.append(getattr(self, "wndRankingBoardWindow", None))
 			if app.ENABLE_GUILD_DRAGONLAIR_SYSTEM:
@@ -1342,15 +1678,24 @@ class Interface(object):
 
 	def MakeInterface(self):
 		ui.SetCrimsonGameControlsEnabled(True)
+		startupTiming = startuptiming.Timer("interface")
 		self.__MakeTipBoard() # ENABLE_12ZI 미션 표시가 다른ui 밑에 오도록 위치 이동.
+		startupTiming.Mark("__MakeTipBoard")
 		self.__MakeMessengerWindow()
+		startupTiming.Mark("__MakeMessengerWindow")
 		self.__MakeGuildWindow()
+		startupTiming.Mark("__MakeGuildWindow")
 		self.__MakeChatWindow()
+		startupTiming.Mark("__MakeChatWindow")
 		self.__MakeParty()
+		startupTiming.Mark("__MakeParty")
 		self.__MakeWindows()
+		startupTiming.Mark("__MakeWindows")
 		self.__MakeSkillTreeWindow()
-		self.__MakeGMPanelWindow()
+		self.__MakeGMPanelQuery()
+		startupTiming.Mark("skill_tree_and_staff_query")
 		self.__MakeDialogs()
+		startupTiming.Mark("__MakeDialogs")
 
 		if app.ENABLE_CUBE_RENEWAL:
 			self.__MakeCubeRenewal()
@@ -1362,6 +1707,7 @@ class Interface(object):
 			self.wndAura.SetItemToolTip(self.tooltipItem)
 
 		self.MakeGameNotification()
+		startupTiming.Mark("MakeGameNotification")
 
 		if app.ENABLE_BIOLOG_SYSTEM:
 			self.MakeBioWindow()
@@ -1370,24 +1716,33 @@ class Interface(object):
 			self.MakePvPMatchmakingWindow()
 
 		self.featureAvailabilityListener = ui.__mem_func__(self.OnFeatureAvailability)
+		startupTiming.Mark("featureAvailabilityListener")
 		featureavailability.SetListener(self.featureAvailabilityListener)
 
 		if app.ENABLE_MINI_GAME_CATCH_KING:
 			self.__MakeCatchKingIconWindow()
 
 		self.__MakeUICurtain()
+		startupTiming.Mark("__MakeUICurtain")
 		self.__MakeTaskBar()
+		startupTiming.Mark("__MakeTaskBar")
 		self.__MakeGameButtonWindow()
+		startupTiming.Mark("__MakeGameButtonWindow")
 		self.__MakeHelpWindow()
+		startupTiming.Mark("__MakeHelpWindow")
 		self.__MakeWebWindow()
+		startupTiming.Mark("__MakeWebWindow")
 		if app.ENABLE_ACCE_COSTUME_SYSTEM:
 			self.__MakeAcceWindow()
 		self.__MakeCubeWindow()
+		startupTiming.Mark("__MakeCubeWindow")
 		self.__MakeCubeResultWindow()
+		startupTiming.Mark("__MakeCubeResultWindow")
 		if app.ENABLE_SHOW_CHEST_DROP:
 			self.dlgChestDrop.SetItemToolTip(self.tooltipItem)
 		# ACCESSORY_REFINE_ADD_METIN_STONE
 		self.__MakeItemSelectWindow()
+		startupTiming.Mark("__MakeItemSelectWindow")
 		# END_OF_ACCESSORY_REFINE_ADD_METIN_STONE
 
 		if app.ENABLE_MINI_GAME_OKEY:
@@ -1405,6 +1760,7 @@ class Interface(object):
 		self.__CreatePermanentTasksQuestButton()
 		if self.wndDailyTasks:
 			self.__CreateDailyTasksQuestButton()
+			self.AttachCraftContracts()
 		self.wndCharacter.SetQuestShortcuts([
 			(btn.index, btn.name, localeInfo.GetQuestScrollNormalImageName(), btn.CallEvent)
 			for btn in self.questButtonList[:PERSISTENT_QUEST_BUTTON_COUNT]
@@ -1489,6 +1845,7 @@ class Interface(object):
 			self.__MakeScroolWindow()
 
 		self.__InitWhisper()
+		startupTiming.Mark("__InitWhisper")
 		self.DRAGON_SOUL_IS_QUALIFIED = False
 
 		#self.IntegrationEventBanner()
@@ -1501,7 +1858,39 @@ class Interface(object):
 			self.wndAutoHunting.SetItemToolTip(self.tooltipItem)
 
 		self.systemNotifications = systemnotifications.NotificationManager(self)
+		startupTiming.Mark("systemNotifications")
 		self.MakeCountdownHUD()
+		self.MakeEventBoxHUD()
+		startupTiming.Mark("MakeCountdownHUD")
+		startupTiming.Finish()
+
+	def MakeEventBoxHUD(self):
+		import eventboxmodel
+		import uieventbox
+		self.eventBoxHudHidden = False
+		self.wndEventBoxButton = uieventbox.EventBoxButton()
+		eventboxmodel.RECEIVER.sender = net.SendChatPacket
+		eventboxmodel.RECEIVER.buttonListener = ui.__mem_func__(self.SetEventBoxButton)
+		self.SetEventBoxButton(eventboxmodel.RECEIVER.HudVisible())
+
+	def SetEventBoxButton(self, on):
+		button = getattr(self, "wndEventBoxButton", None)
+		if button is not None:
+			if on and not getattr(self, "eventBoxHudHidden", False):
+				button.Show()
+			else:
+				button.Hide()
+
+	def HideEventBoxHUD(self):
+		import uieventbox
+		self.eventBoxHudHidden = True
+		self.SetEventBoxButton(False)
+		uieventbox.Close()
+
+	def ResumeEventBoxHUD(self):
+		import eventboxmodel
+		self.eventBoxHudHidden = False
+		self.SetEventBoxButton(eventboxmodel.RECEIVER.HudVisible())
 
 	def MakeCountdownHUD(self):
 		if not (app.ENABLE_DUNGEON_INFO or app.ENABLE_BIOLOG_SYSTEM):
@@ -1531,6 +1920,257 @@ class Interface(object):
 			self.wndMissionBooks.Close()
 		else:
 			self.OpenMissionBooks()
+
+	def CraftBookModel(self):
+		if self.craftBookModel is None:
+			import craftbookmodel
+			self.craftBookModel = craftbookmodel.CraftBookModel()
+		return self.craftBookModel
+
+	def ToggleCraftBookWindow(self):
+		window = self.wndCraftBook
+		if window and window.IsShow():
+			window.Close()
+			return
+		if window is None:
+			import uicraftbook
+			window = self.wndCraftBook = uicraftbook.Create(self.CraftBookModel(), self.MiningCheck(), self.WoodCheck())
+			if hasattr(window, 'SetMasteryModel') and hasattr(self, 'CraftMasteryModel'):
+				window.SetMasteryModel(self.CraftMasteryModel())
+			if window is not None and hasattr(window, 'SetTitlesModel') and hasattr(self, 'CraftTitlesModel'):
+				window.SetTitlesModel(self.CraftTitlesModel())
+			if window is None:
+				return
+		window.Open()
+
+	def CraftBookChanged(self):
+		book = self.wndCraftBook
+		if book and book.IsShow():
+			book.RequestLive()
+
+	def CraftBookServerLine(self, command, args):
+		if self.wndCraftBook:
+			self.wndCraftBook.Reply(command)
+		if self.CraftBookModel().Feed(command, args) and self.wndCraftBook:
+			self.wndCraftBook.Refresh()
+
+	# Craft mastery (root/craftmasterymodel.py, server "/craft_mastery state"): the model always collects; the
+	# book shows it on its Strom page and the levels on its craft switch.
+	def CraftMasteryModel(self):
+		if self.craftMasteryModel is None:
+			import craftmasterymodel
+			self.craftMasteryModel = craftmasterymodel.CraftMasteryModel()
+		return self.craftMasteryModel
+
+	def CraftMasteryServerLine(self, command, args):
+		import craftmasterymodel
+		book = self.wndCraftBook
+		if book:
+			book.Reply(command)
+		if command == craftmasterymodel.EXP:
+			self.CraftBookChanged()
+		if self.CraftMasteryModel().Feed(command, args) and book and hasattr(book, 'RefreshMastery'):
+			# the EXP line of every gathering result redraws only an open book (Open asks for a fresh snapshot)
+			if command != craftmasterymodel.EXP or book.IsShow():
+				book.RefreshMastery()
+		elif command == craftmasterymodel.LEVEL and book and book.IsShow() and hasattr(book, 'RequestMastery'):
+			# a level-up changes the points and the nodes that can be bought: one snapshot, only for an open book
+			book.RequestMastery()
+
+	# Own craft titles and tool looks (root/crafttitlesmodel.py, server "/craft_mastery titles"): the book's Tituly a
+	# vzhled page.
+	def CraftTitlesModel(self):
+		if self.craftTitlesModel is None:
+			import crafttitlesmodel
+			self.craftTitlesModel = crafttitlesmodel.CraftTitlesModel()
+		return self.craftTitlesModel
+
+	def CraftTitlesServerLine(self, command, args):
+		if self.wndCraftBook:
+			self.wndCraftBook.Reply(command)
+		if self.CraftTitlesModel().Feed(command, args) and self.wndCraftBook and \
+				hasattr(self.wndCraftBook, 'RefreshTitles'):
+			self.wndCraftBook.RefreshTitles()
+
+	# Craft contracts (root/craftcontractmodel.py, server "CraftContractV1"): rows in the Denní úkoly window and the
+	# number of waiting contracts on its letter.
+	def CraftContractModel(self):
+		if getattr(self, 'craftContractModel', None) is None:
+			import craftcontractmodel
+			self.craftContractModel = craftcontractmodel.CraftContractModel()
+		return self.craftContractModel
+
+	def CraftContractServerLine(self, command, args):
+		if command == 'CraftContractReply':
+			self.ShowCraftContractReply(args)
+			return
+		if self.CraftContractModel().Feed(command, args):
+			self.RefreshCraftContracts()
+		if command == 'CraftContractV1' and args and self.wndContractHandIn:
+			try:
+				self.wndContractHandIn.OnServerState(int(args[0]))
+			except (ValueError, TypeError):
+				pass
+
+	def ShowCraftContractReply(self, args):
+		"""The server's answer to the Odevzdat button of a contract row, as a dialog (the chat line is easy to miss)."""
+		import craftcontractmodel
+		if self.CraftContractModel().Reply(args):
+			self.RefreshCraftContracts()
+		if self.wndContractHandIn and self.wndContractHandIn.IsShow() and len(args) == 3:
+			if args[0] == str(craftcontractmodel._CraftOf(self.wndContractHandIn.taskId)):
+				self.wndContractHandIn.OnReply(args[1] == '0')
+		text = craftcontractmodel.ReplyText(args)
+		if not text:
+			return
+		if not self.wndCraftContractReply:
+			self.wndCraftContractReply = uiCommon.PopupDialog()
+			self.wndCraftContractReply.SetWidth(320)
+		self.wndCraftContractReply.SetText(text)
+		self.wndCraftContractReply.Open()
+
+	def RequestCraftContracts(self):
+		if getattr(self, 'craftContractRequester', None) is None:
+			import craftcontractmodel
+			import uicraftbook
+			self.craftContractRequester = uicraftbook.Requester(craftcontractmodel.REQUEST)
+		return self.craftContractRequester.Request()
+
+	def AttachCraftContracts(self):
+		"""After the Denní úkoly letter exists: the ruby badge of the button panels on it (the number of waiting
+		contracts) and the window asks for the rows whenever it opens. The first request waits for ENTERGAME
+		(RequestCraftContractsAfterEnter): this runs while the interface is built, before it, and the server drops
+		a command sent then while the requester's gap held back the window's own first request (15. 10.)."""
+		import uibuttonpaneldecor
+		button = self.__FindQuestButton("daily_tasks")
+		if button and not getattr(button, 'contractDecor', None):
+			button.contractDecor = uibuttonpaneldecor.ButtonDecor(button, uibuttonpaneldecor.KIND_MEDALLION)
+		if self.wndDailyTasks:
+			self.wndDailyTasks.SetContractsRequestEvent(ui.__mem_func__(self.RequestCraftContracts))
+		self.RefreshCraftContracts()
+
+	def RequestCraftContractsAfterEnter(self):
+		"""game.py Open, right after the ENTERGAME packet: the contract rows and the badge number once per login."""
+		if self.wndDailyTasks:
+			self.RequestCraftContracts()
+
+	def HandInCraftContract(self, taskId):
+		"""The Odevzdat button of a done contract row opens the hand-in window (uicontracthandin, REM-ODEVZDAT-CO):
+		the player puts in what to hand in; the server checks it again (ContractHandIn) and answers (CraftContractReply)."""
+		import craftcontractmodel
+		if not craftcontractmodel.HandInCommand(taskId) or not self.CraftContractModel().HandInPieces(taskId):
+			return False
+		if not self.wndContractHandIn:
+			import uicontracthandin
+			self.wndContractHandIn = uicontracthandin.ContractHandInWindow(self)
+		name = u""
+		for row in self.CraftContractModel().Records():
+			if row["id"] == taskId:
+				name = row["name"]
+		self.wndContractHandIn.Open(taskId, name)
+		return True
+
+	def SendCraftContractCommand(self, command):
+		net.SendChatPacket(command)
+		return True
+
+	def IsCraftContractHandInNear(self, taskId):
+		"""The Odevzdat button of a contract row is active only in range of its NPC (CraftContractNpcV1)."""
+		import player
+		return self.CraftContractModel().HandInNear(taskId, player.GetCharacterDistance)
+
+	def RefreshCraftContracts(self):
+		model = self.CraftContractModel()
+		if self.wndDailyTasks:
+			self.wndDailyTasks.SetContracts(model.Records())
+		button = self.__FindQuestButton("daily_tasks")
+		decor = getattr(button, 'contractDecor', None) if button else None
+		if decor:
+			import buttonpanelbadges
+			waiting = model.Waiting()
+			decor.SetDecor(buttonpanelbadges.Decor(buttonpanelbadges.BADGE_ACTION, waiting) if waiting else
+						   buttonpanelbadges.EMPTY)
+
+	# The blacksmith's refine
+	# window in its tool mode. The shop of an upgrade NPC offers it, a tool dragged onto the NPC opens it.
+	def CraftToolServerLine(self, command, args):
+		import crafttoolmodel
+		parsed = crafttoolmodel.Parse(command, args)
+		if parsed is None:
+			return False
+		if command == crafttoolmodel.SHOP:
+			if self.dlgShop:
+				self.dlgShop.SetCraftTools(parsed, ui.__mem_func__(self.OpenCraftToolWindow))
+		elif command == crafttoolmodel.OPEN:
+			self.OpenCraftToolWindow((), parsed)
+		elif self.dlgRefineNew and self.dlgRefineNew.IsShow() and self.dlgRefineNew.IsToolMode():
+			self.dlgRefineNew.SetToolState(parsed)
+		return True
+
+	def OpenCraftToolWindow(self, toolIds=(), cell=None):
+		"""The tool window, empty (the shop's "Vylepšit nástroj": the shop closes) or for the tool in ``cell``."""
+		if self.dlgShop and self.dlgShop.IsShow():
+			self.dlgShop.Close()
+		if self.dlgRefineNew:
+			self.dlgRefineNew.OpenTool(toolIds, cell)
+
+	# Mining skill check (uiminingcheck): the controller lives for the session; the window is made on the first ring.
+	def MiningCheck(self):
+		if self.miningCheck is None:
+			import uiminingcheck
+			self.miningCheck = uiminingcheck.MiningCheck()
+		return self.miningCheck
+
+	def MiningCheckServerLine(self, command, args):
+		if self.MiningCheck().Feed(command, args) and command == "MiningCheckModeV1" and self.wndCraftBook:
+			self.wndCraftBook.RefreshMiningMode()
+
+	def MiningCheckHit(self):
+		if self.miningCheck:
+			self.miningCheck.Hit()
+
+	# Space (game.OnKeyDown) while a minigame quick-time event is up: the hit instead of the attack.
+	# True = Space is taken; False = it attacks as usual (no ring, no fishing game).
+	# The woodcutting bar does not take Space (it takes the arrows / WASD, MinigameDirectionKey).
+	def MinigameSpaceHit(self):
+		fishing = getattr(self, "wndFishingGame", None)
+		if fishing and fishing.IsShow():
+			return fishing.SpaceHit()
+		if self.miningCheck and self.miningCheck.SpaceHit():
+			return True
+		# while the woodcutting bar can be hit, Space is swallowed: an attack would cancel the cut
+		wood = getattr(self, "woodCheck", None)
+		if wood and wood.Shown() and wood.window and wood.window.Hittable(wood.Clock()):
+			return True
+		return False
+
+	# The arrows and W/A/S/D (game.OnKeyDown) while the woodcutting bar is up: the direction of a strike, never a
+	# step (a step would cancel the cut). True = the key is taken.
+	def MinigameDirectionKey(self, key):
+		wood = getattr(self, "woodCheck", None)
+		return bool(wood and wood.KeyDown(key))
+
+	# game.OnKeyUp: the key up of a key the bar took is swallowed too (no StopUp & co. for a step never started).
+	def MinigameDirectionKeyUp(self, key):
+		wood = getattr(self, "woodCheck", None)
+		return bool(wood and wood.KeyUp(key))
+
+	def UpdateMiningCheck(self):
+		self.MiningCheck().Update()
+
+	# Woodcutting rhythm bar (uiwoodcheck): the controller lives for the session; the bar is made on the first cut.
+	def WoodCheck(self):
+		if self.woodCheck is None:
+			import uiwoodcheck
+			self.woodCheck = uiwoodcheck.WoodCheck()
+		return self.woodCheck
+
+	def WoodCheckServerLine(self, command, args):
+		if self.WoodCheck().Feed(command, args) and command == "WoodCheckModeV1" and self.wndCraftBook:
+			self.wndCraftBook.RefreshWoodMode()
+
+	def UpdateWoodCheck(self):
+		self.WoodCheck().Update()
 
 	def MissionBookState(self, book, mission, p1, p2, p3, ready):
 		if self.wndMissionBooks is None:
@@ -1584,6 +2224,9 @@ class Interface(object):
 		return False
 
 	def MakeHyperlinkTooltip(self, hyperlink):
+		if hyperlink.startswith("duel:"):
+			self.AnswerDuelChallenge(hyperlink)
+			return
 		if hyperlink.startswith("guildinvite:"):
 			import guildv2model
 			identifier = guildv2model.invitation_link_id(hyperlink)
@@ -1617,18 +2260,45 @@ class Interface(object):
 
 	def Close(self):
 		ui.SetCrimsonGameControlsEnabled(False)
+		import uieventbox
+		uieventbox.Destroy()
+		if getattr(self, "wndEventBoxButton", None) is not None:
+			self.wndEventBoxButton.Hide()
+			self.wndEventBoxButton = None
 		if self.featureAvailabilityListener:
 			featureavailability.ClearListener(self.featureAvailabilityListener)
 			self.featureAvailabilityListener = None
 		if self.wndFeatureComingSoon:
 			self.wndFeatureComingSoon.Destroy()
 			self.wndFeatureComingSoon = None
+		if self.wndCraftContractReply:
+			self.wndCraftContractReply.Destroy()
+			self.wndCraftContractReply = None
+		if self.achievementNotice:
+			self.achievementNotice.Destroy()
+			self.achievementNotice = None
+		if self.wndContractHandIn:
+			self.wndContractHandIn.Destroy()
+			self.wndContractHandIn = None
 		if self.petAlbumNotice:
 			self.petAlbumNotice.Destroy()
 			self.petAlbumNotice = None
 		if getattr(self, "wndMissionBooks", None):
 			self.wndMissionBooks.Destroy()
 			self.wndMissionBooks = None
+		if getattr(self, "wndCraftBook", None):
+			self.wndCraftBook.Destroy()
+			self.wndCraftBook = None
+		self.craftBookModel = None
+		self.craftMasteryModel = None
+		self.craftTitlesModel = None
+		self.craftContractModel = None
+		if getattr(self, "miningCheck", None):
+			self.miningCheck.Destroy()
+		self.miningCheck = None
+		if getattr(self, "woodCheck", None):
+			self.woodCheck.Destroy()
+		self.woodCheck = None
 		self._metadataInventoryDirty = False
 		self._metadataRarityDirty = False
 		if getattr(self, "systemNotifications", None):
@@ -1675,12 +2345,6 @@ class Interface(object):
 				self.wndDungeonManager.Destroy()
 				self.wndDungeonManager = None
 
-		if app.ENABLE_BOSS_TRACK:
-			if self.wndBossTrack:
-				self.wndBossTrack.Destroy()
-				self.wndBossTrack.Hide()
-				self.wndBossTrack = None
-
 		if self.dlgWhisperWithoutTarget:
 			self.dlgWhisperWithoutTarget.Destroy()
 			del self.dlgWhisperWithoutTarget
@@ -1702,6 +2366,10 @@ class Interface(object):
 		if self.quickBuffSystem:
 			self.quickBuffSystem.Destroy()
 			self.quickBuffSystem = None
+
+		if self.inputGuardSystem:
+			self.inputGuardSystem.Destroy()
+			self.inputGuardSystem = None
 
 		if self.dropTrackerSystem:
 			self.dropTrackerSystem.Destroy()
@@ -1819,6 +2487,7 @@ class Interface(object):
 		if self.wndGMPanel:
 			self.wndGMPanel.Destroy()
 			self.wndGMPanel = None
+		self.gmPanelQuery = None
 
 		if self.wndCustomPorts:
 			self.wndCustomPorts.Destroy()
@@ -1983,6 +2652,9 @@ class Interface(object):
 		if app.ENABLE_SHOW_CHEST_DROP:
 			if self.dlgChestDrop:
 				self.dlgChestDrop.Destroy()
+			if self.chestPreviewBroker:
+				self.chestPreviewBroker.Clear()
+				self.chestPreviewBroker = None
 
 		if app.ENABLE_EVENT_MANAGER:
 			if self.wndEventManager:
@@ -2291,6 +2963,8 @@ class Interface(object):
 		self.wndCharacter.RefreshAlignment()
 
 	def RefreshStatus(self):
+		if self.dlgRefineNew:
+			self.dlgRefineNew.RefreshToolYang()
 		self.wndTaskBar.RefreshStatus()
 		self.wndCharacter.RefreshStatus()
 		self.wndInventory.RefreshStatus()
@@ -2307,12 +2981,29 @@ class Interface(object):
 	def RefreshSkill(self):
 		self.wndCharacter.RefreshSkill()
 		self.wndTaskBar.RefreshSkill()
+		# everything that shows a skill's level / grade follows the change at once (this is the client's
+		# skill-level event): the quick slot badges (M1/G1/P1), the open skill tooltip and the reading windows.
+		self.wndTaskBar.RefreshQuickSlot()
+		tooltip = getattr(self, "tooltipSkill", None)
+		if tooltip:
+			tooltip.RefreshShown()
+		self.RefreshReadingWindows()
+
+	def RefreshReadingWindows(self):
+		"""The skill reading windows stay open after a reading: a new level, max level, fewer books."""
+		for name in ("wndUpgradeSkill", "wndSupportUpgrade"):
+			window = getattr(self, name, None)
+			if window and window.IsShow():
+				window.Refresh()
 
 	def RefreshInventory(self):
 		self._metadataInventoryDirty = False
 		if (app.ENABLE_FAST_READ_STONE_AND_SKILLBOOK and self.wndUpgradeSkill
 				and self.wndUpgradeSkill.IsShow()):
 			self.wndUpgradeSkill.RefreshItemCounts()
+		supportUpgrade = getattr(self, "wndSupportUpgrade", None)
+		if supportUpgrade and supportUpgrade.IsShow():
+			supportUpgrade.RefreshItemCounts()
 		self.wndTaskBar.RefreshQuickSlot()
 		self.wndInventory.RefreshItemSlot()
 		if self.wndQuickEquip and self.wndQuickEquip.IsShow():
@@ -2336,6 +3027,25 @@ class Interface(object):
 			if player.IsAuraRefineWindowOpen():
 				if self.wndAura and self.wndAura.IsShow():
 					self.wndAura.RefreshAuraWindow()
+		self.__RefreshOwnedCounts()
+
+	def __OwnedCountWindows(self):
+		"""The open windows that show an item price as "owned / need" (root/ownedcount.py)."""
+		resonance = getattr(self, "wndResonance", None)
+		atlas = getattr(self, "wndTeleportAtlas", None)
+		return (getattr(self, "dlgRefineNew", None), getattr(self, "wndRarity", None),
+			getattr(self, "wndSkillTree", None), getattr(resonance, "unlockDialog", None),
+			getattr(self, "wndGuildBuilding", None), getattr(atlas, "dungeonPage", None))
+
+	def __RefreshOwnedCounts(self):
+		"""The inventory changed: every open item price counts again (a failing window must not stop the others)."""
+		for window in self.__OwnedCountWindows():
+			try:
+				if window and window.IsShow() and hasattr(window, "RefreshOwnedCounts"):
+					window.RefreshOwnedCounts()
+			except Exception:
+				import dbg
+				dbg.TraceError("RefreshOwnedCounts of %s failed" % type(window).__name__)
 
 	def SetVirtualMarketDraftSlot(self, slotIndex, locked):
 		if self.wndInventory:
@@ -2715,8 +3425,6 @@ class Interface(object):
 		#from _weakref import proxy
 		#self.uiAffectshower = proxy(shower)
 		self.uiAffectshower = shower
-		if self.quickBuffSystem:
-			self.quickBuffSystem.SetAffectShower(shower)
 		if self.afkSystem:
 			self.afkSystem.BindAffectShower(shower)
 
@@ -2740,6 +3448,9 @@ class Interface(object):
 
 	def CaptureWarpUIState(self):
 		windows = {}
+		book = getattr(self, "wndCraftBook", None)
+		if book and book.IsShow():
+			windows["craft_book"] = self.__CaptureWarpWindow(book, {"craft": book.craft, "tab": book.tab})
 
 		inventory = self.wndInventory
 		state = self.__CaptureWarpWindow(inventory, {
@@ -2879,11 +3590,6 @@ class Interface(object):
 			if state:
 				windows["event_calendar"] = state
 
-		if app.ENABLE_BOSS_TRACK and self.wndBossTrack:
-			state = self.__CaptureWarpWindow(self.wndBossTrack)
-			if state:
-				windows["boss_track"] = state
-
 		if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 			state = self.__CaptureWarpWindow(self.wndAutoHunting)
 			if state:
@@ -2919,10 +3625,15 @@ class Interface(object):
 				windows["drop_tracker"] = state
 
 		unifiedWindow = self.unifiedMessengerRouter.window
-		state = self.__CaptureWarpWindow(unifiedWindow, {
+		unifiedState = {
 			"selected_key": str(getattr(unifiedWindow, "selectedKey", "")),
 			"selected_name": str(getattr(unifiedWindow, "selectedName", "")),
-		} if unifiedWindow else None)
+		} if unifiedWindow else None
+		state = self.__CaptureWarpWindow(unifiedWindow, unifiedState)
+		if not state and unifiedWindow and unifiedWindow.IsMinimized():
+			# A minimized Messages window comes back minimized after the warp.
+			x, y = unifiedWindow.GetGlobalPosition()
+			state = dict(unifiedState, position=(int(x), int(y)), minimized=True)
 		if state:
 			windows["unified_messenger"] = state
 
@@ -2962,6 +3673,19 @@ class Interface(object):
 		y = max(0, min(int(position[1]), max(0, screenHeight - windowHeight)))
 		window.SetPosition(x, y)
 		window.UpdateRect()
+
+	def __RestoreWarpCraftBook(self, state):
+		book = self.wndCraftBook
+		if not book or not book.IsShow():
+			self.ToggleCraftBookWindow()
+		book = self.wndCraftBook
+		if book is None:
+			return False
+		book.SelectCraft(state.get("craft", "fishing"))
+		book.SelectTab(state.get("tab", "overview"))
+		self.__RestoreWarpWindowPosition(book, state)
+		book.RequestLive()
+		return True
 
 	def __RestoreWarpInventory(self, state):
 		window = self.wndInventory
@@ -3167,16 +3891,6 @@ class Interface(object):
 		window.SetTop()
 		return True
 
-	def __RestoreWarpBossTrack(self, state):
-		if not app.ENABLE_BOSS_TRACK:
-			return True
-		if not self.wndBossTrack:
-			self.wndBossTrack = uiBossTrack.Window()
-		window = self.wndBossTrack
-		window.Open()
-		self.__RestoreWarpWindowPosition(window, state)
-		window.SetTop()
-		return True
 
 	def __RestoreWarpAutoHunting(self, state):
 		if not app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
@@ -3189,8 +3903,6 @@ class Interface(object):
 
 	def __RestoreWarpRankInfo(self, state):
 		if not app.ENABLE_PLAYER_RANKING:
-			return True
-		if not featureavailability.IsAvailable(featureavailability.RANKINGS):
 			return True
 		window = self.wndRankInfo
 		window.bCurPage = max(0, int(state.get("page", 0)))
@@ -3222,6 +3934,9 @@ class Interface(object):
 			return True
 		atlas = self.wndMiniMap.AtlasWindow
 		if not atlas.IsShow():
+			# No large map on this map (dungeon, atlaspolicy): drop the state instead of retrying every frame.
+			if self.wndMiniMap.IsAtlasBlocked():
+				return True
 			self.wndMiniMap.ToggleAtlasWindow()
 		if not atlas.IsShow():
 			return False
@@ -3251,9 +3966,14 @@ class Interface(object):
 			return False
 		name = state.get("selected_name", "")
 		key = state.get("selected_key", "")
-		if not self.unifiedMessengerRouter.Open(name, key):
+		restore = (self.unifiedMessengerRouter.RestoreMinimized if state.get("minimized", False)
+			else self.unifiedMessengerRouter.Open)
+		if not restore(name, key):
 			return False
 		window = self.unifiedMessengerRouter.window
+		# Re-shown after a warp, not opened by the player: the keyboard
+		# stays with the game (Open focuses the message line).
+		window.composer.KillFocus()
 		self.__RestoreWarpWindowPosition(window, state)
 		window.SetTop()
 		return True
@@ -3291,6 +4011,7 @@ class Interface(object):
 
 		handlers = (
 			("character", self.__RestoreWarpCharacter),
+			("craft_book", self.__RestoreWarpCraftBook),
 			("inventory", self.__RestoreWarpInventory),
 			("costume_inventory", self.__RestoreWarpCostumeInventory),
 			("system", self.__RestoreWarpSystem),
@@ -3308,7 +4029,6 @@ class Interface(object):
 			("pet_info", self.__RestoreWarpPetInfo),
 			("ranking_board", self.__RestoreWarpRankingBoard),
 			("event_calendar", self.__RestoreWarpEventCalendar),
-			("boss_track", self.__RestoreWarpBossTrack),
 			("auto_hunting", self.__RestoreWarpAutoHunting),
 			("rank_info", self.__RestoreWarpRankInfo),
 			("support", self.__RestoreWarpSupport),
@@ -3348,6 +4068,7 @@ class Interface(object):
 			self.systemNotifications.Resume()
 		if self.wndEnergyBar:
 			self.wndEnergyBar.Show()
+		self.ResumeEventBoxHUD()
 		if self.wndGameButton:
 			self.wndGameButton.Show()
 
@@ -3387,6 +4108,14 @@ class Interface(object):
 				self.wndExpandedMoneyTaskBar.SetTop()
 
 	def HideAllWindows(self):
+		if app.ENABLE_PLAYER_RANKING and getattr(self, "wndRankInfo", None):
+			self.wndRankInfo.Close()
+		if getattr(self, "miningCheck", None):
+			self.miningCheck.HideWindow()
+		if getattr(self, "woodCheck", None):
+			self.woodCheck.HideWindow()
+		if getattr(self, "wndCraftBook", None):
+			self.wndCraftBook.Close()
 		if self.petAlbumNotice:
 			self.petAlbumNotice.Suspend()
 		if getattr(self, "wndMissionBooks", None):
@@ -3412,6 +4141,7 @@ class Interface(object):
 		if self.wndTaskBar:
 			self.wndTaskBar.Hide()
 
+		self.HideEventBoxHUD()
 		if self.wndGameButton:
 			self.wndGameButton.Hide()
 
@@ -3529,6 +4259,8 @@ class Interface(object):
 		if app.ENABLE_GROWTH_PET_SYSTEM: 	
 			if self.wndPetInfoWindow:
 				self.wndPetInfoWindow.Hide()
+				if self.wndPetInfoWindow.compact:
+					self.wndPetInfoWindow.compact.CloseAlbumWindows()
 
 		if app.ENABLE_AUTOMATIC_HUNTING_SYSTEM:
 			if self.wndAutoHunting:
@@ -3575,6 +4307,12 @@ class Interface(object):
 		self.dlgSystem.SetTop()
 
 	def ToggleMessenger(self):
+		# The Messenger shortcut (Alt+M) and the taskbar button restore a
+		# minimized Messages window first, as the player left it.
+		router = getattr(self, "unifiedMessengerRouter", None)
+		if router and router.IsMinimized():
+			router.Open()
+			return
 		if self.wndMessenger.IsShow():
 			self.wndMessenger.Hide()
 		else:
@@ -3586,6 +4324,10 @@ class Interface(object):
 
 	def OpenUnifiedMessenger(self):
 		return self.unifiedMessengerRouter.Open()
+
+	def ToggleUnifiedMessenger(self):
+		# The Friends footer button opens and closes Messages like other HUD buttons.
+		return self.unifiedMessengerRouter.Toggle()
 
 	def UnifiedMessengerCapability(self, enabled, pid, maxBody, pendingPerPair, pendingPerSender, retentionSeconds):
 		self.unifiedMessengerRouter.Capability(enabled, pid, maxBody,
@@ -3681,10 +4423,70 @@ class Interface(object):
 	def ToggleGMPanelWindow(self):
 		if self.wndGMPanel:
 			self.wndGMPanel.Toggle()
+			return
+
+		# No panel yet: the same capability query the panel sends when it has
+		# no capabilities, and nothing once the server answered with none.
+		query = self.gmPanelQuery
+		if query is None or query["capabilitiesLoaded"]:
+			return
+		query["requestID"] += 1
+		if query["requestID"] > 2147483647:
+			query["requestID"] = 1
+		query["openAfterQuery"] = True
+		if not net.SendGMPanelAction(query["requestID"], net.GM_PANEL_ACTION_QUERY, 0, 0, "", "", ""):
+			query["openAfterQuery"] = False
 
 	def OnGMPanelResult(self, requestID, action, status, gmLevel, maskLow, maskHigh, message):
 		if self.wndGMPanel:
 			self.wndGMPanel.OnServerResult(requestID, action, status, gmLevel, maskLow, maskHigh, message)
+			return
+
+		query = self.gmPanelQuery
+		if query is None:
+			return
+		denied = status == net.GM_PANEL_RESULT_DENIED and action == net.GM_PANEL_ACTION_QUERY
+		if ((maskLow & 0xffffffff) | ((maskHigh & 0xffffffff) << 32)) and not denied:
+			# The only place the panel module is imported: the server granted
+			# at least one action. The panel continues the request ids and
+			# handles this result itself, which opens it after an F10 query.
+			import uigmpanel
+			panel = uigmpanel.NewWindow()
+			panel.requestID = query["requestID"]
+			panel.openAfterQuery = query["openAfterQuery"]
+			panel.capabilitiesLoaded = query["capabilitiesLoaded"]
+			if query["catalog"] is not None:
+				panel.SetCatalogCollector(query["catalog"])
+				query["catalog"] = None
+			self.wndGMPanel = panel
+			panel.OnServerResult(requestID, action, status, gmLevel, maskLow, maskHigh, message)
+			return
+
+		# Nothing granted: what the panel does while it has nothing to show.
+		if status == net.GM_PANEL_RESULT_CAPABILITIES:
+			query["capabilitiesLoaded"] = True
+			query["openAfterQuery"] = False
+		elif denied:
+			query["capabilitiesLoaded"] = False
+			query["openAfterQuery"] = False
+		if message:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, "[GM panel] %s" % message)
+
+	def OnGMPanelCatalog(self, row):
+		# The server describes the panel's actions only to a session it
+		# grants one, ahead of the result that builds the panel; until then
+		# the rows are checked and kept here.
+		if self.wndGMPanel:
+			self.wndGMPanel.OnCatalogRow(row)
+			return
+
+		query = self.gmPanelQuery
+		if query is None:
+			return
+		if query["catalog"] is None:
+			import gmpanelcatalog
+			query["catalog"] = gmpanelcatalog.Collector()
+		query["catalog"].Row(row)
 
 	def ToggleCustomPortsWindow(self):
 		if self.wndCustomPorts:
@@ -3749,9 +4551,32 @@ class Interface(object):
 		if self.quickBuffSystem:
 			self.quickBuffSystem.OpenSettings()
 
+	def ToggleQuickBuffSettings(self):
+		# The "+" in the inventory title bar: a second click closes the Quick activation window.
+		system = self.quickBuffSystem
+		if system and system.window and system.window.IsShow():
+			system.window.Close()
+			return
+		self.OpenQuickBuffSettings()
+
 	def UpdateQuickBuffSystem(self):
 		if self.quickBuffSystem:
 			self.quickBuffSystem.Tick()
+
+	def IsQuickBuffBusy(self):
+		return bool(self.quickBuffSystem and self.quickBuffSystem.IsBusy())
+
+	def OnQuickBuffAffectAdded(self, affect, point, value, duration):
+		if self.quickBuffSystem:
+			self.quickBuffSystem.OnAffectAdded(affect, point, value, duration)
+
+	def OnQuickBuffAffectRemoved(self, affect, point):
+		if self.quickBuffSystem:
+			self.quickBuffSystem.OnAffectRemoved(affect, point)
+
+	def OnQuickBuffAffectsCleared(self):
+		if self.quickBuffSystem:
+			self.quickBuffSystem.OnAffectsCleared()
 
 	def SetQuickBuffVipStatus(self, active):
 		if self.quickBuffSystem:
@@ -3802,6 +4627,16 @@ class Interface(object):
 			self.dropTrackerSystem and self.dropTrackerSystem.available
 		)
 
+	def OfferDropTrackerGather(self, version):
+		if self.dropTrackerSystem:
+			self.dropTrackerSystem.OfferGather(version)
+
+	def IsDropTrackerGatherClient(self):
+		# Ore, wood and catches come as tracker rows with their own chat line.
+		return bool(
+			self.dropTrackerSystem and self.dropTrackerSystem.gatherClient
+		)
+
 	def ToggleCharacterWindow(self, state):
 		if False == player.IsObserverMode():
 			if False == self.wndCharacter.IsShow():
@@ -3821,6 +4656,14 @@ class Interface(object):
 			self.wndCharacter.SetState(state)
 			self.wndCharacter.Show()
 			self.wndCharacter.SetTop()
+
+	def TogglePermanentTasks(self):
+		# The "Trvalé úkoly" letter opens the window; its second click closes
+		# it (owner rule: a button that opens a window closes it again).
+		if self.wndPermanentTasks and self.wndPermanentTasks.IsShow():
+			self.wndPermanentTasks.Close()
+			return False
+		return self.OpenPermanentTasks()
 
 	def OpenPermanentTasks(self, category=None):
 		if self.wndPermanentTasks:
@@ -3984,6 +4827,13 @@ class Interface(object):
 			return self.RequestPermanentTasksSnapshot()
 		return True
 
+	def ToggleDailyTasks(self):
+		# The "Denní úkoly" letter: the second click closes the window.
+		if self.wndDailyTasks and self.wndDailyTasks.IsShow():
+			self.wndDailyTasks.Close()
+			return False
+		return self.OpenDailyTasks()
+
 	def OpenDailyTasks(self):
 		if self.wndDailyTasks:
 			self.wndDailyTasks.SetAvailable(self.dailyTasksAvailable)
@@ -3993,6 +4843,8 @@ class Interface(object):
 		return False
 
 	def RequestDailyTaskHandIn(self, taskId):
+		if isinstance(taskId, str) and taskId.startswith("craft_contract_"):
+			return self.HandInCraftContract(taskId)   # a done craft contract (craftcontractmodel)
 		if not self.dailyTasksAvailable or not self.dailyTasksSnapshot:
 			return False
 		if not isinstance(taskId, str) or not taskId.startswith("d2_chest_") or len(taskId) > 32:
@@ -4449,6 +5301,14 @@ class Interface(object):
 	def OpenGuildDisband(self):
 		return self.wndGuild.OpenDisbandDialog()
 
+	def OpenGuildLeave(self):
+		return self.wndGuild.OpenLeaveDialog()
+
+	def OnGuildApplication(self, kind, *args):
+		# GuildAppV1 <kind> ...: the guild catalogue applications (root/uiguildv2katalog.py).
+		if self.wndGuild and hasattr(self.wndGuild, "ApplicationCommand"):
+			self.wndGuild.ApplicationCommand(kind, *args)
+
 	def OpenGuildCreation(self):
 		return self.wndGuild.OpenCreateDialog()
 
@@ -4492,6 +5352,12 @@ class Interface(object):
 	def __OnClickBuildButton(self):
 		self.BUILD_OpenWindow()
 
+	def ToggleHelpWindow(self):
+		if self.wndHelp.IsShow():
+			self.CloseHelpWindow()
+		else:
+			self.OpenHelpWindow()
+
 	def OpenHelpWindow(self):
 		self.wndHelp.Open()
 		self.wndUICurtain.Show()
@@ -4512,6 +5378,9 @@ class Interface(object):
 			else:
 				self.wndSwitchbot.Open()
 				
+		def AskSwitchbotReroll(self, slot):
+			return bool(self.wndSwitchbot and self.wndSwitchbot.AskReroll(slot))
+
 		def RefreshSwitchbotWindow(self):
 			if self.wndSwitchbot and self.wndSwitchbot.IsShow():
 				self.wndSwitchbot.RefreshSwitchbotWindow()
@@ -4670,6 +5539,8 @@ class Interface(object):
 		if app.ENABLE_GROWTH_PET_SYSTEM:
 			if self.wndPetInfoWindow:
 				hideWindows += self.wndPetInfoWindow,
+				if self.wndPetInfoWindow.compact:
+					hideWindows += self.wndPetInfoWindow.compact.AlbumWindows()
 
 		if app.ENABLE_TELEPORT_WINDOW:
 			if self.wndTeleportPanel:
@@ -4679,6 +5550,9 @@ class Interface(object):
 
 		if self.wndCustomPorts:
 			hideWindows += self.wndCustomPorts,
+
+		if getattr(self, "wndCraftBook", None):
+			hideWindows += self.wndCraftBook,
 
 		if getattr(self, "wndMissionBooks", None):
 			hideWindows += self.wndMissionBooks,
@@ -4886,6 +5760,12 @@ class Interface(object):
 					return
 				self.equipmentDialogDict[vid].SetEquipmentDialogRefineElement(slotIndex, applyType, grade, values, bonusValues)
 
+		def SetEquipmentDialogInfo(self, vid, level, race, special3, special4):
+			# game command ViewEquipInfoV1 right after the view packet (level, race, special items 3 / 4)
+			if not vid in self.equipmentDialogDict:
+				return
+			self.equipmentDialogDict[vid].SetViewInfo(level, race, special3, special4)
+
 		def CloseEquipmentDialog(self, vid):
 			if not vid in self.equipmentDialogDict:
 				return
@@ -4905,7 +5785,7 @@ class Interface(object):
 			btn.ToolTipText.SetHorizontalAlignRight()
 		else:
 			btn.ToolTipText.SetHorizontalAlignLeft()
-		btn.SetEvent(ui.__mem_func__(self.OpenPermanentTasks))
+		btn.SetEvent(ui.__mem_func__(self.TogglePermanentTasks))
 		btn.index = "permanent_tasks"
 		btn.name = u"Trvalé úkoly"
 		btn.Show()
@@ -4922,7 +5802,7 @@ class Interface(object):
 			btn.ToolTipText.SetHorizontalAlignRight()
 		else:
 			btn.ToolTipText.SetHorizontalAlignLeft()
-		btn.SetEvent(ui.__mem_func__(self.OpenDailyTasks))
+		btn.SetEvent(ui.__mem_func__(self.ToggleDailyTasks))
 		btn.index = "daily_tasks"
 		btn.name = u"Denní úkoly"
 		btn.Show()
@@ -4939,18 +5819,60 @@ class Interface(object):
 		self.BINARY_RecvQuest(index, name, "file", localeInfo.GetLetterImageName())
 		# END_OF_QUEST_LETTER_IMAGE
 
+	QUEST_LETTER_PORTRAIT = "d:/ymir work/ui/game/crimson_ember/countdown_hud/portrait/%d_41x32.png"
+
+	def __QuestLetterPortrait(self, iconName):
+		"""The dungeon portrait of a "dungeon" quest letter (iconName = the mob vnum; the guild portal sends
+		send_letter_ex(name, "dungeon", "1093")); None when it is not in the packs (the scroll is shown instead)."""
+		try:
+			path = self.QUEST_LETTER_PORTRAIT % int(iconName)
+		except (TypeError, ValueError):
+			return None
+		try:
+			import pack
+			if pack.Exist(path):
+				return path
+		except Exception:
+			pass
+		try:
+			if app.IsExistFile(path):
+				return path
+		except Exception:
+			pass
+		return None
+
 	def BINARY_RecvQuest(self, index, name, iconType, iconName):
 		btn = self.__FindQuestButton(index)
+		portrait = self.__QuestLetterPortrait(iconName) if "dungeon" == iconType else None
+		if 0 != btn and portrait and getattr(btn, "portrait", None) == portrait:
+			# The guild portal re-sends its letter every minute / on a change of the count:
+			# update the caption of the letter in place (same place, still blinking).
+			btn.SetToolTipText(name, -20, 35)
+			if localeInfo.IsARABIC():
+				btn.ToolTipText.SetHorizontalAlignRight()
+			else:
+				btn.ToolTipText.SetHorizontalAlignLeft()
+			btn.name = name
+			self.__ArrangeQuestButton()
+			return
 		if 0 != btn:
 			self.__DestroyQuestButton(btn)
 
 		btn = uiWhisper.WhisperButton()
+		btn.portrait = None
 
 		# QUEST_LETTER_IMAGE
 		##!! 20061026.levites.퀘스트_이미지_교체
 		import item
 
-		if "item" == iconType:
+		if portrait:
+			# a dungeon portrait as the letter; it blinks (CButton::Flash) until it is clicked
+			btn.SetUpVisual(portrait)
+			btn.SetOverVisual(portrait)
+			btn.SetDownVisual(portrait)
+			btn.portrait = portrait
+			btn.Flash()
+		elif "item" == iconType:
 			item.SelectItem(int(iconName))
 			buttonImageFileName = item.GetIconImageFileName()
 			btn.SetUpVisual(buttonImageFileName)
@@ -5041,13 +5963,44 @@ class Interface(object):
 			btn.ForceHideToolTip()
 
 	def ShowAllQuestButton(self):
+		# Every letter on the left (the quest letters and the persistent
+		# "Trvalé úkoly" / "Denní úkoly" letters) follows Ctrl+Q (IsQBHide):
+		# a caller that restores the letters after a warp, a drop info slide
+		# or closed windows never shows them while the player hid them.
 		if app.ENABLE_KINGDOMS_WAR:
 			if self.wndKingdomsWar.IsShow():
 				return
-		
+
+		global IsQBHide
+		if IsQBHide:
+			self.HideAllQuestButton()
+			return
+
 		for btn in self.questButtonList:
 			btn.Show()
 			btn.ShowToolTip()
+
+	def ToggleQuestLetters(self):
+		"""Hides / restores every letter on the left and saves the state as
+		the quest option. Keybinding "information.quest_letters" (default
+		Ctrl+Q, rebindable in Nastavení > Ovládání > Klávesové zkratky)."""
+		global IsQBHide
+		if 0 == IsQBHide:
+			IsQBHide = 1
+			if app.ENABLE_QUEST_OPTION:
+				systemSetting.SetQuestModeOption(0)
+			self.HideAllQuestButton()
+		else:
+			IsQBHide = 0
+			if app.ENABLE_QUEST_OPTION:
+				systemSetting.SetQuestModeOption(1)
+			self.ShowAllQuestButton()
+
+	def ApplyQuestButtonVisibility(self):
+		"""The letters on the left shown or hidden by IsQBHide (Ctrl+Q, the
+		saved quest option), after game.py restored it at login: the
+		persistent letters are made before the option is read."""
+		self.__ArrangeQuestButton()
 
 	#####################################################################################
 
@@ -5078,6 +6031,23 @@ class Interface(object):
 		else:
 			self.dlgWhisperWithoutTarget.SetTop()
 			self.dlgWhisperWithoutTarget.OpenWithoutTarget(self.RegisterTemporaryWhisperDialog)
+
+	def OpenMessagesNewConversation(self):
+		# Shift+Enter opens Messages on a new conversation, as its new-message
+		# (pencil) button does. It used to go through OpenWhisperDialogWithoutTarget,
+		# whose fallback is the classic "Nová zpráva" whisper dialog: this key
+		# never opens that one (owner 18. 10.).
+		self.unifiedMessengerRouter.OpenWithoutTarget()
+
+	def OpenMessagesFromChat(self):
+		# The chat's envelope ("Otevřít stávající Messenger") opens and closes
+		# Messages, on the newest unread thread (e.g. a duel challenge). It
+		# used to go through OpenWhisperDialogWithoutTarget, which also opened
+		# the old-style "Nová zpráva" name dialog over Messages. The classic
+		# dialog stays the fallback when Messages is off.
+		if self.unifiedMessengerRouter.ToggleUnread():
+			return
+		self.OpenWhisperDialogWithoutTarget()
 
 	## 이름 없는 대화창에서 이름을 결정했을때 WhisperDialogDict에 창을 넣어주는 함수
 	def RegisterTemporaryWhisperDialog(self, name):
@@ -5137,11 +6107,14 @@ class Interface(object):
 			return
 		self.RecvLegacyWhisper(name)
 
-	def RecvLegacyWhisper(self, name):
+	def RecvLegacyWhisper(self, name, line="", gameMaster=False):
 		# Whispers that exist only in the native whisper buffer (system/error
-		# notices, [SYSTEM]/[Dungeon Info], duel invitations and chat lines the
-		# executable could not import) stay in the classic dialog even while
-		# Unified Messenger is active; otherwise their text would be invisible.
+		# notices, [SYSTEM]/[Dungeon Info] and chat lines the executable could
+		# not import) open in Messages as session-only rows
+		# while Unified Messenger is active. The classic dialog below is only
+		# the fallback when Messenger is off (or the caller has no text).
+		if line and self.unifiedMessengerRouter.ReceiveLocal(name, line, gameMaster):
+			return
 		# A pending Messenger letter for the same name keeps its own button.
 		if not name in self.whisperDialogDict:
 			btn = self.__FindWhisperButtonOfKind(name, False)
@@ -5159,8 +6132,93 @@ class Interface(object):
 	def MakeWhisperButton(self, name):
 		self.__MakeWhisperButton(name)
 
+	def RecvDuelChallenge(self, name, line):
+		# A challenge is a chat line with inline [Přijmout] [Odmítnout]; never
+		# a whisper window, letter or popup (it could be spammed).
+		# Messages also gets it as a row of the challenger's thread with the
+		# same actions; an answer in either place answers both.
+		challenges = duelchallenge.challenges
+		if not challenges.IsChallengeWhisper(name, line):
+			return False
+		replaced = challenges.Pending(name)
+		identifier = challenges.Add(name)
+		chat.AppendChat(chat.CHAT_TYPE_INFO, challenges.ChatLine(identifier, name))
+		try:
+			self.unifiedMessengerRouter.ReceiveDuel(name, line, identifier, replaced)
+		except Exception as error:
+			# The chat line already works on its own.
+			import dbg
+			dbg.TraceError("duel challenge row in Messages failed: %s" % error)
+		return True
+
+	def OnDuelEvents(self, events):
+		# From game.RefreshTargetBoardByVID (duelchallenge.Observe).
+		for event in events:
+			if event[0] == "outgoing":
+				self.unifiedMessengerRouter.ReceiveDuelOutgoing(event[1], event[2])
+			elif event[0] == "result":
+				self.DuelClientResult(event[1], event[2])
+
+	def DuelClientResult(self, opponent, won):
+		# The REVENGE packet: only CPVP::Win sends it, so the winner is real.
+		# The client alone knows no damage and not the opponent's HP; it adds
+		# the duration it saw and, for the winner, the own HP. A server result
+		# (DuelResultV1, sent before that packet) replaces this one.
+		challenges = duelchallenge.challenges
+		if challenges.HasServerResult(opponent):
+			return False
+		winner = (player.GetName() or "") if won else opponent
+		hp = None
+		if won:
+			hp = (player.GetStatus(player.HP), player.GetStatus(player.MAX_HP))
+		body = duelchallenge.result_body(winner, winner_hp=hp,
+			duration=challenges.FightSeconds(opponent))
+		return self.unifiedMessengerRouter.ReceiveDuelResult(opponent, body)
+
+	def RecvDuelServerResult(self, winner, loser, winnerDamage, loserDamage,
+			winnerHP, winnerMaxHP, durationMs):
+		# DuelResultV1 from the server (CPVPManager::Dead, before CPVP::Win):
+		# both damages, the winner's HP and the fight time, sent to both.
+		me = str(player.GetName() or "").lower()
+		if me == str(winner).lower():
+			opponent = loser
+		elif me == str(loser).lower():
+			opponent = winner
+		else:
+			return False
+		duelchallenge.challenges.RecordServerResult(opponent)
+		durationMs = int(durationMs)
+		body = duelchallenge.result_body(winner,
+			damages=((winner, int(winnerDamage)), (loser, int(loserDamage))),
+			winner_hp=(int(winnerHP), int(winnerMaxHP)),
+			duration=durationMs / 1000.0 if durationMs > 0 else None)
+		return self.unifiedMessengerRouter.ReceiveDuelResult(opponent, body)
+
+	def AnswerDuelChallenge(self, hyperlink):
+		challenges = duelchallenge.challenges
+		action, identifier = duelchallenge.parse_link(hyperlink)
+		row = challenges.Get(identifier) if action else None
+		if not row or row["outgoing"] or not challenges.IsActive(identifier):
+			return False
+		if action == duelchallenge.ACCEPT:
+			vid = challenges.VidFor(row["name"])
+			if not vid:
+				chat.AppendChat(chat.CHAT_TYPE_INFO,
+					u"%s není poblíž, souboj přijmi přes jeho cíl." % row["name"])
+				return False
+			# The target board's "Souhlasit" sends the same command.
+			net.SendChatPacket("/pvp %d" % vid)
+			return challenges.Resolve(identifier, "accepted")
+		return challenges.Resolve(identifier, "declined")
+
 	## 버튼을 눌렀을때 창을 여는 함수
 	def ShowWhisperDialog(self, btn):
+		# Messages is the only whisper window while Unified Messenger is
+		# available; the classic dialog opens only when it is off or fails.
+		if self.unifiedMessengerRouter.Open(btn.name):
+			if btn in self.whisperButtonList:
+				self.__DestroyWhisperButton(btn)
+			return
 		try:
 			self.__MakeWhisperDialog(btn.name)
 			dlgWhisper = self.whisperDialogDict[btn.name]
@@ -5174,7 +6232,7 @@ class Interface(object):
 		## 버튼 초기화
 		self.__DestroyWhisperButton(btn)
 
-	def ShowUnifiedMessengerNotification(self, key, name):
+	def ShowUnifiedMessengerNotification(self, key, name, flash=True):
 		name = str(name or "")
 		if not name:
 			return
@@ -5188,13 +6246,71 @@ class Interface(object):
 			button.unifiedMessengerKey = ""
 		button.SetEvent(ui.__mem_func__(
 			self.ShowUnifiedMessengerNotificationConversation), button)
-		button.Flash()
+		if flash:
+			button.Flash()
 
 	def ClearUnifiedMessengerNotifications(self):
 		for button in self.whisperButtonList[:]:
 			if hasattr(button, "unifiedMessengerKey"):
 				button.Hide()
 				self.__DestroyWhisperButton(button)
+
+	def DismissUnifiedMessengerNotification(self, key, name):
+		for button in self.whisperButtonList[:]:
+			if hasattr(button, "unifiedMessengerKey") and \
+					unifiedmessengermodel.same_conversation(key, name,
+						button.unifiedMessengerKey, button.name):
+				button.Hide()
+				self.__DestroyWhisperButton(button)
+
+	def ShowUnifiedMessengerMinimized(self, unread=0, flash=False):
+		# The minimized Messages window: one letter among the whisper letters,
+		# "Messenger (n)" while n private messages are unread; it flashes when
+		# a new one comes. Show() of the window removes it again (it carries
+		# unifiedMessengerKey like the other Messages letters).
+		button = self.__FindUnifiedMessengerMinimizedButton()
+		if 0 == button:
+			button = self.__MakeWhisperButton(UNIFIED_MESSENGER_MINIMIZED_NAME)
+			button.name = ""
+			button.unifiedMessengerKey = ""
+			button.unifiedMessengerMinimized = True
+			button.SetEvent(ui.__mem_func__(
+				self.RestoreUnifiedMessengerMinimized), button)
+		title = getattr(localeInfo, "UNIFIED_MESSENGER_TITLE", "") or \
+			UNIFIED_MESSENGER_MINIMIZED_NAME
+		unread = max(0, int(unread or 0))
+		label = "%s (%d)" % (title, unread) if unread else title
+		if getattr(button, "unifiedMessengerLabel", None) != label:
+			button.unifiedMessengerLabel = label
+			button.SetToolTipText(label,
+				maxWidth=UNIFIED_MESSENGER_MINIMIZED_LABEL_WIDTH)
+			button.ToolTipText.SetHorizontalAlignCenter()
+		if flash and unread:
+			button.Flash()
+		return button
+
+	def HideUnifiedMessengerMinimized(self):
+		button = self.__FindUnifiedMessengerMinimizedButton()
+		if 0 != button:
+			button.Hide()
+			self.__DestroyWhisperButton(button)
+
+	def RestoreUnifiedMessengerMinimized(self, button):
+		if self.unifiedMessengerRouter.Open():
+			if button in self.whisperButtonList:
+				button.Hide()
+				self.__DestroyWhisperButton(button)
+			return
+		# Messages went away meanwhile (capability off): drop the letter.
+		if button in self.whisperButtonList:
+			button.Hide()
+			self.__DestroyWhisperButton(button)
+
+	def __FindUnifiedMessengerMinimizedButton(self):
+		for button in self.whisperButtonList:
+			if getattr(button, "unifiedMessengerMinimized", False):
+				return button
+		return 0
 
 	def ShowUnifiedMessengerNotificationConversation(self, button):
 		name = getattr(button, "name", "")
@@ -5298,10 +6414,12 @@ class Interface(object):
 			whisperButton.SetUpVisual("d:/ymir work/ui/game/windows/btn_mail_up.sub")
 			whisperButton.SetOverVisual("d:/ymir work/ui/game/windows/btn_mail_up.sub")
 			whisperButton.SetDownVisual("d:/ymir work/ui/game/windows/btn_mail_up.sub")
+		# The sender's name stays under the letter, shortened when it is long.
 		if self.IsGameMasterName(name):
-			whisperButton.SetToolTipTextWithColor(name, 0xffffa200)
+			whisperButton.SetToolTipTextWithColor(name, 0xffffa200,
+				maxWidth=WHISPER_NAME_LABEL_WIDTH)
 		else:
-			whisperButton.SetToolTipText(name)
+			whisperButton.SetToolTipText(name, maxWidth=WHISPER_NAME_LABEL_WIDTH)
 		whisperButton.ToolTipText.SetHorizontalAlignCenter()
 		whisperButton.SetEvent(ui.__mem_func__(self.ShowWhisperDialog), whisperButton)
 		whisperButton.Show()
@@ -5777,18 +6895,35 @@ class Interface(object):
 	if app.ENABLE_MAINTENANCE_SYSTEM:
 		def ShowMaintenanceSign(self, timeLeft, duration):
 			if self.wndMaintenance:
+				# The R1 label stands beside the affect icons and over the party panel.
+				self.wndMaintenance.SetNeighbours(self.uiAffectshower, getattr(self, "wndParty", None))
 				self.wndMaintenance.Open(timeLeft, duration)
+
+		def SetMaintenanceReason(self, reason):
+			if self.wndMaintenance:
+				self.wndMaintenance.SetReason(reason)
 
 		def HideMaintenanceSign(self):
 			if self.wndMaintenance:
 				self.wndMaintenance.Close()
 
 	if app.ENABLE_SHOW_CHEST_DROP:
+		def RequestChestPreview(self, vnum, owner, callback):
+			if self.chestPreviewBroker:
+				return self.chestPreviewBroker.Request(vnum, owner, callback)
+			return False
+
+		def CancelChestPreview(self, owner):
+			if self.chestPreviewBroker:
+				self.chestPreviewBroker.Cancel(owner)
+
 		def AddChestDropInfo(self, chestVnum, pageIndex, slotIndex, itemVnum, itemCount):
-			self.dlgChestDrop.AddChestDropItem(int(chestVnum), int(pageIndex), int(slotIndex), int(itemVnum), int(itemCount))
+			if self.chestPreviewBroker:
+				self.chestPreviewBroker.Add(int(chestVnum), int(pageIndex), int(slotIndex), int(itemVnum), int(itemCount))
 			
 		def RefreshChestDropInfo(self, chestVnum):
-			self.dlgChestDrop.RefreshItems(chestVnum)
+			if self.chestPreviewBroker:
+				self.chestPreviewBroker.Complete(int(chestVnum))
 
 	if app.ENABLE_GROWTH_PET_SYSTEM:
 		def PetHatchingWindowCommand(self, command):
@@ -5842,20 +6977,27 @@ class Interface(object):
 				self.wndPetInfoWindow.PetHeartUpdate()
 
 		def PetGrowthPreview(self, petID, hpMin, hpMax, defMin, defMax, spMin, spMax):
-			if self.wndPetInfoWindow and self.wndPetInfoWindow.compact:
-				self.wndPetInfoWindow.compact.SetGrowthPreview(
-					petID, hpMin, hpMax, defMin, defMax, spMin, spMax)
+			if growthpetpresentation.SetGrowthPreview(
+					petID, hpMin, hpMax, defMin, defMax, spMin, spMax):
+				self._metadataInventoryDirty = True
 
 	if app.ENABLE_PLAYER_RANKING:
 		def ShowRankGlobal(self):
 			if False == player.IsObserverMode():
 				if self.wndRankInfo.IsShow():
 					self.wndRankInfo.Close()
-				elif not featureavailability.IsAvailable(featureavailability.RANKINGS):
-					featureavailability.NotifyRefused(featureavailability.RANKINGS)
 				else:
 					self.wndRankInfo.Show()
 					
+		def GlobalRankingBegin(self, request, mode):
+			self.wndRankInfo.Begin(request, mode)
+
+		def GlobalRankingRow(self, request, mode, own, rank, level, value, encoded_name):
+			self.wndRankInfo.Row(request, mode, own, rank, level, value, encoded_name)
+
+		def GlobalRankingEnd(self, request, mode):
+			self.wndRankInfo.End(request, mode)
+
 		def AppendInfoRankGlobal(self, my_pos, mode, pos, name, value, empire):
 			self.wndRankInfo.AppendInfo(my_pos, mode, pos, name, value, empire)
 			
@@ -5957,6 +7099,136 @@ class Interface(object):
 		def CloseWarpShowerWindow(self):
 			if self.wndWarpShower:
 				self.wndWarpShower.Close()
+
+	## Seamless warp (game.GameWindow.OnSeamlessWarpLeave/Arrive)
+	# The same Interface survives the reconnect. Leave closes what belongs to
+	# the source core's session (NPC/transaction dialogs, quest letters and
+	# dialogs, rosters the destination re-sends) and hides everything like the
+	# legacy warp; Arrive shows the default windows again. Allowlisted windows
+	# reopen through RestoreWarpUIState, exactly as after a legacy warp.
+	SEAMLESS_WARP_SESSION_WINDOWS = (
+		("miningCheck", ("HideWindow",)),
+		("woodCheck", ("HideWindow",)),
+		("dlgExchange", ("CloseDialog",)),
+		("dlgShop", ("Close",)),
+		("dlgRefineNew", ("Close", "Hide")),
+		("wndDragonSoulRefine", ("ResetForSessionChange",)),
+		("dlgPassword", ("CloseDialog", "Hide")),
+		("dlgPointReset", ("Close", "Hide")),
+		("dlgRestart", ("Close", "Hide")),
+		("wndItemSelect", ("Close", "Hide")),
+		("wndCube", ("Close", "Hide")),
+		("wndCubeResult", ("Close", "Hide")),
+		("wndCubeRenewal", ("Close",)),
+		("wndCaptcha", ("Close", "Hide")),
+		("wndCaptchaNew", ("Close", "Hide")),
+		("wndVirtualMarket", ("Close",)),
+		("wndChangeLook", ("Close", "Hide")),
+		("wndAura", ("Close", "Hide")),
+		("wndAttr67Add", ("Close", "Hide")),
+		("wndSkillBookCombination", ("Close", "Hide")),
+		("wndWheelofFortune", ("Close", "Hide")),
+		("wndReward", ("Close", "Hide")),
+		("wndExchangeLog", ("Close",)),
+		("wndDungeonTrack", ("Close",)),
+	)
+
+	def __SeamlessStep(self, name, function, *args):
+		try:
+			function(*args)
+		except Exception as error:
+			import dbg
+			dbg.TraceError("[SeamlessWarp] interface %s failed: %s" % (name, error))
+
+	def __CloseSessionWindow(self, attribute, methods):
+		window = getattr(self, attribute, None)
+		if not window:
+			return
+		for method in methods:
+			function = getattr(window, method, None)
+			if function:
+				function()
+				return
+
+	def __CloseQuestDialogsForWarp(self):
+		if "QuestCurtain" in uiQuest.QuestDialog.__dict__:
+			uiQuest.QuestDialog.QuestCurtain.Close()
+		if self.wndQuestWindow:
+			for key, eachQuestWindow in list(self.wndQuestWindow.items()):
+				eachQuestWindow.nextCurtainMode = -1
+				eachQuestWindow.Hide()
+				eachQuestWindow.CloseSelf()
+		self.wndQuestWindow = {}
+
+	def __ClearQuestLettersForWarp(self):
+		# Persistent buttons (daily tasks...) stay; letters are re-sent by the
+		# destination's quest login.
+		for btn in list(self.questButtonList[PERSISTENT_QUEST_BUTTON_COUNT:]):
+			self.__DestroyQuestButton(btn)
+		self.HideAllQuestButton()
+
+	def __ResetRostersForWarp(self):
+		if self.wndMessenger and hasattr(self.wndMessenger, "ResetSession"):
+			self.wndMessenger.ResetSession()
+		if self.wndParty:
+			self.wndParty.ExitParty()
+		if app.ENABLE_BATTLE_PASS and getattr(self, "wndBattlePass", None) and \
+				hasattr(self.wndBattlePass, "ClearBattlePass"):
+			self.wndBattlePass.ClearBattlePass()
+		if hasattr(self, "ClearEventManager"):
+			self.ClearEventManager()
+		minimap = self.wndMiniMap
+		panel = getattr(minimap, "objectivePanel", None) if minimap else None
+		if panel and hasattr(panel, "Reset"):
+			panel.Reset()
+		self.SetDailyTasksCapability(False, 0)
+		self.SetPermanentTasksCapability(False, 0)
+		if app.ENABLE_BIOLOG_SYSTEM and getattr(self, "wndBio", None):
+			self.wndBio.dataKnown = False
+
+	def OnSeamlessMapWarpLeave(self):
+		step = self.__SeamlessStep
+		for attribute, methods in self.SEAMLESS_WARP_SESSION_WINDOWS:
+			step(attribute, self.__CloseSessionWindow, attribute, methods)
+		step("quest dialogs", self.__CloseQuestDialogsForWarp)
+		if self.wndMiniMap and self.wndMiniMap.IsShowingAtlas():
+			step("atlas", self.wndMiniMap.ToggleAtlasWindow)
+		mission = getattr(self, "missionBoard", None)
+		if mission:
+			step("map mission", mission.CleanMission)
+
+	def OnSeamlessWarpLeave(self):
+		step = self.__SeamlessStep
+		if getattr(self, "wndWiki", None):
+			step("wiki catalogue", self.wndWiki.InvalidateCatalog)
+		if self.wndMiniMap and self.wndMiniMap.IsShowingAtlas():
+			step("atlas", self.wndMiniMap.ToggleAtlasWindow)
+		if self.dlgSystem:
+			step("system dialog", self.dlgSystem.Close)
+		for attribute, methods in self.SEAMLESS_WARP_SESSION_WINDOWS:
+			step(attribute, self.__CloseSessionWindow, attribute, methods)
+		if self.inputGuardSystem:
+			# Server state: the destination sends it again after ENTERGAME.
+			step("temporary restriction", self.inputGuardSystem.OnSessionEnd)
+		step("safebox", self.CommandCloseSafebox)
+		step("mall", self.CommandCloseMall)
+		step("quest dialogs", self.__CloseQuestDialogsForWarp)
+		step("quest letters", self.__ClearQuestLettersForWarp)
+		mission = getattr(self, "missionBoard", None)
+		if mission:
+			# Per-map mission state; the destination sends its current task again.
+			step("dungeon mission", mission.CleanMission)
+		step("whisper buttons", self.HideAllWhisperButton)
+		step("rosters", self.__ResetRostersForWarp)
+		step("windows", self.HideAllWindows)
+
+	def OnSeamlessWarpArrive(self):
+		step = self.__SeamlessStep
+		if self.wndMessenger and hasattr(self.wndMessenger, "ReattachHandler"):
+			step("messenger", self.wndMessenger.ReattachHandler)
+		step("default windows", self.ShowDefaultWindows)
+		step("whisper buttons", self.ShowAllWhisperButton)
+		step("quest buttons", self.ShowAllQuestButton)
 
 	if app.ENABLE_FAST_READ_STONE_AND_SKILLBOOK:
 		def OpenSkillUpgradeWindow(self, upgraderItem):
@@ -6080,6 +7352,9 @@ class Interface(object):
 		def OpenVirtualMarketWindow(self):
 			if not self.wndVirtualMarket:
 				self.wndVirtualMarket = uivirtualmarket.VirtualMarketWindow(self)
+				# First use opens; construction must not count as a toggle.
+				self.wndVirtualMarket.Open()
+				return
 			if self.wndVirtualMarket.IsShow():
 				self.wndVirtualMarket.Close()
 			else:
@@ -6495,17 +7770,13 @@ class Interface(object):
 			if self.wndMiniMap:
 				self.wndMiniMap.RefreshPlayerCount(count)
 
-	if app.ENABLE_BOSS_TRACK:
-		def SetBossTrack(self, data, needClean):
-			if self.wndBossTrack:
-				self.wndBossTrack.SetServerData(data, int(needClean))
-		def OpenBossTrack(self):
-			if self.wndBossTrack == None:
-				self.wndBossTrack = uiBossTrack.Window()
-			if self.wndBossTrack.IsShow():
-				self.wndBossTrack.Close()
-			else:
-				self.wndBossTrack.Open()
+	def SetBossTrack(self, data, needClean):
+		# ALTHEA-626: swallow a legacy server push during a mixed-version update.
+		return False
+
+	def OpenBossTrack(self):
+		# The retired tracker must remain inaccessible on older executables too.
+		return False
 
 	if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 		def IsRefineElementDialogOpen(self):
@@ -6592,3 +7863,21 @@ UnifiedMessengerRouter.PlayerProfile = _CrimsonRouterPlayerProfile
 Interface.UnifiedMessengerPlayerProfileCapability = _CrimsonInterfacePlayerProfileCapability
 Interface.UnifiedMessengerPlayerProfile = _CrimsonInterfacePlayerProfile
 # CRIMSON_EMBER_PROFILE_INTERFACE_V1_END
+
+
+def _UnifiedMessengerPresenceCapability(self, enabled):
+	window = self.unifiedMessengerRouter.window
+	if window:
+		window.SyncPresenceWatch()
+		window.OnPresenceChanged()
+
+
+def _UnifiedMessengerPresence(self, token, name, state):
+	# The native watch validates tokens and owns the cache across UI rebuilds.
+	window = self.unifiedMessengerRouter.window
+	if window:
+		window.OnPresenceChanged()
+
+
+Interface.UnifiedMessengerPresenceCapability = _UnifiedMessengerPresenceCapability
+Interface.UnifiedMessengerPresence = _UnifiedMessengerPresence

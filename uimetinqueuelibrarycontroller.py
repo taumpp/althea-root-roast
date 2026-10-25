@@ -57,7 +57,7 @@ class DesignController(appearance.MetinQueueAppearanceController):
 			self.originalProfiles[self.original[0]] = self.original
 			self.originalNearbyFill = self.backend.ReadNearby()
 		except (AttributeError, RuntimeError, TypeError, ValueError, OSError):
-			self.page.SetStatus(u"Nastavení nelze načíst. Zavřete a znovu otevřete editor.")
+			self.page.SetStatus(u"Nastavení nejde načíst. Zavři a znovu otevři editor.")
 			return False
 		self.profiles = dict((key, list(values)) for key, values in self.originalProfiles.items())
 		self.draftNearbyFill = self.originalNearbyFill if nearby is None else (1 if nearby else 0)
@@ -250,7 +250,7 @@ class DesignController(appearance.MetinQueueAppearanceController):
 		except (AttributeError, RuntimeError, TypeError, ValueError, OSError) as error:
 			dbg.TraceError("[MetinQueueDesign] Preview unavailable: %s" % error)
 			self._RemovePreview()
-			self.page.SetStatus(u"Náhled nelze načíst. Je potřeba odpovídající klient a balíčky.")
+			self.page.SetStatus(u"Náhled nejde načíst. Aktualizuj hru.")
 
 	def _UpdatePreview(self, reframe=False):
 		if self.draft is None:

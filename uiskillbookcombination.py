@@ -30,10 +30,17 @@ SKILLBOOK_COMBI_START = 2
 class SkillBookCombinationWindow(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton')
 		self.inven = None
 		if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 			self.invenSpecial = None
 		self.itemToolTip = uiToolTip.ItemToolTip()
+		self.SkillBookList = {}
+		self.sessionOpen = False
+		self.AcceptButton = None
+		self.CancelButton = None
+		self.Slot = None
 
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
@@ -43,19 +50,21 @@ class SkillBookCombinationWindow(ui.ScriptWindow):
 		del self.itemToolTip
 
 	def Close(self):
-		for index, key in self.SkillBookList.items():
-			i = key[1] # attached inven pos
-			self.SetCanMouseEventSlot(i)
-
-		net.SendSkillBookCombinationPacket(self.SkillBookList, SKILLBOOK_COMBI_UI_CLOSE)
-
-		del self.SkillBookList
-		del self.AcceptButton
-		del self.CancelButton
-		del self.Slot
 		self.Hide()
+		self.OverOutItem()
+		if not self.sessionOpen:
+			return
+
+		self.sessionOpen = False
+		for key in self.SkillBookList.values():
+			self.SetCanMouseEventSlot(key[1])
+		net.SendSkillBookCombinationPacket(self.SkillBookList, SKILLBOOK_COMBI_UI_CLOSE)
+		self.SkillBookList = {}
 
 	def Open(self):
+		if self.sessionOpen:
+			self.SetTop()
+			return
 		try:
 			pyScrLoader = ui.PythonScriptLoader()
 			pyScrLoader.LoadScriptFile(self, "UIScript/SkillBookCombinationDialog.py")
@@ -86,6 +95,7 @@ class SkillBookCombinationWindow(ui.ScriptWindow):
 			(self.StartPosX, self.StartPosY, z) = player.GetMainCharacterPosition()
 
 			net.SendSkillBookCombinationPacket(self.SkillBookList, SKILLBOOK_COMBI_UI_OPEN)
+			self.sessionOpen = True
 
 			self.SetTop()
 		except:
@@ -170,44 +180,28 @@ class SkillBookCombinationWindow(ui.ScriptWindow):
 		self.Slot.ClearSlot(idx)
 
 	def SetCanMouseEventSlot(self, idx):
-		if idx is not None:
-			if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
-				if self.inven or self.invenSpecial:
-					page = self.inven.GetInventoryPageIndex() # range 0 ~ 1
-					special_page = self.invenSpecial.GetInventoryPageIndex()
+		if idx is None:
+			return
+		if self.inven and self.inven.wndItem:
+			page = self.inven.GetInventoryPageIndex()
+			start = page * INVENTORY_PAGE_SIZE
+			if start <= idx < start + INVENTORY_PAGE_SIZE:
+				self.inven.wndItem.SetCanMouseEventSlot(idx - start)
 
-					if (page * INVENTORY_PAGE_SIZE) <= idx < ((page + 1) * INVENTORY_PAGE_SIZE): # range 0 ~ 44, 45 ~ 89
-						idx = idx - (page * INVENTORY_PAGE_SIZE)
-						self.inven.wndItem.SetCanMouseEventSlot(idx)
-
-					if self.invenSpecial.GetInventoryType() == 0:
-						if (item.SKILL_BOOK_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE)) <= idx < (item.SKILL_BOOK_INVENTORY_SLOT_START + (((special_page + 1) * SPECIAL_INVENTORY_PAGE_SIZE))):
-							idx = idx - (item.SKILL_BOOK_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE))
-							self.invenSpecial.wndItem.SetCanMouseEventSlot(idx)
-
-					if self.invenSpecial.GetInventoryType() == 1:
-						if (item.UPGRADE_ITEMS_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE)) <= idx < (item.UPGRADE_ITEMS_INVENTORY_SLOT_START + (((special_page + 1) * SPECIAL_INVENTORY_PAGE_SIZE))):
-							idx = idx - (item.UPGRADE_ITEMS_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE))
-							self.invenSpecial.wndItem.SetCanMouseEventSlot(idx)
-
-					if self.invenSpecial.GetInventoryType() == 2:
-						if (item.STONE_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE)) <= idx < (item.STONE_INVENTORY_SLOT_START + (((special_page + 1) * SPECIAL_INVENTORY_PAGE_SIZE))):
-							idx = idx - (item.STONE_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE))
-							self.invenSpecial.wndItem.SetCanMouseEventSlot(idx)
-
-					if self.invenSpecial.GetInventoryType() == 3:
-						if (item.GIFT_BOX_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE)) <= idx < (item.GIFT_BOX_INVENTORY_SLOT_START + (((special_page + 1) * SPECIAL_INVENTORY_PAGE_SIZE))):
-							idx = idx - (item.GIFT_BOX_INVENTORY_SLOT_START + (special_page * SPECIAL_INVENTORY_PAGE_SIZE))
-							self.invenSpecial.wndItem.SetCanMouseEventSlot(idx)
-			else:
-				if idx >= INVENTORY_PAGE_SIZE:
-					if app.ENABLE_EXTEND_INVEN_SYSTEM:
-						page = self.inven.GetInventoryPageIndex() # 0,1,2,3
-						idx -= (page * INVENTORY_PAGE_SIZE)
-					else:
-						idx -= INVENTORY_PAGE_SIZE
-
-				self.inven.wndItem.SetCanMouseEventSlot(idx)
+		if app.ENABLE_SPECIAL_INVENTORY_SYSTEM and self.invenSpecial and self.invenSpecial.wndItem:
+			starts = (
+				item.SKILL_BOOK_INVENTORY_SLOT_START,
+				item.UPGRADE_ITEMS_INVENTORY_SLOT_START,
+				item.STONE_INVENTORY_SLOT_START,
+				item.GIFT_BOX_INVENTORY_SLOT_START,
+				item.SWITCH_INVENTORY_SLOT_START,
+				item.COSTUME_INVENTORY_SLOT_START,
+			)
+			kind = self.invenSpecial.GetInventoryType()
+			if 0 <= kind < len(starts):
+				start = starts[kind] + self.invenSpecial.GetInventoryPageIndex() * SPECIAL_INVENTORY_PAGE_SIZE
+				if start <= idx < start + SPECIAL_INVENTORY_PAGE_SIZE:
+					self.invenSpecial.wndItem.SetCanMouseEventSlot(idx - start)
 
 	def ClickAcceptButton(self):
 		cnt = 0

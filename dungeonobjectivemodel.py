@@ -46,7 +46,7 @@ class ObjectiveState:
     def text_identity(self):
         return self.instance, self.phase, self.key
 
-    def receive(self, arguments):
+    def receive(self, arguments, map_index=None):
         if len(arguments) != 9:
             return False
         try:
@@ -61,6 +61,10 @@ class ObjectiveState:
                 or not 0 <= current <= target <= 1000000 or status not in (0, 1, 2)):
             return False
         if status and (not instance or not boss):
+            return False
+        # A source core can still have an objective packet in flight on warp.
+        # Reject it without advancing the destination's sequence or ACKing it.
+        if status and map_index is not None and instance != map_index:
             return False
         if status and key not in self.texts:
             # A newer server may know a task this pack cannot translate.

@@ -12,12 +12,28 @@ import osfInfo
 import skillbookpolicy
 import sagebuff
 import pvmpersonal
+import ownedcount
 from settingslocale import Text as T
 
 LEGACY_MAX_COUNT = 20
 SOUL_STONE_MAX_COUNT = 100
+SOUL_STONE = 50513           # the spirit stone (duchovní kámen): G -> P
+GRADE_BOOKS = 1              # the skill grade the books read (M -> G)
+GRADE_SOUL_STONE = 2         # the skill grade the spirit stone reads (G -> P)
 SETTINGS_PATH = "d:/ymir work/ui/game/crimson_ember/gameoption/"
 ZEN_BEAN = 70102
+SLOT_BASE = "d:/ymir work/ui/public/Slot_Base.sub"
+
+
+def SetCellImage(window, image):
+	"""The background of an item cell: the R1 item slot C while the shared R1 frame (root/uir1frame.py) dresses the
+	window, else the original Slot_Base.sub."""
+	try:
+		import uir1frame
+	except Exception:
+		image.LoadImage(SLOT_BASE)
+		return
+	uir1frame.SetCellImage(window, image, SLOT_BASE)
 SKILL_SLOT_START = 1
 
 
@@ -42,6 +58,12 @@ class ReadingCheckBox(ui.Button):
 
 class SkillUpgradeWindow(ui.ScriptWindow):
 
+	statusText = None		# the status line ("Dovednost je na maximu" / "Nemáš knihy" / "Chybí ti: ..."), the window stays open
+	r1controls = None		# the R1 buttons and count slider (root/uir1skillupgrade.py), None = the original controls
+	serverUpgrader = 0       # item acknowledged by OpenSkillUpgrade
+	requestedItem = 0        # outstanding inventory-use request
+	chosenSlot = 0           # preserved across server reopen
+
 	def __init__(self): 
 		self.isLoaded = 0
 		
@@ -49,6 +71,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		self.slots = None
 		self.cancelBtn = None
 		self.confirmBtn = None
+		self.statusText = None
+		self.r1controls = None
 		self.toolTipSkill = 0
 		self.selectedSlot = 0
 		self.isSlotSelectable = [0 for x in range(7)]
@@ -69,6 +93,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		self.readingRequiredCount = None
 		
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'confirmBtn')
 		self.__LoadWindow()
 
 	def __LoadWindow(self):
@@ -92,7 +118,22 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			self.defaultConfirmText = self.confirmBtn.GetText()
 			self.cancelBtn = self.GetChild("cancel")
 			self.countText = self.GetChild("currentCount")
+			# the status line above the buttons ("Dovednost je na maximu" / "Nemáš knihy"): the window stays open
+			self.statusText = ui.TextLine()
+			self.statusText.SetParent(self)
+			self.statusText.AddFlag("not_pick")
+			self.statusText.SetHorizontalAlignCenter()
+			self.statusText.SetOutline()
+			self.statusText.SetText("")
+			self.statusText.Show()
 			self.countControl = self.GetChild("CountController")
+			# R1 look of the two buttons and the count slider (root/uir1skillupgrade.py); "Starý vzhled", a window
+			# without the R1 frame and a failure keep the original controls
+			try:
+				import uir1skillupgrade
+				uir1skillupgrade.Dress(self)
+			except Exception:
+				self.r1controls = None
 			self.countControl.SetButtonVisual(SETTINGS_PATH + "slider/", "small_thumb_01.tga", "small_thumb_02.tga", "small_thumb_03.tga")
 			self.countControl.SetBackgroundVisual(SETTINGS_PATH + "slider/small_track.tga")
 			self.countControl.SetEvent(ui.__mem_func__(self.OnChangeCount))
@@ -109,6 +150,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			self.cancelBtn.SetEvent(ui.__mem_func__(self.Hide))
 			self.confirmBtn.SetEvent(ui.__mem_func__(self.Confirm))
 
+			SetCellImage(self, self.GetChild("soul_icon"))
 			self.SoulStone = ui.ImageBox()
 			self.SoulStone.SetParent(self.GetChild("soul_icon"))
 			self.SoulStone.LoadImage("icon/item/50513.tga")
@@ -119,7 +161,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 
 			self.ReadingMaterialSlot = ui.ImageBox()
 			self.ReadingMaterialSlot.SetParent(self)
-			self.ReadingMaterialSlot.LoadImage("d:/ymir work/ui/public/Slot_Base.sub")
+			SetCellImage(self, self.ReadingMaterialSlot)
 			self.ReadingMaterial = ui.ImageBox()
 			self.ReadingMaterial.SetParent(self.ReadingMaterialSlot)
 			self.ReadingMaterial.SAFE_SetStringEvent("MOUSE_OVER_OUT", self.OverOutItem2)
@@ -146,7 +188,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 				background = ui.ImageBox()
 				background.SetParent(self)
 				background.SetPosition(x, 127)
-				background.LoadImage("d:/ymir work/ui/public/Slot_Base.sub")
+				SetCellImage(self, background)
 				background.Show()
 				icon = ui.ImageBox()
 				icon.SetParent(background)
@@ -185,10 +227,15 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			exception.Abort("SkillUpgradeWindow.LoadWindow.BindObject")
 			
 		self.SetCenterPosition()
-		self.__RefreshSkillPage()
+		self.RefreshSkillPage()
 
-	def SetUpgradeItem(self, upgradeVnum):
+	def SetUpgradeItem(self, upgradeVnum, local=False):
+		"""The item the window reads with. The server opens the window with it (OpenSkillUpgrade, it remembers the
+		item for /soul_stone); local=True: only the window shows another item, the server still has the old one."""
 		self.selectedSlot = 0
+		if not local:
+			self.serverUpgrader = upgradeVnum
+			self.requestedItem = 0
 		self.itemUpgraderVnum = upgradeVnum
 		
 		upgradeItems = {}
@@ -260,6 +307,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		if interface:
 			if interface.tooltipItem:
 				interface.tooltipItem.SetItemToolTip(index)
+				if itemType == "zen":
+					interface.tooltipItem.AppendTextLine(localeInfo.SKILL_UPGRADE_ZEN_HINT)
 				interface.tooltipItem.ShowToolTip()
 
 	def OverOutItem2(self):
@@ -273,6 +322,68 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 
 	def UsesSoulStone(self):
 		return self.itemUpgraderVnum in (50513, sagebuff.STONE_VNUM)
+
+	def FollowsSkillGrade(self):
+		return bool(self.itemUpgraderVnum) and (self.currentSkillGrade == GRADE_BOOKS or self.itemUpgraderVnum == SOUL_STONE)
+
+	def ItemForSkill(self, slot):
+		if self.FollowsSkillGrade():
+			if player.GetSkillGrade(slot) == GRADE_SOUL_STONE:
+				return SOUL_STONE
+			if self.currentSkillGrade == GRADE_BOOKS and not self.IsUniversalBook():
+				item.SelectItem(self.itemUpgraderVnum)
+				if item.GetValue(0) == player.GetSkillIndex(slot):
+					return self.itemUpgraderVnum
+			return skillbookpolicy.UNIVERSAL_SKILL_BOOK
+		return self.itemUpgraderVnum
+
+	def UpdateSelectedItem(self, synchronize=True):
+		"""Shared by character and Buffi: the selected skill determines the displayed requirements."""
+		if not self.selectedSlot:
+			return
+		wanted = self.ItemForSkill(self.selectedSlot)
+		if wanted != self.itemUpgraderVnum:
+			slot = self.selectedSlot
+			self.SetUpgradeItem(wanted, local=True)
+			self.selectedSlot = slot
+			self.ConfigureReadingControls()
+			self.SetCount(0 if self.IsUniversalBook() else 1)
+		if synchronize and self.FollowsSkillGrade() and not self.requestedItem:
+			self.SynchronizeReadingItem()
+
+	def SynchronizeReadingItem(self):
+		"""Use the existing inventory packet; never read before the server acknowledges the item.
+		A later Confirm retries a refused request. Selection itself does not depend on item ownership."""
+		if self.serverUpgrader == self.itemUpgraderVnum and not self.requestedItem:
+			return True
+		import quickbuffruntime
+		position = quickbuffruntime.InventoryScanner(item, player).Find(self.itemUpgraderVnum)
+		if position is not None:
+			self.requestedItem = self.itemUpgraderVnum
+			net.SendItemUsePacket(position)
+		return False
+
+	def PlaceControls(self, height):
+		"""The count slider, its text and the two buttons of a board ``height`` px high (the original places)."""
+		self.countControl.SetPosition(66, height - 65)
+		if self.statusText is not None:
+			self.statusText.SetPosition(142, height - 86)
+		self.countText.SetPosition(194, height - 68)
+		self.confirmBtn.SetPosition(30, height - 37)
+		self.cancelBtn.SetPosition(154, height - 37)
+
+	def LayoutControls(self, height):
+		"""The controls at their places; the R1 buttons and slider (root/uir1skillupgrade.py) in their own rows."""
+		self.PlaceControls(height)
+		skin = self.r1controls
+		if skin is None:
+			return
+		try:
+			skin.Layout(height)
+		except Exception:
+			import uir1skillupgrade
+			uir1skillupgrade.Fail(self)
+			self.PlaceControls(height)
 
 	def ConfigureReadingControls(self):
 		self.countControl.Show()
@@ -289,10 +400,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		height = 286 if sageReading else 246
 		self.SetSize(284, height)
 		self.board.SetSize(284, height)
-		self.countControl.SetPosition(66, height - 65)
-		self.countText.SetPosition(194, height - 68)
-		self.confirmBtn.SetPosition(30, height - 37)
-		self.cancelBtn.SetPosition(154, height - 37)
+		self.LayoutControls(height)
 		supportY = 167 if sageReading else 127
 		positions = (92, 68, 134) if sageReading else ((24, 90, 156) if self.UsesSoulStone() else (42, 124, 206))
 		self.GetChild("soul_icon").SetPosition(positions[0], 127)
@@ -327,21 +435,27 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 
 	def SetUseZenBean(self, checkType, bUse):
 		self.useZenBean = int(bool(bUse))
+		self.PaintItemCounts()
 
-	def AvailableCount(self):
+	def MaxCount(self):
+		"""The most attempts one request may ask for (the server caps them the same way)."""
 		maximum = skillbookpolicy.MAX_SELECTED_BOOKS if self.IsUniversalBook() else LEGACY_MAX_COUNT
 		if self.UsesSoulStone():
 			maximum = SOUL_STONE_MAX_COUNT
+		return maximum
+
+	def AvailableCount(self):
+		maximum = self.MaxCount()
 		if self.itemUpgraderVnum == sagebuff.STONE_VNUM:
 			material, required, cap = sagebuff.ReadingTerms(item)
 			if material <= 0 or required <= 0 or cap <= 0:
 				return 0
-			maximum = min(maximum, player.GetItemCountByVnum(material) // required)
+			maximum = min(maximum, ownedcount.Owned(material) // required)
 		maximum = min(maximum, self.GetVnumCount())
 		if self.useExorcismBook:
-			maximum = min(maximum, player.GetItemCountByVnum(self.itemTimeVnum))
+			maximum = min(maximum, ownedcount.Owned(self.itemTimeVnum))
 		if self.useLuckBook:
-			maximum = min(maximum, player.GetItemCountByVnum(self.itemLuckVnum))
+			maximum = min(maximum, ownedcount.Owned(self.itemLuckVnum))
 		return max(0, int(maximum))
 
 	def OnChangeCount(self):
@@ -353,18 +467,80 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 	def GetVnumCount(self):
 		if not self.itemUpgraderVnum:
 			return 0
-		return player.GetItemCountByVnum(self.itemUpgraderVnum)
+		return ownedcount.Owned(self.itemUpgraderVnum)
 
 	def RefreshItemCounts(self):
-		for role, vnum in (("upgrader", self.itemUpgraderVnum),
-				("luck", self.itemLuckVnum), ("time", self.itemTimeVnum), ("zen", self.itemZenVnum)):
-			count = max(0, int(player.GetItemCountByVnum(vnum))) if vnum else 0
-			self.itemCountTexts[role].SetText(str(count))
+		self.SetCount(self.curCount)		# repaints the counts (PaintItemCounts)
+		self.RefreshStatus()
+
+	def PaintItemCounts(self):
+		"""The count on each item icon: "owned/need" for the chosen number of readings, green / red like every item
+		price (root/ownedcount.py); only "owned" for an item that is not used (unchecked) or while
+		the need is open ("Do G")."""
+		texts = getattr(self, "itemCountTexts", None)
+		if not texts:
+			return
+		attempts = max(0, int(self.curCount or 0)) if any(self.isSlotSelectable) else 0
+		rows = [("upgrader", self.itemUpgraderVnum, attempts),
+			("luck", self.itemLuckVnum, attempts if self.useLuckBook else 0),
+			("time", self.itemTimeVnum, attempts if self.useExorcismBook else 0),
+			("zen", self.itemZenVnum, 0)]
 		if self.itemUpgraderVnum == sagebuff.STONE_VNUM:
-			material = sagebuff.ReadingTerms(item)[0]
-			count = max(0, int(player.GetItemCountByVnum(material))) if material > 0 else 0
-			self.itemCountTexts["material"].SetText(str(count))
-		self.SetCount(self.curCount)
+			material, required, unusedCap = sagebuff.ReadingTerms(item)
+			rows.append(("material", material, max(0, required) * attempts))
+		for role, vnum, need in rows:
+			line = texts.get(role)
+			if line is None:
+				continue
+			owned = ownedcount.Owned(vnum) if vnum and vnum > 0 else 0
+			if need > 0:
+				ownedcount.Paint(line, owned, need, compact=True)
+			else:
+				line.SetPackedFontColor(-1)		# white, the stack count look
+				line.SetText(ownedcount.Short(owned))
+
+	def NothingToReadText(self):
+		"""Why Potvrdit has nothing to do (the max level, no books), empty while a reading is possible."""
+		if not self.itemUpgraderVnum:
+			return ""
+		if not any(self.isSlotSelectable):
+			return T("Dovednost je na maximu", "The skill is at its maximum")
+		if self.AvailableCount() < 1:
+			missing = self.MissingItems()
+			if not missing or self.itemUpgraderVnum in missing:
+				return T("Nemáš kameny", "You have no stones") if self.UsesSoulStone() else T("Nemáš knihy", "You have no books")
+			names = []
+			for vnum in missing:
+				item.SelectItem(vnum)
+				names.append(item.GetItemName())
+			return getattr(localeInfo, "SKILL_UPGRADE_MISSING", "%s") % ", ".join(names)
+		return ""
+
+	def MissingItems(self):
+		"""The items one more reading lacks, in the order of the window: the book / stone, the checked reading supports
+		(Exorcism scroll, Concentrated reading) and the material of the sage stone. "Nemáš knihy" only for the book,
+		a missing support by its name (the tester had the books and lacked the Exorcism scrolls)."""
+		need = [(self.itemUpgraderVnum, 1)]
+		if self.useExorcismBook:
+			need.append((self.itemTimeVnum, 1))
+		if self.useLuckBook:
+			need.append((self.itemLuckVnum, 1))
+		if self.itemUpgraderVnum == sagebuff.STONE_VNUM:
+			material, required, unusedCap = sagebuff.ReadingTerms(item)
+			if material > 0 and required > 0:
+				need.append((material, required))
+		return [vnum for vnum, count in need if vnum and ownedcount.Owned(vnum) < count]
+
+	def RefreshStatus(self):
+		"""The status line and Potvrdit (disabled when there is nothing to read); the window itself stays open."""
+		if self.statusText is None:
+			return
+		text = self.NothingToReadText()
+		self.statusText.SetText(text)
+		if text:
+			self.confirmBtn.Disable()
+		else:
+			self.confirmBtn.Enable()
 
 	def SetCount(self, count):
 		maximum = max(1, self.AvailableCount())
@@ -372,26 +548,17 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			self.curCount = 0
 			self.countText.SetText(T("Do G", "Until G"))
 			self.countControl.SetSliderPos(1.0)
+			self.PaintItemCounts()
 			return
 		self.curCount = min(maximum, max(1, int(count)))
 		self.countText.SetText("%dx" % self.curCount)
 		steps = maximum if self.IsUniversalBook() else max(1, maximum - 1)
 		self.countControl.SetSliderPos(float(self.curCount - 1) / steps)
+		self.PaintItemCounts()
 
 	def SelectSkill(self, index):
-		if not 0 <= index < len(self.isSlotSelectable) or not self.isSlotSelectable[index]:
-			return
-			
-		self.slots.ActivateSlot(index)
-		self.selectedSlot = index
-		
-		slotCount = 6
-		startSlotIndex = SKILL_SLOT_START
-		for i in range(slotCount):
-			slotIndex = i + startSlotIndex
-			if slotIndex != index:
-				self.slots.DeactivateSlot(slotIndex)
-		
+		self.ClickSkillSlot(index)
+
 	def SelectEmptySlot(self, index):
 		pass
 		
@@ -401,6 +568,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			
 		self.slots.ActivateSlot(index)
 		self.selectedSlot = index
+		self.chosenSlot = index
 		
 		slotCount = 6
 		startSlotIndex = SKILL_SLOT_START
@@ -408,6 +576,9 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			slotIndex = i + startSlotIndex
 			if slotIndex != index:
 				self.slots.DeactivateSlot(slotIndex)
+
+		self.UpdateSelectedItem()
+		self.RefreshItemCounts()
 
 	def OverInItem(self, slotNumber):
 		if 0 == self.toolTipSkill:
@@ -421,6 +592,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		
 		if skill.SKILL_TYPE_ACTIVE == skillType:
 			self.toolTipSkill.SetSkillNew(srcSlotIndex, skillIndex, skillGrade, skillLevel)
+			# rebuilt from the new level / grade on RefreshSkill while the mouse stays on the slot
+			self.toolTipSkill.RememberRefresh(self.OverInItem, slotNumber)
 
 	def OverOutItem(self):
 		if 0 != self.toolTipSkill:
@@ -438,20 +611,21 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 	def __GetSkillGradeFromSlot(self, skillSlot):
 		return skillSlot // skill.SKILL_GRADE_STEP_COUNT
 		
+	def RefreshSkillPage(self):
+		"""The skill row (uibuffupgrade.SupportUpgrade shows the Buffi skills in the same window)."""
+		self.__RefreshSkillPage()
+
 	def __RefreshSkillPage(self):
 		slotCount = 6
 		skillPage = self.slots
 
 		startSlotIndex = SKILL_SLOT_START
 		self.isSlotSelectable = [False for x in range(startSlotIndex + slotCount)]
-		universalBook = self.itemUpgraderVnum == skillbookpolicy.UNIVERSAL_SKILL_BOOK
 
 		getSkillType=skill.GetSkillType
 		getSkillIndex=player.GetSkillIndex
 		getSkillGrade=player.GetSkillGrade
 		getSkillLevel=player.GetSkillLevel
-		getSkillLevelUpPoint=skill.GetSkillLevelUpPoint
-		getSkillMaxLevel=skill.GetSkillMaxLevel
 		for i in range(slotCount):
 
 			slotIndex = i + startSlotIndex
@@ -466,9 +640,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 			skillGrade = getSkillGrade(slotIndex)
 			skillLevel = getSkillLevel(slotIndex)
 			skillType = getSkillType(skillIndex)
-			if universalBook and not skillbookpolicy.CanReadUniversal(
-					net.GetMainActorRace(), net.GetMainActorSkillGroup(), skillIndex, skillGrade):
-				continue
+			# Keep every skill visible; M and G share one selection row.
 
 			## ACTIVE
 			if skill.SKILL_TYPE_ACTIVE == skillType:
@@ -478,19 +650,17 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 
 				skillPage.SetSlotCountNew(realSlotIndex, skillGrade, skillLevel)
 
-				cannotUpgrade = (self.itemUpgraderVnum == sagebuff.STONE_VNUM and
-					not sagebuff.CanRead(skillIndex, skillGrade, skillLevel,
-					pvmpersonal.current().rows if pvmpersonal.current() else ()))
-				if self.itemUpgraderVnum not in [50513, sagebuff.STONE_VNUM, 72811, skillbookpolicy.UNIVERSAL_SKILL_BOOK]:
-					item.SelectItem(self.itemUpgraderVnum)
-					if item.GetValue(0) != skillIndex:
-						cannotUpgrade = True
-
-				if skillGrade != self.currentSkillGrade or cannotUpgrade == True:
-					self.isSlotSelectable[slotIndex] = False
-					skillPage.DisableCoverButton(realSlotIndex)
+				if self.FollowsSkillGrade():
+					canRead = skillGrade in (GRADE_BOOKS, GRADE_SOUL_STONE) and skillbookpolicy.CanReadUniversal(
+						net.GetMainActorRace(), net.GetMainActorSkillGroup(), skillIndex, GRADE_BOOKS)
 				else:
-					self.isSlotSelectable[slotIndex] = True
+					canRead = skillGrade == self.currentSkillGrade
+					if self.itemUpgraderVnum == sagebuff.STONE_VNUM:
+						canRead = canRead and sagebuff.CanRead(skillIndex, skillGrade, skillLevel,
+							pvmpersonal.current().rows if pvmpersonal.current() else ())
+				self.isSlotSelectable[slotIndex] = canRead
+				if not canRead:
+					skillPage.DisableCoverButton(realSlotIndex)
 
 		if not 0 < self.selectedSlot < len(self.isSlotSelectable) or not self.isSlotSelectable[self.selectedSlot]:
 			self.selectedSlot = 0
@@ -502,8 +672,11 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		self.toolTipSkill = toolTipSkill
 		
 	def Confirm(self):
-		self.__RefreshSkillPage()
+		self.RefreshSkillPage()
 		self.SetCount(self.curCount)
+		self.UpdateSelectedItem(synchronize=False)
+		if self.selectedSlot and self.FollowsSkillGrade() and not self.SynchronizeReadingItem():
+			return
 		if self.selectedSlot != 0:
 			srcSlotIndex = self.__RealSkillSlotToSourceSlot(self.selectedSlot)
 			skillIndex = player.GetSkillIndex(srcSlotIndex)
@@ -517,7 +690,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 				if self.UsesSoulStone() and self.useZenBean:
 					strArg += " %d" % self.useZenBean
 			net.SendChatPacket("/soul_stone " + str(strArg))
-			self.Hide()
+			# the window stays open: the player closes it (reads again, another skill, looks at the stats)
+			self.Refresh()
 		else:
 			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.SOUL_STONE_GUI)
 
@@ -526,10 +700,27 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		return True
 		
 	def Refresh(self):
-		self.__RefreshSkillPage()
+		if not self.IsShow():
+			return
+		slot = self.selectedSlot
+		self.RefreshSkillPage()
+		if not self.selectedSlot:
+			self.SelectReadableSkill(after=slot)
+		self.UpdateSelectedItem()
 		self.RefreshItemCounts()
-		self.SetCount(self.curCount)
-		
+
+	def SelectReadableSkill(self, preferred=(), after=0):
+		"""Chooses a readable skill: ``preferred`` first, then the row from the slot after ``after``
+		around. False: none."""
+		count = len(self.isSlotSelectable)
+		row = list(range(SKILL_SLOT_START, count))
+		start = row.index(after) + 1 if after in row else 0
+		for slot in list(preferred) + row[start:] + row[:start]:
+			if 0 < slot < count and self.isSlotSelectable[slot]:
+				self.ClickSkillSlot(slot)
+				return True
+		return False
+
 	def Show(self):
 		if self.IsUniversalBook():
 			self.useExorcismBook = self.useLuckBook = 1
@@ -540,8 +731,14 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		self.checkBoxZen.SetCheckStatus(self.useZenBean)
 		self.SetCount(0 if self.IsUniversalBook() else 1)
 		self.selectedSlot = 0
-		self.__RefreshSkillPage()
+		self.RefreshSkillPage()
+		self.SelectBookSkill()
+		self.RefreshStatus()
+		ui.ScriptWindow.Show(self)
 
+	def SelectBookSkill(self):
+		"""The skill chosen when the window opens: the skill of a book of one skill, else the skill chosen last, else
+		the first one this item reads (as Vylepšování buffy opens on its skill), so Potvrdit reads right away."""
 		if self.itemUpgraderVnum and self.itemUpgraderVnum not in [50513, sagebuff.STONE_VNUM, 72811, skillbookpolicy.UNIVERSAL_SKILL_BOOK]:
 			item.SelectItem(self.itemUpgraderVnum)
 			targetSkill = item.GetValue(0)
@@ -553,8 +750,8 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 					if player.GetSkillIndex(slotIndex) == targetSkill and self.isSlotSelectable[slotIndex]:
 						self.ClickSkillSlot(slotIndex)
 						break
-
-		ui.ScriptWindow.Show(self)
+		if not self.selectedSlot:
+			self.SelectReadableSkill((self.chosenSlot,))
 		
 	def Hide(self):
 		self.OverOutItem2()
@@ -570,6 +767,7 @@ class SkillUpgradeWindow(ui.ScriptWindow):
 		self.readingPairCheck = None
 		self.readingPlus = None
 		self.readingRequiredCount = None
+		self.r1controls = None
 		self.ClearDictionary()
 		self.board = None
 		self.slots = None

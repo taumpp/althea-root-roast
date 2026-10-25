@@ -34,10 +34,17 @@ CODES = {
 	'COUNT_CHANGED': 'first',
 	'NO_YANG': 'first',
 	'LEGACY': None,
+	'SLOT_MATCHED': None,
 }
 FALLBACK = 'UNKNOWN'
+LOCAL_CODES = ('CATALOG_WAITING', 'CATALOG_LOADING', 'CATALOG_ERROR', 'OPTIONS_EMPTY')
 
 _strings = {}
+
+
+def LocalMessage(code):
+	"""Presentation states; these are not additional server refusal tokens."""
+	return _Load()[code] if code in LOCAL_CODES else Message('UNKNOWN', code)
 
 
 def _Load():

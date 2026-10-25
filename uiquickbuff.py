@@ -12,10 +12,12 @@ import uiScriptLocale
 import uiToolTip
 import wndMgr
 
+import dewcatalog
 import quickbuffcatalog
 import quickbuffmodel
 import quickbuffruntime
 import servergamedata
+import uir1
 
 
 PUBLIC_PATH = "d:/ymir work/ui/public/"
@@ -50,6 +52,12 @@ ACTIVE_AFFECT_BY_VNUM.update({
 	71044: chr.AFFECT_CRITICAL,
 	71045: chr.AFFECT_PENETRATE,
 })
+# One affect per dew colour (dewcatalog, the server dew catalog): another size
+# of an active colour must wait instead of being refused by the server.
+DEW_AFFECT_BY_VNUM = quickbuffcatalog.DewAffects(dewcatalog.DEWS)
+ACTIVE_AFFECT_BY_VNUM.update(DEW_AFFECT_BY_VNUM)
+ALLOWED_VNUMS = quickbuffcatalog.AllowedVnums(servergamedata.COOKED_FISH_BUFFS, dewcatalog.DEWS)
+
 
 
 def _Locale(key, fallback):
@@ -109,6 +117,8 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.system = system
 		self.children = []
 		self.checkboxes = []
+		self.r1 = None
+		self.r1Failed = False
 		self.tooltipItem = uiToolTip.ItemToolTip()
 		self.AddFlag("movable")
 		self.AddFlag("float")
@@ -124,12 +134,12 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		return child
 
 	def _Build(self):
-		self._Own(_Text(self, 20, 30, _Locale("QUICK_BUFF_DRAG_HINT", "Přetáhni předměty z inventáře a kliknutím je vyber."), MUTED_COLOR))
-		self._Own(_Text(self, 20, 52, _Locale("QUICK_BUFF_PROFILE", "PROFIL"), GOLD_COLOR))
+		self.hintText = self._Own(_Text(self, 20, 30, _Locale("QUICK_BUFF_DRAG_HINT", "Přetáhni předměty z inventáře a kliknutím je vyber."), MUTED_COLOR))
+		self.profileLabel = self._Own(_Text(self, 20, 52, _Locale("QUICK_BUFF_PROFILE", "PROFIL"), GOLD_COLOR))
 		self.profilePvm = self._Own(_Button(self, 87, 50, "PVM", ui.__mem_func__(self._SelectPvm), "small", True))
 		self.profilePvp = self._Own(_Button(self, 172, 50, "PVP", ui.__mem_func__(self._SelectPvp), "small", True))
 		self.selectionCount = self._Own(_Text(self, 340, 53, "", TEXT_COLOR, True))
-		self._Own(_Text(self, 20, 88, _Locale("QUICK_BUFF_ITEMS", "PŘEDMĚTY K AKTIVACI"), GOLD_COLOR))
+		self.itemsLabel = self._Own(_Text(self, 20, 88, _Locale("QUICK_BUFF_ITEMS", "PŘEDMĚTY K AKTIVACI"), GOLD_COLOR))
 
 		self.gridBackground = ui.Bar()
 		self.gridBackground.SetParent(self)
@@ -138,6 +148,7 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.gridBackground.SetColor(0x990b0807)
 		self.gridBackground.Show()
 		self._Own(self.gridBackground)
+		self.borderLines = []
 		for x, y, width, height in ((18, 101, 372, 1), (18, 352, 372, 1),
 			(18, 101, 1, 252), (389, 101, 1, 252), (20, 390, 368, 1)):
 			line = ui.Bar()
@@ -148,6 +159,7 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 			line.AddFlag("not_pick")
 			line.Show()
 			self._Own(line)
+			self.borderLines.append(line)
 
 		self.grid = ui.GridSlotWindow()
 		self.grid.SetParent(self.gridBackground)
@@ -175,7 +187,7 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.autoVip = self._Own(_Toggle(self, 76, 361,
 			ui.__mem_func__(self._EnableAutoVip),
 			ui.__mem_func__(self._DisableAutoVip)))
-		self._Own(_Text(self, 20, 362, "Auto VIP"))
+		self.autoVipLabel = self._Own(_Text(self, 20, 362, "Auto VIP"))
 		self.statusText = self._Own(_Text(self, 310, 362, "", MUTED_COLOR, True))
 		self.activateButton = self._Own(_Button(self, 20, 399,
 			_Locale("QUICK_BUFF_ACTIVATE", "Aktivovat buffy"),
@@ -229,7 +241,7 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		if mouse.GetAttachedType() not in allowed_types:
 			return 0
 		vnum = mouse.GetAttachedItemIndex()
-		if vnum not in quickbuffcatalog.ALLOWED_VNUMS:
+		if vnum not in ALLOWED_VNUMS:
 			return 0
 		if self.system.scanner.Find(vnum) is None:
 			return 0
@@ -312,6 +324,28 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.RefreshSlots()
 		self.RefreshStatus()
 
+	def _LoadR1(self):
+		"""The R1 look (root/uiquickbuffr1.py) drawn into this window unless Settings -> "Starý vzhled" chose the
+		original look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uiquickbuffr1
+			self.r1 = uiquickbuffr1.QuickBuffSkin(self)
+		except Exception:
+			uir1.TraceFailure("the quick activation window")
+			self.r1Failed = True
+			self.r1 = None
+
+	def _SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self._LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def _RestorePosition(self):
 		position = self.system.model.window_position
 		if position is None:
@@ -322,6 +356,7 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.SetPosition(x, y)
 
 	def Open(self):
+		self._SyncLook()
 		if not self.IsShow():
 			self._RestorePosition()
 			self.Show()
@@ -336,6 +371,9 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 		self.Hide()
 
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.Close()
 		self.tooltipItem = None
 		self.children = []
@@ -352,10 +390,10 @@ class QuickBuffWindow(ui.BoardWithTitleBar):
 
 class QuickBuffSystem(object):
 	def __init__(self):
-		self.affectShower = None
+		self.effects = quickbuffruntime.QuickBuffEffects()
 		self.model = quickbuffmodel.QuickBuffModel()
 		self.policy = quickbuffruntime.QuickBuffItemPolicy(
-			item, player, quickbuffcatalog.ALLOWED_VNUMS
+			item, player, ALLOWED_VNUMS
 		)
 		self.scanner = quickbuffruntime.InventoryScanner(
 			item, player, quickbuffcatalog.DEFAULT_CATALOG_VNUMS,
@@ -368,19 +406,55 @@ class QuickBuffSystem(object):
 		self.window = QuickBuffWindow(self)
 		self._EnsureIdentity()
 
-	def SetAffectShower(self, shower):
-		self.affectShower = shower
+	def OnAffectAdded(self, affect, point, value, duration):
+		self.effects.Add(affect, point, duration, app.GetGlobalTimeStamp())
+
+	def OnAffectRemoved(self, affect, point):
+		self.effects.Remove(affect, point)
+
+	def OnAffectsCleared(self):
+		self.effects.Clear()
+		self.controller.OnProfileChanged()
 
 	def _ActiveEffectRemaining(self, vnum):
-		if not self.affectShower:
-			return 0
-		affect = ACTIVE_AFFECT_BY_VNUM.get(vnum)
-		if affect is None:
-			return 0
-		image = self.affectShower.affectImageDict.get(affect)
-		if image is None:
-			return 0
-		return max(0, image.GetEndTime() - app.GetGlobalTimeStamp())
+		# Match raw server types/points, never HUD keys or skill icon flags.
+		targets = [(ACTIVE_AFFECT_BY_VNUM.get(vnum), None)]
+		descriptor = self.policy.Describe(vnum, None)
+		if descriptor is None or descriptor["kind"] == "blend":
+			descriptor = self.policy.Describe(vnum, self.scanner.Find(vnum))
+		remaining = 0
+		if descriptor and descriptor["kind"] == "affect":
+			point = item.GetApplyPoint(descriptor["apply"])
+			# USE_AFFECT emits EURO_FREE even when proto Value0 names MALL.
+			# Retain legacy types and extended effects that block the same point.
+			types = [descriptor["affect"], chr.NEW_AFFECT_EXP_BONUS_EURO_FREE] + list(range(chr.AFFECT_ENERGY, chr.AFFECT_PENETRATE + 1))
+			targets += [(affect, point) for affect in types]
+		elif descriptor and descriptor["kind"] == "ability":
+			if descriptor.get("affect"):
+				targets.append((descriptor["affect"], None))
+			if descriptor.get("apply") == item.APPLY_MOV_SPEED:
+				targets.append((chr.AFFECT_MOVE_SPEED, None))
+			elif descriptor.get("apply") == item.APPLY_ATT_SPEED:
+				targets.append((chr.AFFECT_ATTACK_SPEED, None))
+		elif descriptor and descriptor["kind"] == "blend":
+			if descriptor.get("apply") is not None:
+				point = item.GetApplyPoint(descriptor["apply"])
+				# A dew stacks with a potion of the same bonus; only a classic
+				# blend effect on its point refuses it.
+				blocking = (quickbuffruntime.BLEND_AFFECT_TYPE,)
+				if vnum not in DEW_AFFECT_BY_VNUM:
+					blocking += (chr.NEW_AFFECT_MALL, chr.NEW_AFFECT_EXP_BONUS_EURO_FREE)
+				targets += [(affect, point) for affect in blocking]
+			for slot in self.scanner.MatchingPositions(vnum):
+				if self.policy.IsActiveBlend(slot, descriptor):
+					remaining = max(remaining, quickbuffruntime.AUTO_SCAN_INTERVAL,
+						self.policy.RuntimeDuration(slot, descriptor))
+		# The EXE's packet-owned affect table also protects an existing effect
+		# if its add preceded this Python cache. Never resend just to discover it.
+		for affect, point in set(targets):
+			if affect is not None and player.CheckAffect(affect, point or 0):
+				remaining = max(remaining, quickbuffruntime.AUTO_SCAN_INTERVAL)
+		return max(remaining, self.effects.Remaining(targets, app.GetGlobalTimeStamp()))
 
 	def _PlayerName(self):
 		for functionName in ("GetName", "GetMainCharacterName"):
@@ -398,7 +472,7 @@ class QuickBuffSystem(object):
 		name = self._PlayerName()
 		if name:
 			self.model.SetIdentity(name)
-			if self.model.RetainVnums(quickbuffcatalog.ALLOWED_VNUMS):
+			if self.model.RetainVnums(ALLOWED_VNUMS):
 				self.controller.OnProfileChanged()
 				self.model.Save(force=True)
 		return bool(self.model.path)
@@ -418,6 +492,10 @@ class QuickBuffSystem(object):
 		if self.window and self.window.IsShow():
 			self.window.RefreshStatus()
 
+	def IsBusy(self):
+		controller = self.controller
+		return bool(controller and controller.IsBusy())
+
 	def Tick(self):
 		self._EnsureIdentity()
 		self.controller.Tick()
@@ -426,6 +504,7 @@ class QuickBuffSystem(object):
 
 	def Destroy(self):
 		self.controller.Destroy()
+		self.effects.Clear()
 		if self.window:
 			self.window.Destroy()
 		self.window = None

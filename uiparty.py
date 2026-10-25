@@ -16,6 +16,15 @@ if app.ENABLE_POISON_GAUGE_EFFECT:
 	import chr
 	import chrmgr
 
+def _DressR1(function, window):
+	# The R1 look of a party row / the party menu / the menu button (uipartyr1); None = the original look (also when it
+	# cannot load).
+	try:
+		import uipartyr1
+		return getattr(uipartyr1, function)(window)
+	except:
+		return None
+
 class PartyMemberInfoBoard(ui.ScriptWindow):
 	if localeInfo.IsJAPAN():
 		BOARD_WIDTH = 130
@@ -50,6 +59,24 @@ class PartyMemberInfoBoard(ui.ScriptWindow):
 			def SetText(self, text, x, y):
 				self.textLine.SetText(text)
 				self.textLine.SetPosition(x, y)
+				self.r1Rect = (x - 5, y, 1, 14)		# R1: the hint right of the member board, where the text began
+
+			def Show(self):
+				try:
+					import uir1
+					if uir1.TextTooltipShow(self, self.textLine.GetText(), getattr(self, "r1Rect", None), "right"):
+						return
+				except Exception:
+					pass
+				ui.Window.Show(self)
+
+			def Hide(self):
+				try:
+					import uir1
+					uir1.HideHint(self)
+				except Exception:
+					pass
+				ui.Window.Hide(self)
 
 	def __init__(self):
 		self.PARTY_AFFECT_EXPERIENCE = 0
@@ -97,6 +124,7 @@ class PartyMemberInfoBoard(ui.ScriptWindow):
 
 		self.pid = None
 		self.vid = None
+		self.isOnline = None
 		self.partyAffectImageList = []
 		self.stateButtonDict = {}
 		self.affectValueDict = {}
@@ -153,6 +181,8 @@ class PartyMemberInfoBoard(ui.ScriptWindow):
 
 		self.__SetAffectsMouseEvent()
 		self.__HideAllAffects()
+		# R1 look (uipartyr1): the name plate and the R1 HP bar; None = the original look.
+		self.r1 = _DressR1("DressMember", self)
 
 	def Destroy(self):
 		self.ClearDictionary()
@@ -281,13 +311,20 @@ class PartyMemberInfoBoard(ui.ScriptWindow):
 
 		self.affectValueDict[affectSlotIndex] = affectValue
 
+	def SetOnline(self, online):
+		# Roster presence survives losing the local actor during a map/core change.
+		self.isOnline = bool(online)
+		color = self.LINK_COLOR if self.isOnline else self.UNLINK_COLOR
+		self.nameTextLine.SetPackedFontColor(color)
+
 	def Link(self):
 		self.nameTextLine.SetPackedFontColor(self.LINK_COLOR)
 		self.gauge.Show()
 
 	def Unlink(self):
 		self.vid = None
-		self.nameTextLine.SetPackedFontColor(self.UNLINK_COLOR)
+		color = self.LINK_COLOR if self.isOnline else self.UNLINK_COLOR
+		self.nameTextLine.SetPackedFontColor(color)
 		self.gauge.Hide()
 		self.__HideAllAffects()
 
@@ -345,14 +382,23 @@ class PartyMemberInfoBoard(ui.ScriptWindow):
 		if index not in self.affectValueDict:
 			return
 
+		text = self.AFFECT_STRING_DICT[index](self.affectValueDict[index])
+		import uir1
+		if uir1.UseR1():
+			# R1 look: the one R1 hint above the party bonus icon, as every one-line hint.
+			uir1.ShowHint(None, self.partyAffectImageList[index], text)
+			return
+
 		(x, y) = self.GetGlobalPosition()
 
 		self.affectToolTip.ClearToolTip()
-		self.affectToolTip.SetTitle(self.AFFECT_STRING_DICT[index](self.affectValueDict[index]))
+		self.affectToolTip.SetTitle(text)
 		self.affectToolTip.SetToolTipPosition(x + index*12, y + 11)
 		self.affectToolTip.ShowToolTip()
 
 	def OnAffectOverOut(self, index):
+		import uir1
+		uir1.HideHint(self.partyAffectImageList[index])
 		self.affectToolTip.HideToolTip()
 
 	if app.WJ_SHOW_PARTY_ON_MINIMAP:
@@ -379,9 +425,17 @@ class PartyMenu(ui.ThinBoard):
 		self.modeButtonList = {}
 		self.__CreateButtons()
 		self.__CreateModeButtons()
+		# R1 look (uipartyr1): the R1 frame and plates; None = the original look.
+		self.r1 = _DressR1("DressMenu", self)
 
 	def __del__(self):
 		ui.ThinBoard.__del__(self)
+
+	def SetSize(self, width, height):
+		ui.ThinBoard.SetSize(self, width, height)
+		r1 = getattr(self, "r1", None)
+		if r1:
+			r1.Resize(width, height)
 
 	def Destroy(self):
 		self.buttonDict = {}
@@ -529,6 +583,8 @@ class PartyWindow(ui.Window):
 
 		self.__CreatePartyMenuButton()
 		self.__CreatePartyMenu()
+		# R1 look (uipartyr1): the R1 plate and chevron of the menu button; None = the original look.
+		self.r1Opener = _DressR1("DressOpener", self)
 
 	def __del__(self):
 		ui.Window.__del__(self)
@@ -537,6 +593,7 @@ class PartyWindow(ui.Window):
 
 	def Destroy(self):
 		self.DestroyPartyMemberInfoBoard()
+		self.r1Opener = None
 		self.partyMenuButton = None
 
 		if self.partyMenu:
@@ -601,10 +658,9 @@ class PartyWindow(ui.Window):
 			else:
 				board.SetCurrentMapName(str(mapIdx))
 
-			if 0 == channel:
+			board.SetOnline(channel != 0)
+			if channel == 0 or not board.GetCharacterVID():
 				board.Unlink()
-			else:
-				board.Link()
 
 			self.Show()
 			self.partyMenuButton.Show()
@@ -637,7 +693,9 @@ class PartyWindow(ui.Window):
 			else:
 				board.SetCurrentMapName(str(mapIdx))
 
-			board.Unlink()
+			board.SetOnline(mapIdx != 0)
+			if mapIdx == 0 or not board.GetCharacterVID():
+				board.Unlink()
 
 			self.Show()
 			self.partyMenuButton.Show()
@@ -712,6 +770,8 @@ class PartyWindow(ui.Window):
 			if None == board:
 				return
 
+			board.SetOnline(channel != 0)
+
 			if 99 == channel or mapIdx > 10000:
 				channel = 0
 
@@ -735,6 +795,8 @@ class PartyWindow(ui.Window):
 
 			if None == board:
 				return
+
+			board.SetOnline(mapIdx != 0)
 
 			if mapIdx > 10000:
 				mapIdx = mapIdx // 10000

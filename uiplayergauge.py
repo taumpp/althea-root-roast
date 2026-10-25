@@ -13,6 +13,7 @@ class PlayerGauge(ui.Gauge):
 		ui.Gauge.__init__(self)
 		self.SetParent(parent)
 		self.AddFlag("not_pick")
+		# The original bar in every look: it only shows below half HP and the owner wants it as it always was.
 		self.MakeGauge(100, "red")
 
 		self.curHP = 0
@@ -43,7 +44,8 @@ class PlayerGauge(ui.Gauge):
 		self.curHP = player.GetStatus(player.HP)
 		self.maxHP = player.GetStatus(player.MAX_HP)
 		if app.ENABLE_POISON_GAUGE_EFFECT:
-			if chrmgr.HasAffectByVID(player.GetMainCharacterIndex(), chr.AFFECT_POISON):
+			poisoned = chrmgr.HasAffectByVID(player.GetMainCharacterIndex(), chr.AFFECT_POISON)
+			if poisoned:
 				self.imgGauge.LoadImage("d:/ymir work/ui/pattern/gauge_lime.tga")
 			else:
 				self.imgGauge.LoadImage("d:/ymir work/ui/pattern/gauge_red.tga")

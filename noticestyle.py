@@ -3,9 +3,11 @@
 import re
 
 ASSET_ROOT = 'd:/ymir work/ui/game/notice_01_04/'
+METEOR_STYLE = 5
+METEOR_ASSET_ROOT = 'd:/ymir work/ui/game/althea_meteor_notice/'
 MAX_QUEUE = 64
 DEDUP_SECONDS = 2.0
-TIMING = {1: (0.25, 4.5, 0.25), 4: (0.55, 5.0, 0.35)}
+TIMING = {1: (0.25, 4.5, 0.25), 4: (0.55, 5.0, 0.35), METEOR_STYLE: (0.25, 5.0, 0.35)}
 COLORS = {'body': (0.95, 0.925, 0.875), 'title': (0.973, 0.863, 0.639)}
 PROFILE_WIDTHS = (520, 780, 1040)
 
@@ -16,6 +18,39 @@ def profile(width, height):
     if width >= 1600 and height >= 1300:
         return 780
     return 520
+
+
+def meteor_profile(width, height):
+    # Select an authored raster; 4K remains 1040, larger viewports use 1560.
+    if width >= 4800 and height >= 2700:
+        return 1560
+    return profile(width, height)
+
+
+def meteor_layout(text, width, measure):
+    scale = width / 520.0
+    font = 'Tahoma:%dba' % round(22 * scale)
+    gap = max(3, round(5 * scale))
+    limit = round(61 * scale)
+    pages, page, used = [], [], 0
+    for value in wrap(text, round(300 * scale), lambda value: measure(font, value)[0]):
+        height = max(1, measure(font, value)[1])
+        if page and used + gap + height > limit:
+            pages.append(page)
+            page, used = [], 0
+        if page:
+            used += gap
+        page.append({'text': value, 'font': font, 'height': height, 'color': 'title'})
+        used += height
+    if page:
+        pages.append(page)
+    for page in pages:
+        total = sum(row['height'] for row in page) + gap * (len(page)-1)
+        y = round(86 * scale) + max(0, (limit-total)//2)
+        for row in page:
+            row['y'] = y
+            y += row['height'] + gap
+    return 'meteor', pages or [[]]
 
 
 def clean_text(text):
@@ -71,6 +106,8 @@ def layout(text, style, width, measure):
     BIG_NOTICE's first explicit paragraph is its title; subsequent paragraphs
     are body. This wire structure does not classify content by keywords.
     """
+    if style == METEOR_STYLE:
+        return meteor_layout(text, width, measure)
     scale = width / 520.0
     available = round(396 * scale)
     paragraphs = text.split('\n')
@@ -116,9 +153,9 @@ def animation(style, elapsed, hold=None):
     if elapsed < enter:
         p = max(0.0, elapsed / enter)
         eased = 1.0 - (1.0-p)**3
-        if style == 1:
+        if style in (1, METEOR_STYLE):
             return {'art': eased, 'text': eased, 'reveal': 1.0,
-                    'offset': round(-12 * (1.0-eased)), 'done': False}
+                    'offset': round(-12 * (1.0-eased)) if style == 1 else 0, 'done': False}
         return {'art': 1.0, 'text': max(0.0, min(1.0, (elapsed-0.2)/0.25)),
                 'reveal': eased, 'offset': 0, 'done': False}
     alpha = max(0.0, min(1.0, 1.0 - (elapsed-enter-hold)/leave))

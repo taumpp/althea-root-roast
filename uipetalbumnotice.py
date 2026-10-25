@@ -3,6 +3,7 @@ import app
 import ui
 import uiScriptLocale
 import wndMgr
+import noticeplacement
 
 ASSET_ROOT = "d:/ymir work/ui/pet/album_c/"
 WIDTH, HEIGHT = 460, 153
@@ -12,7 +13,8 @@ WindowDestroy = getattr(ui, "WindowDestroy", lambda function: function)
 
 class PetAlbumNoticeWindow(ui.Window):
     def __init__(self):
-        ui.Window.__init__(self, "TOP_MOST")
+        # Announcements stay above the world and below open UI and tooltips.
+        ui.Window.__init__(self, "GAME")
         self.Initialize()
         self.AddFlag("not_pick")
         self.SetSize(WIDTH, HEIGHT)
@@ -32,6 +34,8 @@ class PetAlbumNoticeWindow(ui.Window):
         self.started = 0.0
         self.suspended = False
         self.pausedAt = None
+        self.protectedRects = lambda: []
+        self.blockedAt = None
         self.frame = self.portrait = self.title = self.name = self.body = None
 
     def __del__(self):
@@ -72,6 +76,7 @@ class PetAlbumNoticeWindow(ui.Window):
             self.active = None
             self.Hide()
             return
+        self.blockedAt = None
         self.active = self.queue.pop(0)
         kind = self.active["kind"].upper()
         filename = "notice-symbol.png" if kind == "CLUE" else "notice-" + self.active["id"] + "_66.png"
@@ -83,17 +88,30 @@ class PetAlbumNoticeWindow(ui.Window):
         self.started = app.GetTime()
         self.OnUpdate()
         self.SetTop()
-        self.Show()
+        if self.blockedAt is None:
+            self.Show()
 
     def OnUpdate(self):
         if self.suspended or self.active is None:
             return
-        elapsed = max(0.0, app.GetTime() - self.started)
+        now = app.GetTime()
+        position = noticeplacement.place((WIDTH, HEIGHT),
+                    ((wndMgr.GetScreenWidth() - WIDTH) // 2, 72),
+                    (wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()), self.protectedRects())
+        if position is None:
+            if self.blockedAt is None:
+                self.blockedAt = now
+            self.Hide()
+            return
+        if self.blockedAt is not None:
+            self.started += max(0.0, now - self.blockedAt)
+            self.blockedAt = None
+        elapsed = max(0.0, now - self.started)
         if elapsed >= HOLD:
             self.Next()
             return
-        self.SetPosition(max(0, (wndMgr.GetScreenWidth() - WIDTH) // 2),
-                         min(72, max(0, wndMgr.GetScreenHeight() - HEIGHT)))
+        self.SetPosition(*position)
+        self.Show()
         alpha = min(1.0, elapsed / FADE, (HOLD - elapsed) / FADE)
         for widget in (self.frame, self.portrait):
             widget.SetAlpha(alpha)
@@ -105,6 +123,8 @@ class PetAlbumNoticeWindow(ui.Window):
         # Presentation only: replay an interrupted card, never album progress.
         result = []
         until = self.pausedAt if self.pausedAt is not None else app.GetTime()
+        if self.blockedAt is not None:
+            until = min(until, self.blockedAt)
         if self.active is not None and max(0.0, until - self.started) < HOLD:
             result.append(dict(self.active))
         result.extend(dict(notice) for notice in self.queue)
@@ -112,6 +132,9 @@ class PetAlbumNoticeWindow(ui.Window):
 
     def Suspend(self):
         if not self.suspended:
+            if self.blockedAt is not None:
+                self.started += max(0.0, app.GetTime() - self.blockedAt)
+                self.blockedAt = None
             self.suspended = True
             self.pausedAt = app.GetTime() if self.active is not None else None
         self.Hide()
@@ -125,12 +148,13 @@ class PetAlbumNoticeWindow(ui.Window):
         self.pausedAt = None
         if self.active is not None:
             self.OnUpdate()
-            if self.active is not None:
+            if self.active is not None and self.blockedAt is None:
                 self.Show()
         else:
             self.Next()
 
     def Close(self):
+        self.blockedAt = None
         self.Hide()
         self.suspended = False
         self.pausedAt = None

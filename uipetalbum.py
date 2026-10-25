@@ -7,6 +7,8 @@ import ui
 import uiScriptLocale
 import petalbumstate
 import petalbumdisplay as display
+import petalbumoccurrence as occurrence
+import uicrimsoncontrols
 import uimountk1 as K1
 
 WindowDestroy = getattr(ui, 'WindowDestroy', lambda function: function)
@@ -104,10 +106,16 @@ class PetAlbumWindow(ui.Window):
         self.offset, self.detailOffset, self.newOffset = 0, 0, 0
         self.motion, self.motionStart = None, 0.0
         self.seenGeneration = -1
+        self.snapshotLayout = None
+        self.liveText, self.liveValues, self.liveBars = {}, {}, {}
         self.cards, self.badges, self.revealImages = [], [], []
         self.revealId, self.revealStart = None, 0.0
         self.lastUpdate = 0.0
         self.journal = None
+        self.occurrenceWindow = self.occurrenceButton = None
+        self.occurrenceHint = self.occurrenceFooter = None
+        self.occurrencePetId = None
+        self.occurrenceEnabled = None
 
     def Available(self):
         return bool(self.state and self.state.available and self.state.context and
@@ -172,6 +180,45 @@ class PetAlbumWindow(ui.Window):
                 middle.SetScale(width-6, 1)
                 Image(self.page, x+width-3, y, 'v7/progress-right.png')
 
+    def LiveText(self, key, x, baseline, value, *args):
+        line = Text(self.page, x, baseline, value, *args)
+        self.liveText[key], self.liveValues[key] = line, value
+        return line
+
+    def SetLiveText(self, key, value):
+        if key in self.liveText and self.liveValues.get(key) != value:
+            self.liveText[key].SetText(value)
+            self.liveValues[key] = value
+
+    def LiveBar(self, key, x, y, ratio):
+        Image(self.page, x, y, 'v7/progress-empty.png')
+        bar = dict(x=x, y=y, width=None,
+                   small=Image(self.page, x, y, 'v7/progress-small-1.png'),
+                   left=Image(self.page, x, y, 'v7/progress-left.png'),
+                   middle=Image(self.page, x+3, y, 'v7/progress-middle.png'),
+                   right=Image(self.page, x, y, 'v7/progress-right.png'))
+        self.liveBars[key] = bar
+        self.SetLiveBar(key, ratio)
+
+    def SetLiveBar(self, key, ratio):
+        bar = self.liveBars.get(key)
+        if not bar:
+            return
+        width = round(264*min(1.0, ratio))+1 if ratio > 0 else 0
+        if width == bar['width']:
+            return
+        bar['width'] = width
+        for name in ('small', 'left', 'middle', 'right'):
+            bar[name].Hide()
+        if 0 < width <= 6:
+            bar['small'].LoadImage(ASSET_ROOT+'v7/progress-small-%d.png' % width)
+            bar['small'].Show()
+        elif width > 6:
+            bar['middle'].SetScale(width-6, 1)
+            bar['right'].SetPosition(bar['x']+width-3, bar['y'])
+            for name in ('left', 'middle', 'right'):
+                bar[name].Show()
+
     def Badge(self, parent, x, y, label):
         image = Image(parent, x, y, 'v7/badge-fill.png')
         Image(parent, x, y, 'v7/badge-border.png')
@@ -200,6 +247,9 @@ class PetAlbumWindow(ui.Window):
             self.cover.Hide()
         if self.paper:
             self.paper.Hide()
+        # A temporary interface hide must not restore an aborted blank page.
+        if self.page:
+            self.page.Show()
         ui.Window.Hide(self)
 
     def Close(self):
@@ -212,6 +262,8 @@ class PetAlbumWindow(ui.Window):
     @WindowDestroy
     def Destroy(self):
         self.Hide()
+        if self.occurrenceWindow:
+            self.occurrenceWindow.Destroy()
         if self.page:
             self.page.Destroy()
         for widget in self.owned:
@@ -265,11 +317,13 @@ class PetAlbumWindow(ui.Window):
         pets = [p for p in self.catalog['pets'] if p['group'] == pet['group']]
         self.SelectChapter(pet['group'], pets.index(pet))
 
-    def Heading(self, center, overline, title, subtitle=None, subtitleSize=11):
+    def Heading(self, center, overline, title, subtitle=None, subtitleSize=11, liveSubtitle=None):
         Text(self.page, center, 74, overline, 11, RUBY, True, True)
         Text(self.page, center, 97, title, 18, INK, True)
         if subtitle:
-            Text(self.page, center, 113, subtitle, subtitleSize, MUTED, True)
+            line = Text(self.page, center, 113, subtitle, subtitleSize, MUTED, True)
+            if liveSubtitle:
+                self.liveText[liveSubtitle], self.liveValues[liveSubtitle] = line, subtitle
 
     def SyncJournal(self):
         if not self.Available():
@@ -283,7 +337,11 @@ class PetAlbumWindow(ui.Window):
         self.SyncJournal()
         if self.page:
             self.page.Destroy()
+        self.occurrenceButton = None
+        self.occurrenceHint = self.occurrenceFooter = self.occurrencePetId = None
+        self.occurrenceEnabled = None
         self.cards, self.badges, self.revealImages = [], [], []
+        self.liveText, self.liveValues, self.liveBars = {}, {}, {}
         self.page = AlbumPage(self)
         if self.chapter == -1:
             self.Contents()
@@ -291,6 +349,63 @@ class PetAlbumWindow(ui.Window):
             self.Chapter()
         self.page.Show()
         self.closeButton.SetTop()
+        self.snapshotLayout = self.SnapshotLayout()
+
+    def SnapshotLayout(self):
+        # Revisions, XP, levels, bonuses and the server clock do not replace
+        # widgets. Acquisition changes still rebuild the approved page/reveal.
+        if not self.Available():
+            return (False, self.state.context)
+        return (True, self.state.context, tuple(
+            (pet['id'], self.state.pets[pet['id']]['phase'],
+             self.journal.Unread(pet['id']), self.state.discoveryReceipts.get(pet['id']))
+            for pet in self.catalog['pets']))
+
+    def UpdateSnapshot(self):
+        self.SyncJournal()
+        if self.snapshotLayout != self.SnapshotLayout():
+            self.Refresh()
+            return
+        self.seenGeneration = self.state.generation
+        if not self.Available():
+            return
+        if self.chapter == -1:
+            maxed = sum(row['level'] == self.state.view['max_level'] for row in self.state.pets.values())
+            self.SetLiveText('maxed', L('V7_UROVEN_D_S_35') % (self.state.view['max_level'], maxed))
+            for index, cap in enumerate(self.state.view['caps']):
+                self.SetLiveText(('bonus', index), '%s / %s%%' % (
+                    display.Percent(self.state.bonuses[index]), display.Number(cap/1000000.0)))
+            self.SetLiveText('attack', L('V7_UTOK_D_MAGICKY_UTOK_D') % (self.state.attack, self.state.magicAttack))
+            cap = self.presentation['bonuses']['book_power_album_complete']
+            self.SetLiveText('bookPower', L('V7_SILA_KNIH_PETA_S_S') % (
+                display.Percent(self.state.bookPower), display.Number(cap/1000000.0)))
+            return
+        group = self.catalog['groups'][self.chapter]
+        cap = display.Number(self.state.view['caps'][self.chapter]/1000000.0)
+        self.SetLiveText('chapterBonus', group['bonus'] + u' | +%s%% / %s%%' % (
+            display.Percent(self.state.bonuses[self.chapter]), cap))
+        for card in self.cards:
+            row = self.Row(card['pet'])
+            if row and row['phase'] == 2:
+                status = L('V7_NOVY_ULOVEK') if self.RevealAmount(card['pet']['id']) < 1 else L('V7_UR_D') % row['level']
+                if card['statusValue'] != status:
+                    card['status'].SetText(status)
+                    card['statusValue'] = status
+        pet = self.ChapterPets()[self.selected]
+        row = self.Row(pet)
+        if not row or row['phase'] != 2:
+            return
+        current, total, ratio, maximum = self.XP(pet, row)
+        value, cap = self.Individual(pet, row)
+        self.SetLiveText('xp', L('V7_LEVEL_MAXIMUM') if maximum else '%s / %s BZK' % (
+            display.Number(current), display.Number(total)))
+        self.SetLiveBar('xp', ratio)
+        self.SetLiveText('level', L('V7_UROVEN_D_D') % (row['level'], self.state.view['max_level']))
+        self.SetLiveText('percent', ('%.1f' % (100.0*ratio)).replace('.', ',')+' %')
+        self.SetLiveText('individual', L('V7_PET_BONUS') % (display.Percent(value), display.Percent(cap))
+                         if self.tab == 'growth' else '+%s %%' % display.Percent(value))
+        if self.RevealAmount(pet['id']) >= 1:
+            self.SetLiveText('detailStatus', L('V7_ULOVENO_UROVEN_D_D') % (row['level'], self.state.view['max_level']))
 
     def ChapterPets(self):
         return [p for p in self.catalog['pets'] if p['group'] == self.chapter]
@@ -335,20 +450,20 @@ class PetAlbumWindow(ui.Window):
         Text(self.page, 424, 173, L("V7_ULOVENO"), 11, RUBY, False, True)
         Text(self.page, 689, 173, '%d/35' % (owned if available else 0), 15, INK, False, True, True)
         self.Bar(424, 181, owned/float(len(self.catalog['pets'])))
-        Text(self.page, 424, 207, L("V7_UROVEN_D_S_35") % (self.state.view['max_level'], maxed if available else '—'), 11, MUTED)
-        Text(self.page, 689, 207, L('V7_COMPLETE_CHAPTERS') % (complete if available else '—'), 11, MUTED, False, False, True)
+        self.LiveText('maxed', 424, 207, L("V7_UROVEN_D_S_35") % (self.state.view['max_level'], maxed if available else '-'), 11, MUTED)
+        Text(self.page, 689, 207, L('V7_COMPLETE_CHAPTERS') % (complete if available else '-'), 11, MUTED, False, False, True)
         Text(self.page, 424, 230, L("V7_PASIVNI_BONUSY"), 11, RUBY, False, True)
         Text(self.page, 689, 230, L("V7_NYNI_MAXIMUM"), 10, MUTED, False, False, True)
         self.Divider(424, 235, 265, 0xffc3ad86)
         for index, group in enumerate(self.catalog['groups']):
             Text(self.page, 424, 250+index*17, group['bonus'], 12)
             cap = self.state.view['caps'][index]
-            value = '%s / %s %%' % (display.Percent(self.state.bonuses[index]), display.Number(cap/1000000.0)) if available else '— / %s %%' % display.Number(cap/1000000.0)
-            Text(self.page, 689, 250+index*17, value, 11, RUBY, False, True, True)
+            value = '%s / %s%%' % (display.Percent(self.state.bonuses[index]), display.Number(cap/1000000.0)) if available else '- / %s%%' % display.Number(cap/1000000.0)
+            self.LiveText(('bonus', index), 689, 250+index*17, value, 11, RUBY, False, True, True)
         self.Divider(424, 360, 265, 0xffc3ad86)
-        Text(self.page, 556, 376, L("V7_UTOK_D_MAGICKY_UTOK_D") % (self.state.attack, self.state.magicAttack) if available else L("V7_UTOK_MAGICKY_UTOK"), 11, INK, True, True)
+        self.LiveText('attack', 556, 376, L("V7_UTOK_D_MAGICKY_UTOK_D") % (self.state.attack, self.state.magicAttack) if available else L("V7_UTOK_MAGICKY_UTOK"), 11, INK, True, True)
         cap = self.presentation['bonuses']['book_power_album_complete']
-        Text(self.page, 552, 393, L("V7_SILA_KNIH_PETA_S_S") % (display.Percent(self.state.bookPower), display.Number(cap/1000000.0)) if available else L("V7_CEKAME_NA_POTVRZENY_STAV"), 11, MUTED, True)
+        self.LiveText('bookPower', 552, 393, L("V7_SILA_KNIH_PETA_S_S") % (display.Percent(self.state.bookPower), display.Number(cap/1000000.0)) if available else L("V7_CEKAME_NA_POTVRZENY_STAV"), 11, MUTED, True)
 
     def NewSummary(self, new):
         pet = new[min(self.newOffset, len(new)-1)] if new else None
@@ -387,10 +502,10 @@ class PetAlbumWindow(ui.Window):
         pets = self.ChapterPets()
         available = self.Available()
         owned = sum(bool(self.Row(p) and self.Row(p)['phase'] == 2) for p in pets)
-        amount = display.Percent(self.state.bonuses[self.chapter]) if available else '—'
+        amount = display.Percent(self.state.bonuses[self.chapter]) if available else '-'
         cap = display.Number(self.state.view['caps'][self.chapter]/1000000.0)
         self.Heading(216, L("V7_KAPITOLA_D_ULOVENO_S_5") % (self.chapter+1, owned if available else 0), group['name'],
-                     group['bonus'] + (' · +%s %% / %s %%' % (amount, cap) if available else ' · —'))
+                     group['bonus'] + (' | +%s%% / %s%%' % (amount, cap) if available else ' | -'), liveSubtitle='chapterBonus')
         self.Button(self.page, 80, 80, 'arrow_left', ui.__mem_func__(self.Previous))
         if self.chapter < len(self.catalog['groups'])-1:
             self.Button(self.page, 304, 80, 'arrow_right', ui.__mem_func__(self.Next))
@@ -420,7 +535,7 @@ class PetAlbumWindow(ui.Window):
             Text(self.page, 552, 140, L("V7_ZISKANI"), 12, RUBY, True, True)
             self.Divider(510, 147, 85, RUBY, 2)
         if not row:
-            Text(self.page, 552, 225, '—', 55, 0xffb49465, True, True)
+            Text(self.page, 552, 225, '-', 55, 0xffb49465, True, True)
             Text(self.page, 552, 281, L("V7_CEKAME_NA_STAV_SERVERU"), 16, INK, True, True)
             Text(self.page, 552, 308, L("V7_VLASTNICTVI_UROVEN_ANI_BONUS_ZATIM_NEZNAME"), 11, MUTED, True)
             Text(self.page, 552, 332, L("V7_POTVRZENY_STAV_SE_NACTE_AUTOMATICKY"), 11, MUTED, True)
@@ -503,7 +618,7 @@ class PetAlbumWindow(ui.Window):
         hit.SetOverOutEvent(ui.__mem_func__(self.HoverCard), index, False)
         sheen = Image(window, 0, 0, 'v7/reveal-00.png') if phase == 2 and reveal < 1 else None
         self.cards.append(dict(sheen=sheen, sheenFrame=0, window=window, labels=labels, material=material, amount=amount, hover=False, frame=round(amount*20),
-                               x=x-12, y=y-12, pet=pet, status=statusLine, hit=hit))
+                               x=x-12, y=y-12, pet=pet, status=statusLine, statusValue=status, hit=hit))
 
     def RaiseCard(self, index):
         self.cards[index]['window'].SetTop()
@@ -520,23 +635,66 @@ class PetAlbumWindow(ui.Window):
     def Clue(self, pet, row):
         Image(self.page, 523, 156, 'v7/paw-58.png')
         Text(self.page, 552, 232, L('V7_CLUE_FOUND'), 12, RUBY, True, True)
-        sentence = display.Location(row, self.presentation['hunt_pool'], {'hub': L('V7_LOCATION_HUB'), 'channel': L('V7_LOCATION_CHANNEL'), 'place': L('V7_LOCATION_PLACE')})
-        size = 13
-        while size > 11 and len(self.Wrapped(sentence, 240, size)) > 2:
-            size -= 1
-        self.Lines(552, 254, sentence, 240, size, INK, True, spacing=17)
-        Text(self.page, 486, 295, L('V7_WHEN_HUNT'), 11, RUBY, True, True)
-        Text(self.page, 624, 295, L("V7_HLEDEJ"), 11, RUBY, True, True)
+        self.occurrencePetId = pet['id']
+        button = ui.Button()
+        button.SetParent(self.page)
+        button.SetUpVisual(uicrimsoncontrols.Visual('137x31', 'normal'))
+        button.SetOverVisual(uicrimsoncontrols.Visual('137x31', 'hover'))
+        button.SetDownVisual(uicrimsoncontrols.Visual('137x31', 'pressed'))
+        button.SetDisableVisual(uicrimsoncontrols.Visual('137x31', 'disabled'))
+        button.SetPosition(552-button.GetWidth()//2, 244)
+        button.SetText(L('OCCURRENCE'))
+        button.ButtonText.AddFlag('not_pick')
+        button.Show()
+        self.page.owned.append(button)
+        self.occurrenceButton = button
+        self.occurrenceHint = Text(self.page, 552, 286, '', 12, MUTED, True)
         days, windows, overnight = display.Schedule(self.metadata[pet['id']]['hunt_schedule'], {'anytime': L('V7_ANYTIME'), 'everyday': L('V7_EVERYDAY'), 'whole_day': L('V7_WHOLE_DAY'), 'weekdays': L('V7_WEEKDAYS')})
-        Text(self.page, 486, 314, days, 14 if days == L('V7_ANYTIME') else 12, INK, True, True)
+        multiple = len(windows) > 1
+        Text(self.page, 552, 306 if multiple else 316, L('V7_WHEN_HUNT'), 12, RUBY, True, True)
+        Text(self.page, 552, 326 if multiple else 338, days, 14 if days == L('V7_ANYTIME') else 13, INK, True, True)
         for index, value in enumerate(windows):
-            Text(self.page, 486, 329+index*14, value, 12, INK, True)
-        self.Lines(624, 314, display.TargetName(self.presentation['hunt_pool'], row, L('V7_MARKED_MONSTER')), 122, 13, INK, True, True, 16)
+            Text(self.page, 552, (346 if multiple else 357)+index*14, value, 12, INK, True)
         if overnight:
-            Text(self.page, 624, 344, "¹ " + L("V7_1_NASLEDUJICI_DEN"), 10, MUTED, True)
-        if row['next_window'] > self.state.albumUtc and days != L('V7_ANYTIME'):
-            Text(self.page, 624, 359, L("V7_TED_MIMO_CAS_LOVU"), 10, MUTED, True)
-        self.Lines(552, 380, L("V7_PORAZ_PRISERU_OZNACENOU_TYRKYSOVYM_KRUHEM"), 174, 11, MUTED, True, spacing=13)
+            Text(self.page, 552, 393 if multiple else 374, L('OCCURRENCE_OVERNIGHT'), 12, MUTED, True)
+        if not multiple or not overnight:
+            self.occurrenceFooter = Text(self.page, 552, 398 if multiple else 392 if overnight else 386, '', 12, MUTED, True)
+        self.UpdateOccurrence()
+
+    def OccurrenceAvailable(self):
+        return bool(self.Available() and self.occurrencePetId and occurrence.Available(
+            self.state.pets.get(self.occurrencePetId), self.state.NowUtc()))
+
+    def UpdateOccurrence(self):
+        if not self.occurrenceButton:
+            return
+        enabled = self.OccurrenceAvailable()
+        # Native Enable resets a pending mouse press. Only change state at
+        # the schedule boundary, never on every OnUpdate between down/up.
+        if enabled != self.occurrenceEnabled:
+            self.occurrenceEnabled = enabled
+            self.occurrenceButton.SetEvent(ui.__mem_func__(self.OpenOccurrence) if enabled else None)
+            if enabled:
+                self.occurrenceButton.Enable()
+            else:
+                self.occurrenceButton.Disable()
+            self.occurrenceButton.SetTextColor((0xffe3c8a1 if enabled else 0xff8f816c)-0x100000000)
+        self.occurrenceHint.SetText(L('OCCURRENCE_OPEN') if enabled else L('OCCURRENCE_TIME_ONLY'))
+        if self.occurrenceFooter:
+            self.occurrenceFooter.SetText(L('OCCURRENCE_ALBUM_SEARCH') if enabled else L('OCCURRENCE_CLOSED'))
+
+    def OpenOccurrence(self):
+        if not self.OccurrenceAvailable():
+            return False
+        if not self.occurrenceWindow:
+            import uipetalbumoccurrence
+            self.occurrenceWindow = uipetalbumoccurrence.PetAlbumOccurrenceWindow()
+        pet = next(pet for pet in self.catalog['pets'] if pet['id'] == self.occurrencePetId)
+        days, windows, overnight = display.Schedule(self.metadata[pet['id']]['hunt_schedule'], {
+            'anytime': L('V7_ANYTIME'), 'everyday': L('V7_EVERYDAY'),
+            'whole_day': L('V7_WHOLE_DAY'), 'weekdays': L('V7_WEEKDAYS')})
+        return self.occurrenceWindow.Open(self.state, pet['id'], pet['name'], days,
+                                          ' / '.join(windows) or L('V7_WHOLE_DAY'), overnight)
 
     def Unknown(self, pet):
         Image(self.page, 494, 153, 'v7/unknown-detail.png')
@@ -563,24 +721,24 @@ class PetAlbumWindow(ui.Window):
         self.Portrait(self.page, pet, (552, 201), True)
         reveal = self.RevealAmount(pet['id'])
         status = L("V7_NOVY_ULOVEK") if reveal < 1 else L("V7_ULOVENO_UROVEN_D_D") % (row['level'], self.state.view['max_level'])
-        self.detailStatus = Text(self.page, 552, 259, status, 12, RUBY if reveal < 1 else GREEN, True, True)
+        self.detailStatus = self.LiveText('detailStatus', 552, 259, status, 12, RUBY if reveal < 1 else GREEN, True, True)
         current, total, ratio, maximum = self.XP(pet, row)
         Text(self.page, 424, 282, L("V7_XP_NEXT_LEVEL"), 11, MUTED)
-        Text(self.page, 689, 282, L('V7_LEVEL_MAXIMUM') if maximum else '%s / %s XP' % (display.Number(current), display.Number(total)), 11, RUBY, False, True, True)
-        self.Bar(424, 290, ratio)
+        self.LiveText('xp', 689, 282, L('V7_LEVEL_MAXIMUM') if maximum else '%s / %s BZK' % (display.Number(current), display.Number(total)), 11, RUBY, False, True, True)
+        self.LiveBar('xp', 424, 290, ratio)
         value, cap = self.Individual(pet, row)
         Text(self.page, 424, 321, L("V7_PASIVNI_BONUS"), 11, RUBY, False, True)
-        Text(self.page, 689, 321, '+%s %%' % display.Percent(value), 15, INK, False, True, True)
+        self.LiveText('individual', 689, 321, '+%s %%' % display.Percent(value), 15, INK, False, True, True)
         Text(self.page, 424, 338, self.catalog['groups'][pet['group']]['bonus'], 12, MUTED)
         Text(self.page, 552, 393, L('V7_PET_MAXIMUM') % display.Percent(cap), 11, MUTED, True)
 
     def Growth(self, pet, row):
         current, total, ratio, maximum = self.XP(pet, row)
-        Text(self.page, 424, 174, L("V7_UROVEN_D_D") % (row['level'], self.state.view['max_level']), 12, INK, False, True)
-        Text(self.page, 689, 174, ('%.1f' % (100.0*ratio)).replace('.', ',')+' %', 12, RUBY, False, True, True)
-        self.Bar(424, 182, ratio)
+        self.LiveText('level', 424, 174, L("V7_UROVEN_D_D") % (row['level'], self.state.view['max_level']), 12, INK, False, True)
+        self.LiveText('percent', 689, 174, ('%.1f' % (100.0*ratio)).replace('.', ',')+' %', 12, RUBY, False, True, True)
+        self.LiveBar('xp', 424, 182, ratio)
         Text(self.page, 552, 197, L('V7_XP_NEXT_LEVEL'), 11, MUTED, True)
-        Text(self.page, 552, 210, L('V7_LEVEL_MAXIMUM') if maximum else '%s / %s XP' % (display.Number(current), display.Number(total)), 14, INK, True, True)
+        self.LiveText('xp', 552, 210, L('V7_LEVEL_MAXIMUM') if maximum else '%s / %s BZK' % (display.Number(current), display.Number(total)), 14, INK, True, True)
         Text(self.page, 424, 233, L("V7_CIM_SE_EXPI"), 11, RUBY, False, True)
         Text(self.page, 689, 233, L("V7_XP_ZA_JEDNU_AKCI"), 11, MUTED, False, False, True)
         self.Divider(424, 238, 265, 0xffc3ad86)
@@ -603,7 +761,7 @@ class PetAlbumWindow(ui.Window):
                 Image(self.page, 576, 357, 'arrow_right_normal.png').SetAlpha(.35)
             Text(self.page, 552, 373, L("V7_D_D_D") % (self.offset+1, self.offset+len(rows), len(targets)), 10, MUTED, True)
         value, cap = self.Individual(pet, row)
-        Text(self.page, 552, 393, L('V7_PET_BONUS') % (display.Percent(value), display.Percent(cap)), 11, MUTED, True)
+        self.LiveText('individual', 552, 393, L('V7_PET_BONUS') % (display.Percent(value), display.Percent(cap)), 11, MUTED, True)
 
     def GrowthPrevious(self):
         self.PageGrowth(-1)
@@ -629,10 +787,11 @@ class PetAlbumWindow(ui.Window):
         if not self.state:
             return
         now = app.GetTime()
+        self.UpdateOccurrence()
         delta = max(0.0, min(.25, now-self.lastUpdate))
         self.lastUpdate = now
         if self.seenGeneration != self.state.generation and not self.motion:
-            self.Refresh()
+            self.UpdateSnapshot()
         if self.motion:
             duration = OPEN_SECONDS if self.motion == 'open' else TURN_SECONDS
             progress = max(0.0, min(1.0, (now-self.motionStart)/duration))

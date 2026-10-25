@@ -5,6 +5,7 @@ import osfInfo
 import player
 import renderTarget
 import ui
+import uiwheel
 
 import iscostumevoucher
 import wardrobedata
@@ -12,7 +13,7 @@ import wardrobedata
 
 RENDER_TARGET_INDEX = 4
 CATALOG_COLUMNS = 7
-CATALOG_ROWS = 5
+CATALOG_ROWS = 4
 CATALOG_PAGE_SIZE = CATALOG_COLUMNS * CATALOG_ROWS
 
 SOURCE_ALL = 0
@@ -258,15 +259,20 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		("body", (item.COSTUME_TYPE_BODY,), "WARDROBE_TAB_BODY", "T\u011blo"),
 		("hair", (item.COSTUME_TYPE_HAIR,), "WARDROBE_TAB_HAIR", "\u00da\u010des"),
 		("weapon", (item.COSTUME_TYPE_WEAPON,), "WARDROBE_TAB_WEAPON", "Zbra\u0148"),
-		("acce", (item.COSTUME_TYPE_ACCE,), "WARDROBE_TAB_ACCE", "\u0160erpa"),
+		("acce", (item.COSTUME_TYPE_ACCE, item.COSTUME_TYPE_ACCE_SKIN), "WARDROBE_TAB_ACCE", "\u0160erpa"),
 		("effect", (item.COSTUME_TYPE_EFFECT_WEAPON, item.COSTUME_TYPE_EFFECT_ARMOR), "WARDROBE_TAB_EFFECT", "Efekty"),
+		("mount", (item.COSTUME_TYPE_MOUNT,), "WARDROBE_TAB_MOUNT", "Mounty"),
+		("pet", (item.COSTUME_TYPE_PET,), "WARDROBE_TAB_PET", "Mazl\u00ed\u010dci"),
 	)
 
 	SUPPORTED_SUBTYPES = frozenset(
 		(item.COSTUME_TYPE_BODY, item.COSTUME_TYPE_HAIR, item.COSTUME_TYPE_WEAPON,
 		 item.COSTUME_TYPE_ACCE, item.COSTUME_TYPE_EFFECT_WEAPON,
-		 item.COSTUME_TYPE_EFFECT_ARMOR)
+		 item.COSTUME_TYPE_EFFECT_ARMOR, item.COSTUME_TYPE_ACCE_SKIN,
+		 item.COSTUME_TYPE_MOUNT, item.COSTUME_TYPE_PET)
 	)
+	# Companions use a standalone model, never character equipment setters.
+	MODEL_VALUE_INDEX = {item.COSTUME_TYPE_MOUNT: 1, item.COSTUME_TYPE_PET: 0}
 
 	MALE_RACES = frozenset((0, 2, 5, 7, 8))
 	FEMALE_RACES = frozenset((1, 3, 4, 6))
@@ -354,7 +360,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		setLabel.SetParent(loadoutBoard)
 		setLabel.SetPosition(10, 7)
 		setLabel.SetPackedFontColor(0xffeadfc8)
-		setLabel.SetText(_Text("WARDROBE_SET", "Sestava (prav\u00fdm klikem sund\u00e1te)"))
+		setLabel.SetText(_Text("WARDROBE_SET", "Sestava (prav\u00fdm tla\u010d\u00edtkem sund\u00e1\u0161)"))
 		setLabel.Show()
 		self.setLabel = setLabel
 
@@ -405,7 +411,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		searchEdit.SetSize(132, 18)
 		searchEdit.SetMax(40)
 		searchEdit.SetInfoMessage(_Text(
-			"WARDROBE_SEARCH_HINT", "Hledat n\u00e1zev nebo VNUM"))
+			"WARDROBE_SEARCH_HINT", "Hledat n\u00e1zev nebo \u010d\u00edslo"))
 		searchEdit.OnIMEUpdate = self._OnSearchUpdate
 		searchEdit.SetEscapeEvent(self.Close)
 		searchEdit.Show()
@@ -414,17 +420,19 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		self.typeButtons = []
 		for index, typeData in enumerate(self.TYPE_FILTERS):
 			button = _CreateTypeButton(
-				catalogBoard, 12 + index * 82,
+				catalogBoard, 12 + (index % 6) * 82,
 				_Text(typeData[2], typeData[3]),
 				lambda selected=typeData[0]: self._SelectType(selected),
-				typeData[0])
+				typeData[0] if index < 6 else "all")
+			button.SetPosition(12 + (index % 6) * 82, 43 + (index // 6) * 24)
 			self.typeButtons.append(button)
 
 		self.cardsBoard = ui.Window()
 		self.cardsBoard.SetParent(catalogBoard)
-		self.cardsBoard.SetPosition(12, 76)
-		self.cardsBoard.SetSize(468, 364)
+		self.cardsBoard.SetPosition(12, 100)
+		self.cardsBoard.SetSize(468, 292)
 		self.cardsBoard.Show()
+		uiwheel.Pages(self.cardsBoard, self._PreviousPage, self._NextPage)		# the wheel over the cards pages them
 
 		self.selectedName = ui.TextLine()
 		self.selectedName.SetParent(catalogBoard)
@@ -544,7 +552,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 			(item.COSTUME_TYPE_BODY, body),
 			(item.COSTUME_TYPE_HAIR, player.GetItemIndex(item.COSTUME_SLOT_HAIR)),
 			(item.COSTUME_TYPE_WEAPON, weapon),
-			(item.COSTUME_TYPE_ACCE, player.GetItemIndex(item.COSTUME_SLOT_START + 3)),
+			(item.COSTUME_TYPE_ACCE, player.GetItemIndex(item.ACCE_SKIN_SLOT) or player.GetItemIndex(item.COSTUME_SLOT_START + 3)),
 			(item.COSTUME_TYPE_EFFECT_WEAPON, player.GetItemIndex(item.COSTUME_TYPE_SLOT_EFFECT_WEAPON)),
 			(item.COSTUME_TYPE_EFFECT_ARMOR, player.GetItemIndex(item.COSTUME_TYPE_SLOT_EFFECT_ARMOR)),
 		)
@@ -557,6 +565,8 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		seenVisuals = set()
 		vnums = sorted(set(int(value) for value in item.GetCostumeVnumList()), key=lambda value: (value not in self.itemshopOffers, value))
 		for vnum in vnums:
+			if vnum in wardrobedata.PUBLIC_VNUM_DENYLIST:
+				continue
 			if vnum not in self.itemshopOffers and not wardrobedata.IsPublicVnum(vnum):
 				continue
 			try:
@@ -576,6 +586,11 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 				continue
 			if subType == item.COSTUME_TYPE_ACCE and vnum < 85000:
 				continue
+			model = 0
+			if subType in self.MODEL_VALUE_INDEX:
+				model = int(item.GetValue(self.MODEL_VALUE_INDEX[subType]))
+				if model <= 0:
+					continue
 
 			visualKey = self._GetVisualKey(vnum, subType, name)
 			if visualKey in seenVisuals:
@@ -588,6 +603,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 				"search": name.lower(),
 				"icon": icon,
 				"is_shop": vnum in self.itemshopOffers,
+				"model": model,
 			})
 
 		self.catalogue.sort(key=lambda data: (not data["is_shop"], data["name"].lower(), data["vnum"]))
@@ -664,7 +680,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 			card = WardrobeItemCard(
 				self.cardsBoard, column * 66, row * 72, data,
 				self._SelectItem, self._OverInItem, self._OverOutItem)
-			card.SetSelected(data["vnum"] in self.selectedItems.values())
+			card.SetSelected(data["vnum"] in self.selectedItems.values() or data["vnum"] == self.currentVnum)
 			self.cards.append(card)
 		self._RefreshPagination()
 
@@ -751,7 +767,7 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		data = next((entry for entry in self.catalogue if entry["vnum"] == vnum), None)
 		if data is None:
 			return
-		self.selectedItems[data["subtype"]] = vnum
+		self._SelectAppearance(data)
 		self.currentVnum = vnum
 		self.selectedName.SetText("%s (VNUM %d)" % (data["name"], vnum))
 		if data["is_shop"]:
@@ -759,11 +775,21 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 			self.selectedSource.SetText(_Text("WARDROBE_ITEMSHOP_PRICE", "V IS obchodu: %d DC") % price)
 			self.buyButton.Show()
 		else:
-			self.selectedSource.SetText(_Text("WARDROBE_GAME_ITEM", "Hern\u00ed kosmetika - pouze n\u00e1hled"))
+			self.selectedSource.SetText(_Text("WARDROBE_GAME_ITEM", "Hern\u00ed kosmetika - jen n\u00e1hled"))
 			self.buyButton.Hide()
 		self._RefreshPage()
 		self._RefreshLoadoutCards()
 		self._RefreshModel()
+
+	def _SelectAppearance(self, data):
+		# Wings replace the sash in its existing loadout slot. Mounts and pets
+		# are inspected individually; the character's six-piece set is retained.
+		subtype = data["subtype"]
+		if subtype in self.MODEL_VALUE_INDEX:
+			return
+		if subtype == item.COSTUME_TYPE_ACCE_SKIN:
+			subtype = item.COSTUME_TYPE_ACCE
+		self.selectedItems[subtype] = data["vnum"]
 
 	def _BuySelected(self):
 		if self.currentVnum in self.itemshopOffers and self.owner:
@@ -810,6 +836,12 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		self._RefreshModel()
 
 	def _RefreshModel(self):
+		selected = next((entry for entry in self.catalogue if entry["vnum"] == self.currentVnum), None)
+		if selected is not None and selected.get("model", 0):
+			renderTarget.SetVisibility(RENDER_TARGET_INDEX, False)
+			renderTarget.SelectModel(RENDER_TARGET_INDEX, selected["model"])
+			renderTarget.SetVisibility(RENDER_TARGET_INDEX, True)
+			return
 		effectiveItems = dict(self.baseItems)
 		effectiveItems.update(self.selectedItems)
 		renderTarget.SetVisibility(RENDER_TARGET_INDEX, False)
@@ -877,3 +909,40 @@ class WardrobeWindow(ui.BoardWithTitleBar):
 		interface = osfInfo.GetInterfaceInstance()
 		if interface and interface.tooltipItem:
 			interface.tooltipItem.HideToolTip()
+
+
+# The R1 look of the window (uiwardrober1.WardrobeR1Window, variant C, owner 9. 10. 2026). Settings -> "Stary
+# vzhled" keeps this original window; a failure of the R1 window is traced to syserr and this window takes over
+# for the rest of the session.
+_R1_STATE = {"failed": False}
+
+
+def MarkR1Failed():
+	_R1_STATE["failed"] = True
+
+
+def WantR1():
+	if _R1_STATE["failed"]:
+		return False
+	try:
+		import uir1
+		return uir1.UseR1()
+	except Exception:
+		return False
+
+
+def IsR1(window):
+	return bool(getattr(window, "isR1", False))
+
+
+def CreateWindow(owner):
+	"""The wardrobe window in the chosen look: R1 (uiwardrober1) or the original WardrobeWindow."""
+	if WantR1():
+		try:
+			import uiwardrober1
+			return uiwardrober1.WardrobeR1Window(owner)
+		except Exception:
+			import uir1
+			uir1.TraceFailure("Satnik (wardrobe)")
+			MarkR1Failed()
+	return WardrobeWindow(owner)

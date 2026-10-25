@@ -1,6 +1,7 @@
 """Variant A: native text inside the existing Althea minimap frame."""
 import app
 import grp
+import net
 import ui
 import uidungeontrack
 from dungeonobjectivemodel import ObjectiveState, Marquee
@@ -16,6 +17,7 @@ class ObjectivePanel(ui.Window):
         # Anchor before creating children so the disc/text share the frame.
         self.SetPosition(0, 0)
         self.AddFlag("not_pick")
+        self.mapIndex = None
         self.state = ObjectiveState(TEXTS)
         self.scroll = Marquee()
         self.titleScroll = Marquee()
@@ -69,8 +71,22 @@ class ObjectivePanel(ui.Window):
         self.children.append(bar)
         return bar
 
+    def Reset(self):
+        # Seamless warp: the destination numbers its objective sequence anew.
+        self.state = ObjectiveState(TEXTS)
+        self.Hide()
+
+    def _SyncMap(self):
+        # ChannelInfo owns the full private map index. The same window can
+        # survive a warp, but server objective sequences restart on its core.
+        mapIndex = net.GetMapIndex()
+        if self.mapIndex != mapIndex:
+            self.mapIndex = mapIndex
+            self.Reset()
+
     def Receive(self, arguments):
-        if not self.state.receive(arguments):
+        self._SyncMap()
+        if not self.state.receive(arguments, self.mapIndex):
             return False
         state = self.state
         if not state.visible:
@@ -100,6 +116,7 @@ class ObjectivePanel(ui.Window):
         return True
 
     def OnUpdate(self):
+        self._SyncMap()
         now = app.GetTime()
         self.notice.SetPosition(int(self.scroll.offset(now)), 0)
         self.title.SetPosition(int(self.titleScroll.offset(now)), 0)

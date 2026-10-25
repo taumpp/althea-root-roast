@@ -39,12 +39,12 @@ def Schedule(schedule, words):
     if days == list(range(1, 8)) and windows == [[0, 1440]]:
         return words['anytime'], [], False
     names = words['weekdays'].split('|')
-    label = words['everyday'] if len(days) == 7 else ' · '.join(names[d-1] for d in days)
+    label = words['everyday'] if len(days) == 7 else ' | '.join(names[d-1] for d in days)
     if windows == [[0, 1440]]:
         return label, [words['whole_day']], False
     def clock(minute):
         return '%d:%02d' % (minute // 60, minute % 60)
-    return label, [clock(a) + '–' + clock(b % 1440 if b > 1440 else b) + ('¹' if b > 1440 else '')
+    return label, [clock(a) + '-' + clock(b % 1440 if b > 1440 else b) + ('¹' if b > 1440 else '')
                    for a, b in windows], any(b > 1440 for a, b in windows)
 
 
@@ -73,7 +73,7 @@ def GrowthRows(targets, offset, wrap):
     rows, y = [], 252
     for target in targets[offset:]:
         names = wrap(target['name'], 174, 12, True)
-        meta = wrap(target['location'] + ' · ' + target['days'], 262, 11, False)
+        meta = wrap(target['location'] + ' | ' + target['days'], 262, 11, False)
         height = len(names)*14 + len(meta)*13 + 7
         if rows and y + height > 350:
             break

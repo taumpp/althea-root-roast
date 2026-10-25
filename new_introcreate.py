@@ -178,6 +178,8 @@ class CreateCharacterWindow(ui.Window):
 		self.layoutSize = None
 		self.statpoint = [0, 0, 0, 0]
 		self.curGauge = [0.0, 0.0, 0.0, 0.0]
+		self.r1 = None  # R1 form (root/uir1pregame.py); None = Living Sigil
+		self.r1Name = None
 
 	def __del__(self):
 		net.SetPhaseWindow(net.PHASE_WINDOW_CREATE, 0)
@@ -232,12 +234,54 @@ class CreateCharacterWindow(ui.Window):
 		self.dlgBoard.Show()
 		self.SetSize(*self.layoutSize)
 		self.Show()
+		self.AttachR1()
 		app.ShowCursor()
-		if musicInfo.createMusic != "":
-			snd.SetMusicVolume(systemSetting.GetMusicVolume())
-			snd.FadeInMusic("BGM/" + musicInfo.createMusic)
+		# the select's track alone (root/pregamemusic.py): the same file, so it plays on without a restart
+		played = None
+		try:
+			import uipregamehall
+			played = uipregamehall.ApplyMusic(bool(getattr(getattr(self, "r1", None), "hall", None)))
+		except Exception:
+			played = None
+		if played is None and musicInfo.createMusic != "":
+			try:
+				import pregamemusic
+				pregamemusic.Only("BGM/" + musicInfo.createMusic)
+			except Exception:
+				snd.SetMusicVolume(systemSetting.GetMusicVolume())
+				snd.FadeInMusic("BGM/" + musicInfo.createMusic)
+
+	def AttachR1(self):
+		import uir1pregame
+		jobs = [self.M2JOBLIST[index] for index in range(self.LEN_JOBLIST)]
+		self.r1 = uir1pregame.AttachCreate(self, jobs, ui.__mem_func__(self.R1Face), ui.__mem_func__(self.R1NameError))
+		self.r1Name = None
+
+	def R1Face(self, job, selected):
+		race = self.race if (selected and self.job_id == job) else self.M2_CONST_ID[job][self.JobSex[job]]
+		return self.RACE_FACE_PATH[race] + ("1.sub" if selected else "2.sub")
+
+	def R1NameError(self, name):
+		# The same shared policy as CheckCreateCharacterName, shown under the field instead of a popup.
+		error = namepolicy.character_error(name)
+		if error is namepolicy.CHARACTER_OK:
+			return None
+		return namepolicy.character_message(localeInfo, error, localeInfo.CREATE_ERROR_INSULT_NAME)
+
+	def _R1Active(self):
+		r1 = getattr(self, "r1", None)
+		return r1 is not None and not getattr(r1, "failed", False)
+
+	def _RefreshR1(self, method="Refresh", *args):
+		if getattr(self, "r1", None) is not None:
+			import uir1pregame
+			return uir1pregame.Safe(self.r1, method, *args)
+		return None
 
 	def Close(self):
+		if getattr(self, "r1", None) is not None:
+			self._RefreshR1("Destroy")
+			self.r1 = None
 		self.controlsLocked = True
 		self.editCharacterName.KillFocus()
 		self.chrRenderer.Hide()
@@ -264,7 +308,12 @@ class CreateCharacterWindow(ui.Window):
 		self.createSuccess = False
 		chr.BlendLoopMotion(chr.MOTION_INTRO_WAIT, 0.1)
 
-		if 1 == type:
+		if 1 == type and self._R1Active():
+			# R1: the error stays under the name field (Vytvořit off until the name changes)
+			self.EnableWindow()
+			self.r1Name = self.editCharacterName.GetText()
+			self._RefreshR1("RefreshName", localeInfo.CREATE_EXIST_SAME_NAME)
+		elif 1 == type:
 			self.PopupMessage(localeInfo.CREATE_EXIST_SAME_NAME, self.EnableWindow)
 		elif 2 == type:
 			self.PopupMessage(localeInfo.CREATE_ERROR_LIMIT_LEVEL, self.EnableWindow)
@@ -285,6 +334,7 @@ class CreateCharacterWindow(ui.Window):
 			self.JobList[self.job_id].Down()
 			self.genderButtonList[self.gender].Down()
 			self.shapeButtonList[self.shape].Down()
+		self._RefreshR1("SetEnabled", True)
 
 	def DisableWindow(self):
 		self.controlsLocked = True
@@ -292,6 +342,7 @@ class CreateCharacterWindow(ui.Window):
 			button.Disable()
 		self.editCharacterName.KillFocus()
 		self.editCharacterName.Disable()
+		self._RefreshR1("SetEnabled", False)
 
 	def RefreshActionTypography(self):
 		primary, choice, back = {"full": (27, 18, 15), "medium": (23, 15, 12), "compact": (18, 12, 10)}[self.layoutProfile]
@@ -367,6 +418,7 @@ class CreateCharacterWindow(ui.Window):
 			self.genderButtonList[WOMAN].Hide()
 		else:
 			self.genderButtonList[WOMAN].Show()
+		self._RefreshR1()
 
 	def SelectGender(self, gender):
 		if self.controlsLocked or self.MotionStart:
@@ -432,6 +484,7 @@ class CreateCharacterWindow(ui.Window):
 		chr.SetMotionMode(chr.MOTION_MODE_GENERAL)
 		chr.SetLoopMotion(chr.MOTION_INTRO_WAIT)
 		chr.Show()
+		self._RefreshR1()
 
 	# def GetSlotIndex(self):
 	def RefreshStat(self):
@@ -485,9 +538,16 @@ class CreateCharacterWindow(ui.Window):
 	## Cancel Button ##
 	def CancelButton(self):
 		if self.controlsLocked or self.MotionStart:
-			return
-		self.stream.SetSelectCharacterPhase()
+			return True
+		# Lock and hide before the phase change. The name field keeps focus
+		# while the curtain fades, so a second Escape would otherwise start
+		# another phase change that destroys this window while its weak-proxy
+		# handler still runs. Touch nothing on self after the switch.
+		self.DisableWindow()
 		self.Hide()
+		self.stream.backFromCreate = True  # the select screen must not open creation again (AutoCreateOnOpen)
+		self.stream.SetSelectCharacterPhase()
+		return True
 
 	def EmptyFunc(self):
 		pass
@@ -507,6 +567,10 @@ class CreateCharacterWindow(ui.Window):
 		return self.OnPressExitKey()
 
 	def CheckCreateCharacterName(self, name):
+		r1 = getattr(self, "r1", None)
+		if r1 is not None and not getattr(r1, "failed", False):
+			# R1 shows the rule under the field and keeps Vytvořit off; Enter on a bad name does nothing
+			return bool(name) and self.R1NameError(name) is None
 		if len(name) == 0:
 			self.PopupMessage(localeInfo.CREATE_INPUT_NAME, self.EnableWindow)
 			return False
@@ -584,10 +648,18 @@ class CreateCharacterWindow(ui.Window):
 				self.JobList[self.job_id].Down()
 				self.genderButtonList[self.gender].Down()
 				self.shapeButtonList[self.shape].Down()
+			if getattr(self, "r1", None) is not None:
+				self._RefreshR1("Destroy")
+				self.AttachR1()
 		renderX, renderY = self.renderArea.GetGlobalPosition()
 		self.chrRenderer.Configure(renderX, renderY, self.renderArea.GetWidth(), self.renderArea.GetHeight())
 
 	def OnUpdate(self):
+		try:
+			import pregamemusic
+			pregamemusic.UpdatePhase(self)
+		except Exception:
+			pass
 		self.RefreshResponsiveLayout()
 		chr.Update()
 		state = "disabled" if self.controlsLocked else ("pressed" if self.editCharacterName.IsFocus() else "normal")
@@ -595,7 +667,13 @@ class CreateCharacterWindow(ui.Window):
 		if getattr(self, "nameFieldImage", None) != fieldImage:
 			self.nameField.LoadImage(fieldImage)
 			self.nameFieldImage = fieldImage
+		if self.r1 is not None:
+			name = self.editCharacterName.GetText()
+			if name != self.r1Name:
+				# a typed name drops the server's "already exists" until it is sent again
+				self.r1Name = name
+				self._RefreshR1("RefreshName")
 		if self.MotionStart and self.createSuccess and app.GetTime() - self.MotionTime >= 2.0:
 			self.MotionStart = False
-			self.stream.SetSelectCharacterPhase()
 			self.Hide()
+			self.stream.SetSelectCharacterPhase()

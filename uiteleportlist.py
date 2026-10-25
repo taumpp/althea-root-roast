@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Approved C11 list, composed inside the existing teleport atlas shell."""
+"""Approved C11 list, composed inside the existing teleport atlas shell.
+
+In the R1 look (the owner window has an ``r1`` skin, uir1teleport.Skin) the page keeps this logic, the original map
+photographs and the one-colour glyphs, and takes its layout and controls from uir1teleport.BuildList: R1 category and
+action buttons, map rows without card frames (7 per page), the R1 scroll bar and the information panel (bosses and
+metin stones of the selected map, ``infoPanel``). Settings -> "Starý vzhled" (no skin) builds the original C11 controls
+below (5 rows, the old coordinates), and a failure while building R1 propagates to the window, which then builds the
+original look (uir1.TraceFailure)."""
 import fontconfig
 import player
 import teleportlistdata
@@ -197,6 +204,8 @@ class DestinationRow(ListControl):
 
 
 class TeleportListPage(ui.Window):
+	infoPanel = None		# ui.Window.__init__ already calls Hide() -> HideTip(), before __init__ sets it
+
 	def __init__(self, owner, scale=1.0, category="all"):
 		ui.Window.__init__(self)
 		self.owner = owner
@@ -208,6 +217,9 @@ class TeleportListPage(ui.Window):
 		self.widgets = []
 		self.rows = []
 		self.tabs = []
+		self.infoPanel = None		# the R1 information panel (uir1teleport.InfoPanel)
+		# The R1 skin of the owner window (uir1teleport.Skin); None = the original C11 controls.
+		self.r1 = getattr(owner, "r1", None)
 		self.SetSize(Scaled(821, scale), Scaled(491, scale))
 		self._Build()
 		self.Refresh()
@@ -223,6 +235,10 @@ class TeleportListPage(ui.Window):
 		return label
 
 	def _Build(self):
+		if self.r1:
+			import uir1teleport
+			uir1teleport.BuildList(self, self.r1.kit, self.scale, teleportlistdata.CATEGORIES, CATEGORY_ICON_BOUNDS)
+			return
 		self._Image("interior.png", 0, 0)
 		self._Label("Seznam map", 22, 26, fontconfig.ROLE_LARGE_BOLD)
 		self.playerLevel = self._Label("", 800, 65, fontconfig.ROLE_DENSE, DIM, "right")
@@ -249,16 +265,24 @@ class TeleportListPage(ui.Window):
 		self.detailMinimum = self._Label("", 789, 155, fontconfig.ROLE_LARGE_BOLD, GOLD, "right")
 		self.detailPhoto = self._Image("scenes/all_in_one_detail.png", 517, 179)
 		self._Image("hero_c_normal.png", 513, 175)
-		self.teleportButton = ui.Button()
-		self.teleportButton.SetParent(self)
-		uicrimsoncontrols.ApplyVisuals(self.teleportButton, "180x25")
-		wndMgr.SetScale(self.teleportButton.hWnd, self.scale, self.scale)
-		self.teleportButton.SetSize(Scaled(180, self.scale), Scaled(25, self.scale))
+		self.teleportButton = self._TeleportButton()
 		self.teleportButton.SetPosition(Scaled(564, self.scale), Scaled(421, self.scale))
 		self.teleportButton.SetFontName(fontconfig.FontForRole(fontconfig.ROLE_CONTROL, 0))
 		self.teleportButton.SetText("Teleportovat")
 		self.teleportButton.SetEvent(self.Teleport)
 		self.teleportButton.Show()
+
+	def Show(self):
+		self.HideTip()		# a tooltip left from before (Esc over a row) never comes back with the page
+		ui.Window.Show(self)
+
+	def Hide(self):
+		self.HideTip()
+		ui.Window.Hide(self)
+
+	def HideTip(self):
+		if self.infoPanel is not None:
+			self.infoPanel.HideTip()
 
 	def SetCategory(self, category):
 		self.model.SetCategory(category)
@@ -296,7 +320,7 @@ class TeleportListPage(ui.Window):
 			else:
 				row.Hide()
 		count = len(self.model.Destinations())
-		self.footer.SetText("%d %s v kategorii" % (count, "mapa" if count == 1 else "mapy" if count < 5 else "map"))
+		self.footer.SetText("")                  # the "N map v kategorii" line is gone (the label stays, empty)
 		if self.model.MaxOffset():
 			self.updatingScroll = True
 			self.scrollBar.SetMiddleBarSize(float(self.model.PAGE_SIZE) / count)
@@ -310,14 +334,37 @@ class TeleportListPage(ui.Window):
 		if selected:
 			self.detailTitle.SetText(selected["name"])
 			self.detailMinimum.SetText(str(selected["level"]))
-			if self.detailDestinationId != selected["id"]:
+			photoChanged = self.detailDestinationId != selected["id"]
+			if photoChanged:
 				self.detailPhoto.LoadImage(SKIN + "scenes/" + selected["id"] + "_detail.png")
 				self.detailPhoto.SetScale(self.scale, self.scale)
 				self.detailDestinationId = selected["id"]
+			if self.infoPanel is not None:
+				self.infoPanel.Update(selected, photoChanged)
 		if self.model.CanTeleport(level):
 			self.teleportButton.Enable()
 		else:
 			self.teleportButton.Disable()
+
+	def _TeleportButton(self):
+		# Draw the shared 180x25 action at its scaled size as a 3-slice button, so a
+		# window scale below 1.0 no longer blurs the frame. Old scaled family stays the fallback.
+		width, height = Scaled(180, self.scale), Scaled(25, self.scale)
+		sliced = getattr(ui, "CrimsonSlicedButton", None)
+		if sliced and uicrimsoncontrols.HasSlices(height):
+			try:
+				button = sliced()
+				button.SetParent(self)
+				button.SetSlicedSize(width, height)
+				return button
+			except Exception:
+				pass
+		button = ui.Button()
+		button.SetParent(self)
+		uicrimsoncontrols.ApplyVisuals(button, "180x25")
+		wndMgr.SetScale(button.hWnd, self.scale, self.scale)
+		button.SetSize(width, height)
+		return button
 
 	def Teleport(self):
 		self.Refresh()
@@ -329,6 +376,10 @@ class TeleportListPage(ui.Window):
 			return
 		if player.GetStatus(player.LEVEL) != self.lastLevel:
 			self.Refresh()
+		if self.r1:
+			if self.infoPanel is not None:
+				self.infoPanel.UpdateTip()
+			return		# the R1 controls paint themselves from the mouse callbacks
 		# Native CButton::OnUpdate does not dispatch Python OnUpdate. The page is
 		# a CWindow, so it also drives the plates and glyphs of its native buttons.
 		for control in self.tabs + self.rows:
@@ -338,11 +389,16 @@ class TeleportListPage(ui.Window):
 	def Destroy(self):
 		self.Hide()
 		self.owner = None
+		if self.infoPanel is not None:
+			self.infoPanel.Destroy()
+			self.infoPanel = None
 		for control in self.rows + self.tabs:
 			control.Destroy()
 		self.teleportButton.SetEvent(None)
 		self.scrollBar.SetScrollEvent(None)
+		self.scrollBar.__dict__.pop("OnRunMouseWheel", None)
 		self.scrollBar.Destroy()
+		self.r1 = None
 		self.rows = []
 		self.tabs = []
 		self.widgets = []

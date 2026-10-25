@@ -9,7 +9,11 @@ class PointResetDialog(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, "accept", child=True)
 		self.ConfirmDialog = ui.ScriptWindow()
+		import uiconfirm
+		uiconfirm.Bind(self.ConfirmDialog, "accept", child=True)
 
 	def LoadDialog(self):
 		try:

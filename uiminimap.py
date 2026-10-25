@@ -5,6 +5,7 @@ import wndMgr
 import player
 import miniMap
 import localeInfo
+import maparrivalnames
 import net
 import app
 import colorInfo
@@ -16,9 +17,11 @@ import time
 import chr
 import cfg
 import minimapstatus
+import minimappanel
+import minimappanelicons
 import uidungeonobjective
-PVP_MATCHMAKING_ENABLED = bool(getattr(app, "ENABLE_PVP_MATCHMAKING", 0))
-ARENA_LAUNCHER_ENABLED = PVP_MATCHMAKING_ENABLED
+import atlaspolicy
+import chat
 if app.ENABLE_KILL_BAR_SYSTEM:
 	import playersettingmodule
 	import item
@@ -49,7 +52,66 @@ class MapTextToolTip(ui.Window):
 	def SetText(self, text):
 		self.textLine.SetText(text)
 
+	# R1 look: the text shows as the one R1 hint (uir1.TextTooltipShow), left of the point where the original text
+	# ended (or at an anchor rect, SetAnchor), never over the button; the window itself stays hidden.
+	def SetParent(self, parent):
+		ui.Window.SetParent(self, parent)
+		self.r1Parent = parent
+
+	def SetAnchor(self, rect, side="above"):
+		self.r1Anchor = (tuple(rect), side)
+
+	def __R1Rect(self):
+		anchor = getattr(self, "r1Anchor", None)
+		if anchor is None:
+			return None, "left"
+		(x, y, w, h), side = anchor
+		parent = getattr(self, "r1Parent", None)
+		if parent is not None:
+			px, py = parent.GetGlobalPosition()
+			x, y = x + px, y + py
+		return (x, y, w, h), side
+
+	def SetBody(self, body):
+		# Status lines under the vein of the R1 hint (a launcher with a live state,
+		# buttonpanelstatus.HintBody); None = the one-line hint.
+		self.r1Body = body
+
+	def Show(self):
+		rect, side = self.__R1Rect()
+		try:
+			import uir1
+			body = getattr(self, "r1Body", None)
+			if rect is not None and body and uir1.UseR1():
+				uir1.ShowHintAt(rect, self.textLine.GetText(), body, side, owner=self,
+					title_color=getattr(self, "r1Color", None))
+				return
+			if rect is not None and uir1.TextTooltipShow(self, self.textLine.GetText(), rect, side,
+					title_color=getattr(self, "r1Color", None)):
+				return
+		except Exception:
+			pass
+		ui.Window.Show(self)
+
+	def Hide(self):
+		try:
+			import uir1
+			uir1.HideHint(self)
+		except Exception:
+			pass
+		ui.Window.Hide(self)
+
+	def IsShow(self):
+		if ui.Window.IsShow(self):
+			return True
+		try:
+			import uir1
+			return uir1.HintShownFor(self)
+		except Exception:
+			return False
+
 	def SetTooltipPosition(self, PosX, PosY):
+		self.r1Anchor = ((PosX - 6, PosY, 1, 14), "left")
 		if app.WJ_SHOW_PARTY_ON_MINIMAP:
 			self.textLine.SetPosition(PosX - 5, PosY)
 		else:
@@ -61,6 +123,7 @@ class MapTextToolTip(ui.Window):
 
 	def SetTextColor(self, TextColor):
 		self.textLine.SetPackedFontColor(TextColor)
+		self.r1Color = TextColor
 
 	def GetTextSize(self):
 		return self.textLine.GetTextSize()
@@ -106,6 +169,7 @@ class AtlasWindow(ui.ScriptWindow):
 			ui.Window.__init__(self)
 			self.AddFlag("not_pick")
 			self.EnableScissorRect()
+			self.offset = (0, 0)       # atlaslayout.view: the shown crop centred, the rest cut by the scissor
 
 		def __del__(self):
 			ui.Window.__del__(self)
@@ -115,8 +179,8 @@ class AtlasWindow(ui.ScriptWindow):
 
 		def OnRender(self):
 			(x, y) = self.GetGlobalPosition()
-			fx = float(x)
-			fy = float(y)
+			fx = float(x + self.offset[0])
+			fy = float(y + self.offset[1])
 			miniMap.RenderAtlas(fx, fy)
 
 		def HideAtlas(self):
@@ -124,6 +188,17 @@ class AtlasWindow(ui.ScriptWindow):
 
 		def ShowAtlas(self):
 			miniMap.ShowAtlas()
+
+	# R1 look: R1_LOADER (set below the class) dresses the board (uir1atlas.AtlasDress) unless Settings ->
+	# "Starý vzhled"; _titleHeight is the header height the atlas lies under (the R1 header is taller).
+	R1_LOADER = None
+	_r1 = None
+	_titleHeight = atlaslayout.TITLE_HEIGHT
+	_crop = (0, 0)             # origin of the shown atlas part (atlaslayout.crop), at scale 1.0
+	_floor = None              # index of the shown floor (atlaslayout.ATLAS_FLOORS) or None
+	_floorLabel = ""
+	_title = ""
+	mapName = ""
 
 	def __init__(self):
 		self.tooltipInfo = MapTextToolTip()
@@ -150,11 +225,37 @@ class AtlasWindow(ui.ScriptWindow):
 		ui.ScriptWindow.__del__(self)
 
 	def SetMapName(self, mapName):
-		if 949 == app.GetDefaultCodePage():
-			try:
-				self.board.SetTitleName(localeInfo.MINIMAP_ZONE_NAME_DICT[mapName])
-			except:
-				pass
+		self.mapName = mapName
+		self._floor = None
+		self._floorLabel = ""
+		try:
+			# a new map starts without a floor: the plain title (__FitAtlas adds the floor, __ShowTitle)
+			title = self._title = maparrivalnames.resolve(mapName) or uiScriptLocale.ZONE_MAP
+			self.board.SetTitleName(title)
+			if self._r1:
+				self._r1.SetTitle(title)
+			if self._imageSize:
+				self.__FitAtlas()
+		except:
+			pass
+
+	def __ShowTitle(self):
+		"""The map title, with the floor of a multi-floor map: "Jeskyně přízračných pirátů · II"."""
+		title = self._title
+		if not title:
+			return
+		if self._floorLabel:
+			title = title + u" \u00b7 " + self._floorLabel
+		self.board.SetTitleName(title)
+		if self._r1:
+			self._r1.SetTitle(title)
+
+	def __PlayerPosition(self):
+		try:
+			x, y, z = player.GetMainCharacterPosition()
+			return x, y
+		except Exception:
+			return None
 
 	def LoadWindow(self):
 		try:
@@ -171,6 +272,14 @@ class AtlasWindow(ui.ScriptWindow):
 			import exception
 			exception.Abort("AtlasWindow.LoadWindow.BindObject")
 
+		loader = self.R1_LOADER
+		if loader:
+			# Before the atlas renderer joins the board: the R1 frame draws under the map.
+			self._r1 = loader(self)
+			if self._r1:
+				self._titleHeight = self._r1.TitleHeight()
+				self.tooltipInfo = self._r1.Tooltip()
+
 		# The outer hit ring may lie outside this root. Do not capture unrelated
 		# world input in the rest of the root's unbounded picking region.
 		self.AddFlag("ignore_size")
@@ -184,7 +293,7 @@ class AtlasWindow(ui.ScriptWindow):
 		self.AtlasMainWindow.SetParent(self.board)
 		# Keep the shared metal frame; cover its black interior up to the 2px edge.
 		self.board.Base.Hide()
-		self.AtlasMainWindow.SetPosition(atlaslayout.FRAME_WIDTH, atlaslayout.TITLE_HEIGHT)
+		self.AtlasMainWindow.SetPosition(atlaslayout.FRAME_WIDTH, self._titleHeight)
 		self.tooltipInfo.SetParent(self.board)
 		if app.ENABLE_ATLAS_ICON_RENEWAL:
 			self.tooltipInfoEx.SetParent(self.board)
@@ -197,8 +306,50 @@ class AtlasWindow(ui.ScriptWindow):
 		self.Hide()
 
 		miniMap.RegisterAtlasWindow(self)
+		try:
+			import uir1
+			uir1.FollowLook(self)
+		except Exception:
+			pass
+
+	def SyncR1Look(self):
+		"""Settings switched the look (uir1.LookChanged): the R1 frame, header and hint dressed into the board or undone
+		(the board's own chrome and the text tooltip back); the map, the tooltips and the guild mark stay above the
+		frame, the atlas is fitted under the header of the look in use."""
+		import uir1
+		loader = self.R1_LOADER
+		wanted = bool(loader) and uir1.UseR1()
+		if not self.board or not self.AtlasMainWindow or wanted == bool(self._r1):
+			return
+		old_tooltip = self.tooltipInfo
+		if wanted:
+			r1 = loader(self)
+			if not r1:
+				return
+			self._r1 = r1
+			self._titleHeight = r1.TitleHeight()
+			self.tooltipInfo = r1.Tooltip()
+		else:
+			r1, self._r1 = self._r1, None
+			r1.Undo()
+			self.__dict__.pop("_titleHeight", None)          # the class value: the original title bar
+			self.tooltipInfo = MapTextToolTip()
+		if old_tooltip:
+			old_tooltip.Hide()
+		self.tooltipInfo.Hide()
+		self.tooltipInfo.SetParent(self.board)
+		self.AtlasMainWindow.SetPosition(atlaslayout.FRAME_WIDTH, self._titleHeight)
+		uir1.Restack(self.board, (self.AtlasMainWindow, self.tooltipInfo, getattr(self, "tooltipInfoEx", None),
+			self.infoGuildMark))
+		if self.IsShow():
+			self.Show()
 
 	def Destroy(self):
+		try:
+			import uir1
+			uir1.UnfollowLook(self)
+		except Exception:
+			pass
 		self.EndResize()
 		self._resizeHandles.clear()
 		miniMap.UnregisterAtlasWindow()
@@ -208,6 +359,7 @@ class AtlasWindow(ui.ScriptWindow):
 		self.tooltipInfo = None
 		self.infoGuildMark = None
 		self.board = None
+		self._r1 = None
 
 	if app.ENABLE_ATLAS_ICON_RENEWAL:
 		def FormatTime(self, seconds):
@@ -243,6 +395,10 @@ class AtlasWindow(ui.ScriptWindow):
 		if self._screenSize != (wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()):
 			self.EndResize()
 			self.__FitAtlas()
+		elif self._floor is not None and not self._resize:
+			floor = atlaslayout.floor_index(self.mapName, self.__PlayerPosition())
+			if floor is not None and floor != self._floor:
+				self.__FitAtlas()      # teleported to another floor: show it at once (the window keeps its place)
 
 		if not self.tooltipInfo:
 			return
@@ -271,6 +427,21 @@ class AtlasWindow(ui.ScriptWindow):
 			sName = localeInfo.GUILD_EMPTY_AREA
 
 		(x, y) = self.GetGlobalPosition()
+		if self._r1:
+			# R1 tooltip: the name in the game's colour, a short vein, the coordinates (and the respawn time).
+			extra = ""
+			if app.ENABLE_ATLAS_ICON_RENEWAL and isBoss:
+				extra = localeInfo.ATLAS_WINDOW_RESPAWN % self.FormatTime(respawnTime)
+			self.tooltipInfo.SetEntry(sName, iPosX, iPosY, dwTextColor, extra)
+			self.tooltipInfo.Place(mouseX - x, mouseY - y, self.board.GetWidth(), self.board.GetHeight())
+			self.tooltipInfo.Show()
+			self.tooltipInfo.SetTop()
+			if 0 != dwGuildID:
+				self.infoGuildMark.SetIndex(dwGuildID)
+				self.infoGuildMark.SetPosition(*self.tooltipInfo.MarkPosition())
+				self.infoGuildMark.Show()
+				self.infoGuildMark.SetScale(0.5)
+			return
 		if isBoss:
 			self.tooltipInfoEx.SetText(localeInfo.ATLAS_WINDOW_RESPAWN % self.FormatTime(respawnTime))
 			self.tooltipInfoEx.SetTooltipPosition(mouseX - x - 5, mouseY - y - 14)
@@ -316,11 +487,21 @@ class AtlasWindow(ui.ScriptWindow):
 		if not bGet or imageWidth <= 0 or imageHeight <= 0:
 			return False
 
+		position = self.__PlayerPosition()
+		x0, y0, imageWidth, imageHeight, label = atlaslayout.crop(self.mapName, imageWidth, imageHeight, position)
+		self._crop = (x0, y0)
+		self._floor = (atlaslayout.floor_index(self.mapName, position) or 0) if label else None
+		if label != self._floorLabel:
+			self._floorLabel = label
+			try:
+				self.__ShowTitle()
+			except Exception:
+				pass
 		self._imageSize = (imageWidth, imageHeight)
 		self._atlasScale = 1.0
 		if canScale:
 			scale, imageWidth, imageHeight = atlaslayout.fit(
-				imageWidth, imageHeight, screenWidth, screenHeight, self._preferredSize)
+				imageWidth, imageHeight, screenWidth, screenHeight, self._preferredSize, self._titleHeight)
 			miniMap.SetAtlasScale(scale, scale)
 			self._atlasScale = scale
 
@@ -335,13 +516,21 @@ class AtlasWindow(ui.ScriptWindow):
 		return True
 
 	def __SizeAtlas(self, imageWidth, imageHeight):
-		width = imageWidth + 2 * atlaslayout.FRAME_WIDTH
-		height = imageHeight + atlaslayout.TITLE_HEIGHT + atlaslayout.FRAME_WIDTH
+		viewWidth, offset = atlaslayout.view(imageWidth, self._crop, self._atlasScale)
+		imageWidth = viewWidth
+		minimum = max(240, self._r1.RequiredWidth()) if self._r1 else 240
+		available = max(1, wndMgr.GetScreenWidth() - 2 * atlaslayout.SCREEN_MARGIN)
+		width = max(imageWidth + 2 * atlaslayout.FRAME_WIDTH, min(minimum, available))
+		height = imageHeight + self._titleHeight + atlaslayout.FRAME_WIDTH
 		self.SetSize(width, height)
 		self.board.SetSize(width, height)
+		if self._r1:
+			self._r1.Resize(width, height)
 		if localeInfo.IsARABIC():
 			self.board.SetPosition(width, 0)
+		self.AtlasMainWindow.SetPosition((width - imageWidth) // 2, self._titleHeight)
 		self.AtlasMainWindow.SetSize(imageWidth, imageHeight)
+		self.AtlasMainWindow.offset = offset
 		grips = atlaslayout.grips(width, height)
 		for edge, handle in self._resizeHandles.items():
 			x, y, w, h = grips[edge]
@@ -370,11 +559,13 @@ class AtlasWindow(ui.ScriptWindow):
 		edge, origin, rect, startScale = self._resize
 		mx, my = wndMgr.GetMousePosition()
 		scale, iw, ih, x, y = atlaslayout.resize(
-			self._imageSize, rect, edge, (mx - origin[0], my - origin[1]), self._screenSize, startScale)
+			self._imageSize, rect, edge, (mx - origin[0], my - origin[1]), self._screenSize, startScale,
+			self._titleHeight)
 		miniMap.SetAtlasScale(scale, scale)
 		self._atlasScale = scale
 		self.__SizeAtlas(iw, ih)
-		self.SetPosition(x, y)
+		self.SetPosition(*atlaslayout.clamp_position(
+			x, y, self.GetWidth(), self.GetHeight(), *self._screenSize))
 		self._preferredSize = scale * max(self._imageSize)
 
 	def EndResize(self):
@@ -432,10 +623,47 @@ class AtlasWindow(ui.ScriptWindow):
 		self.Close()
 		return True
 
+
+def _R1AtlasDress(window):
+	"""uir1atlas.AtlasDress of the atlas board (R1 look), None for Settings -> "Starý vzhled" or after a failure."""
+	try:
+		import uir1atlas
+		if not uir1atlas.UseR1():
+			return None
+	except Exception:
+		try:
+			import uir1
+			uir1.TraceFailure("Velká mapa")
+		except Exception:
+			pass
+		return None
+	dress = uir1atlas.Dress(window)
+	if dress:
+		# The atlas root is 'not_pick' (its hit ring reaches outside it), which the engine never brings to the front
+		# on a click: a mouse-down on the header row (the 'attach' strip) raises it.
+		import uir1
+		uir1.Front(window, not_pick=True)
+	return dress
+
+
+AtlasWindow.R1_LOADER = staticmethod(_R1AtlasDress)
+
+
+def _R1MinimapDress(window):
+	"""uiminimapr1 dress of the minimap (R1 look), None for Settings -> "Starý vzhled" or after a failure."""
+	try:
+		import uiminimapr1
+	except Exception:
+		return None
+	return uiminimapr1.Create(window, MapTextToolTip)
+
 def __RegisterMiniMapColor(type, rgb):
 	miniMap.RegisterColor(type, rgb[0], rgb[1], rgb[2])
 
 class MiniMap(ui.ScriptWindow):
+	# R1 look: R1_LOADER (set below the class) dresses the loaded window (uiminimapr1.Create).
+	R1_LOADER = None
+
 	CANNOT_SEE_INFO_MAP_DICT = {
 		"metin2_map_monkeydungeon" : False,
 		"metin2_map_monkeydungeon_02" : False,
@@ -500,39 +728,28 @@ class MiniMap(ui.ScriptWindow):
 		self.tooltipAtlasOpen.SetText(localeInfo.MINIMAP_SHOW_AREAMAP)
 		self.tooltipAtlasOpen.Show()
 
-		if app.ENABLE_PLAYER_RANKING:
-			self.tooltipPlayerRankingOpen = MapTextToolTip()
-			self.tooltipPlayerRankingOpen.SetText(uiScriptLocale.TOOLTIP_TEXT_MINIMAP_RANKING,)
-			self.tooltipPlayerRankingOpen.Show()
-
 		self.tooltipInfo = MapTextToolTip()
 		self.tooltipInfo.Show()
 
 		if miniMap.IsAtlas():
-			self.tooltipAtlasOpen.SetText(localeInfo.MINIMAP_SHOW_AREAMAP)
+			self.atlasTooltipText = localeInfo.MINIMAP_SHOW_AREAMAP
 		else:
-			self.tooltipAtlasOpen.SetText(localeInfo.MINIMAP_CAN_NOT_SHOW_AREAMAP)
+			self.atlasTooltipText = localeInfo.MINIMAP_CAN_NOT_SHOW_AREAMAP
+		self.tooltipAtlasOpen.SetText(self.atlasTooltipText)
+		# On a map without the large map (atlaspolicy) the hover text is the notice (__SyncAtlasTooltip).
+		self.atlasTooltipBlocked = None
 
 		self.tooltipAtlasOpen.SetHorizontalAlignLeft()
-		if app.ENABLE_EVENT_MANAGER:
-			self.tooltipEventManagerOpen = MapTextToolTip()
-			self.tooltipEventManagerOpen.SetText(uiScriptLocale.TOOLTIP_TEXT_MINIMAP_CALENDAR,)
-			self.tooltipEventManagerOpen.Show()			
-
-		if app.ENABLE_BATTLE_PASS:
-			self.tooltipBattlePassOpen = MapTextToolTip()
-			self.tooltipBattlePassOpen.SetText(uiScriptLocale.TOOLTIP_TEXT_MINIMAP_BATTLEPASS,)
-			self.tooltipBattlePassOpen.Show()
-
-		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-			self.tooltipSavedPositionsOpen = MapTextToolTip()
-			self.tooltipSavedPositionsOpen.SetText(uiScriptLocale.KEYBIND_ACTION_SYSTEM_CUSTOM_PORTS)
-			self.tooltipSavedPositionsOpen.Show()
-
-		if ARENA_LAUNCHER_ENABLED:
-			self.tooltipArenaOpen = MapTextToolTip()
-			self.tooltipArenaOpen.SetText("Hodnocená aréna")
-			self.tooltipArenaOpen.Show()
+		# One hover text per configurable launcher slot (root/minimappanel.py)
+		# plus the fixed "More" control.
+		self.launcherTooltips = []
+		for unused in range(minimappanel.MAX_SLOTS):
+			tooltip = MapTextToolTip()
+			tooltip.Hide()
+			self.launcherTooltips.append(tooltip)
+		self.tooltipMoreOpen = MapTextToolTip()
+		self.tooltipMoreOpen.SetText(minimappanel.MoreLabel())
+		self.tooltipMoreOpen.Hide()
 
 		if app.ENABLE_COMBAT_ZONE:
 			self.tooltipCombatZoneOpen = MapTextToolTip()
@@ -567,19 +784,23 @@ class MiniMap(ui.ScriptWindow):
 		self.ScaleDownButton = 0
 		self.MiniMapHideButton = 0
 		self.MiniMapShowButton = 0
-		self.SkillTreeButton = 0
 		self.AtlasShowButton = 0
+		self.launcherOrbit = None
+		self.launcherOrbitOuter = None
+		self.launcherSlots = []
+		self.launcherTooltips = []
+		self.launcherLayout = ()
+		self.launcherEntries = {}
+		self.launcherMoreButton = None
+		self.launcherSettingsButton = None
+		self.tooltipMoreOpen = None
+		self.launcherMenu = None
+		self.launcherContext = None
+		self.launcherBadges = None
+		self.skillTreeEvent = None
 		if app.ENABLE_COMBAT_ZONE:
 			self.btnCombatZone = 0
 			self.tooltipCombatZoneOpen = 0
-		if app.ENABLE_EVENT_MANAGER:
-			self.EventManagerButton = 0 
-		if app.ENABLE_BATTLE_PASS:
-			self.BattlePassButton = 0 
-		if ARENA_LAUNCHER_ENABLED:
-			self.ArenaButton = 0
-		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-			self.SavedPositionsButton = 0
 		self.tooltipMiniMapOpen = 0
 		self.tooltipMiniMapClose = 0
 		self.tooltipScaleUp = 0
@@ -593,6 +814,7 @@ class MiniMap(ui.ScriptWindow):
 		self.statusClock = None
 		self.statusDate = None
 		self.statusNotice = None
+		self.r1Dress = None
 		self.lastStatusUpdate = None
 		self.lastStatusValue = None
 
@@ -604,22 +826,6 @@ class MiniMap(ui.ScriptWindow):
 			self.GuildDragonlairFirstGuildSecond = None
 			self.GuildDragonlairFirstGuildLeftTime = 0
 			self.isGuildDragonLairStart = False
-
-		if app.ENABLE_PLAYER_RANKING:
-			self.PlayerRankingButton = 0 
-			self.tooltipPlayerRankingOpen = 0
-
-		if app.ENABLE_EVENT_MANAGER:
-			self.tooltipEventManagerOpen = 0
-
-		if app.ENABLE_BATTLE_PASS:
-			self.tooltipBattlePassOpen = 0
-
-		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-			self.tooltipSavedPositionsOpen = 0
-
-		if ARENA_LAUNCHER_ENABLED:
-			self.tooltipArenaOpen = 0
 
 		if app.ENABLE_KILL_BAR_SYSTEM:
 			self.KillList = list()
@@ -694,7 +900,24 @@ class MiniMap(ui.ScriptWindow):
 			self.AtlasShowButton = self.GetChild("AtlasShowButton")
 			self.CloseWindow = self.GetChild("CloseWindow")
 			self.MiniMapShowButton = self.GetChild("MiniMapShowButton")
-			self.SkillTreeButton = self.GetChild("SkillTreeButton")
+			# Older locale layouts without configurable slots show no launchers.
+			self.launcherSlots = []
+			for index in range(minimappanel.MAX_SLOTS):
+				name = "LauncherSlot%d" % index
+				if not self.IsChild(name):
+					break
+				self.launcherSlots.append(self.GetChild(name))
+			if self.IsChild("LauncherOrbit"):
+				self.launcherOrbit = self.GetChild("LauncherOrbit")
+			if self.IsChild("LauncherOrbitOuter"):
+				self.launcherOrbitOuter = self.GetChild("LauncherOrbitOuter")
+			if self.IsChild("LauncherMoreButton"):
+				self.launcherMoreButton = self.GetChild("LauncherMoreButton")
+				self.launcherMoreButton.SetEvent(ui.__mem_func__(self.ToggleLauncherMenu))
+			if self.IsChild("LauncherSettingsButton"):
+				self.launcherSettingsButton = self.GetChild("LauncherSettingsButton")
+				self.launcherSettingsButton.SetEvent(ui.__mem_func__(self.ToggleLauncherSettings))
+				self.launcherSettingsButton.SetToolTipText(minimappanel.SettingsLabel())
 			self.positionInfo = self.GetChild("PositionInfo")
 			self.observerCount = self.GetChild("ObserverCount")
 			self.serverInfo = self.GetChild("ServerInfo")
@@ -704,10 +927,6 @@ class MiniMap(ui.ScriptWindow):
 			# Older locale layouts may still contain this retired row.
 			if self.IsChild("PlayerCount"):
 				self.GetChild("PlayerCount").Hide()
-
-			if app.ENABLE_PLAYER_RANKING:
-				self.PlayerRankingButton = self.GetChild("PlayerRankingButton")
-				self.PlayerRankingButton.SetEvent(ui.__mem_func__(self.TogglePlayerRankingButton))
 
 			if app.ENABLE_GUILD_DRAGONLAIR_PARTY_SYSTEM:
 				self.GuildDragonlairFirstGuildText = self.GetChild("GuildDragonlairFirstGuildText")
@@ -736,29 +955,22 @@ class MiniMap(ui.ScriptWindow):
 				self.dateTimeTextLine = self.GetChild("DateTimeTextLine")
 				self.dateTimeTextLine.SetOutline()
 
-			if app.ENABLE_EVENT_MANAGER:
-				self.EventManagerButton = self.GetChild("EventManagerButton")
-				self.EventManagerButton.SetEvent(ui.__mem_func__(self.ToggleEventManagerButton))
-				#self.EventManagerButton.SetScale(0.5,0.5)
-
-			if app.ENABLE_BATTLE_PASS:
-				self.BattlePassButton = self.GetChild("BattlePassButton")
-				self.BattlePassButton.SetEvent(ui.__mem_func__(self.ToggleBattlePassButton))
-
-			if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-				self.SavedPositionsButton = self.GetChild("SavedPositionsButton")
-				self.SavedPositionsButton.SetEvent(ui.__mem_func__(self.ToggleSavedPositionsButton))
-
-			if ARENA_LAUNCHER_ENABLED:
-				self.ArenaButton = self.GetChild("ArenaButton")
-				self.ArenaButton.SetEvent(ui.__mem_func__(self.ToggleArenaButton))
-
 			if localeInfo.IsARABIC():
 				(mailbox_effect_x, mailbox_effect_y) = self.MailBoxEffect.GetLocalPosition()
 				self.MailBoxEffect.SetPosition(mailbox_effect_x + 26, mailbox_effect_y)
 		except:
 			import exception
 			exception.Abort("MiniMap.LoadWindow.Bind")
+
+		# R1 look (uiminimapr1, minimap A2): R1 art on the ring, controls and pennant, unless "Starý vzhled".
+		loader = MiniMap.R1_LOADER
+		if loader:
+			self.r1Dress = loader(self)
+		try:
+			import uir1
+			uir1.FollowLook(self)
+		except Exception:
+			pass
 
 		if constInfo.MINIMAP_POSITIONINFO_ENABLE == 0:
 			self.positionInfo.Hide()
@@ -772,7 +984,7 @@ class MiniMap(ui.ScriptWindow):
 		self.ScaleDownButton.SetEvent(ui.__mem_func__(self.ScaleDown))
 		self.MiniMapHideButton.SetEvent(ui.__mem_func__(self.HideMiniMap))
 		self.MiniMapShowButton.SetEvent(ui.__mem_func__(self.ShowMiniMap))
-		self.SkillTreeButton.SetToolTipText(uiScriptLocale.SKILL_TREE_TITLE)
+		self.RefreshLauncherPanel()
 
 		if app.ENABLE_COMBAT_ZONE:
 			self.btnCombatZone.SetEvent(ui.__mem_func__(self.OpenCombatZoneWindow))
@@ -801,25 +1013,7 @@ class MiniMap(ui.ScriptWindow):
 		(ButtonPosX, ButtonPosY) = self.AtlasShowButton.GetGlobalPosition()
 		self.tooltipAtlasOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
 
-		if app.ENABLE_EVENT_MANAGER:
-			(ButtonPosX, ButtonPosY) = self.EventManagerButton.GetGlobalPosition()
-			self.tooltipEventManagerOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)	
-
-		if app.ENABLE_BATTLE_PASS:
-			(ButtonPosX, ButtonPosY) = self.BattlePassButton.GetGlobalPosition()
-			self.tooltipBattlePassOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-
-		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-			(ButtonPosX, ButtonPosY) = self.SavedPositionsButton.GetGlobalPosition()
-			self.tooltipSavedPositionsOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-
-		if ARENA_LAUNCHER_ENABLED:
-			(ButtonPosX, ButtonPosY) = self.ArenaButton.GetGlobalPosition()
-			self.tooltipArenaOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-
-		if app.ENABLE_PLAYER_RANKING:
-			(ButtonPosX, ButtonPosY) = self.PlayerRankingButton.GetGlobalPosition()
-			self.tooltipPlayerRankingOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)	
+		self.__PlaceLauncherTooltips()
 
 		self.ShowMiniMap()
 
@@ -860,40 +1054,10 @@ class MiniMap(ui.ScriptWindow):
 			except:
 				pass
 
-			if app.ENABLE_EVENT_MANAGER:
-				try:
-					(ButtonPosX, ButtonPosY) = self.EventManagerButton.GetGlobalPosition()
-					self.tooltipEventManagerOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-				except:
-					pass
-
-			if app.ENABLE_BATTLE_PASS:
-				try:
-					(ButtonPosX, ButtonPosY) = self.BattlePassButton.GetGlobalPosition()
-					self.tooltipBattlePassOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-				except:
-					pass
-
-			if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-				try:
-					(ButtonPosX, ButtonPosY) = self.SavedPositionsButton.GetGlobalPosition()
-					self.tooltipSavedPositionsOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-				except:
-					pass
-
-			if ARENA_LAUNCHER_ENABLED:
-				try:
-					(ButtonPosX, ButtonPosY) = self.ArenaButton.GetGlobalPosition()
-					self.tooltipArenaOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-				except:
-					pass
-
-			if app.ENABLE_PLAYER_RANKING:
-				try:
-					(ButtonPosX, ButtonPosY) = self.PlayerRankingButton.GetGlobalPosition()
-					self.tooltipPlayerRankingOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
-				except:
-					pass
+			try:
+				self.__PlaceLauncherTooltips()
+			except:
+				pass
 
 			if app.ENABLE_COMBAT_ZONE:
 				try:
@@ -902,7 +1066,35 @@ class MiniMap(ui.ScriptWindow):
 				except:
 					pass
 
+	def SyncR1Look(self):
+		"""Settings switched the look (uir1.LookChanged): the R1 art of the ring, controls and pennant applied or the
+		original art restored in place; the launcher panel and the status lines drawn again in that look."""
+		import uir1
+		loader = MiniMap.R1_LOADER
+		wanted = bool(loader) and uir1.UseR1()
+		dress = getattr(self, "r1Dress", None)
+		if wanted and not dress:
+			self.r1Dress = loader(self)
+		elif not wanted and dress:
+			self.r1Dress = None
+			try:
+				dress.Restore()
+			finally:
+				dress.Destroy()
+		else:
+			return
+		for refresh in (self.RefreshLauncherPanel, lambda: self.__RefreshStatus(True)):
+			try:
+				refresh()
+			except Exception:
+				uir1.TraceFailure("the minimap (look switch)")
+
 	def Destroy(self):
+		try:
+			import uir1
+			uir1.UnfollowLook(self)
+		except Exception:
+			pass
 		if self.objectivePanel:
 			self.objectivePanel.Destroy()
 			self.objectivePanel = None
@@ -914,13 +1106,214 @@ class MiniMap(ui.ScriptWindow):
 		if app.ENABLE_KILL_BAR_SYSTEM:
 			self.KillList = None
 
+		if self.launcherBadges:
+			self.launcherBadges.Destroy()
+			self.launcherBadges = None
+		if self.launcherMenu:
+			self.launcherMenu.Destroy()
+			self.launcherMenu = None
+		if self.launcherContext:
+			self.launcherContext.Destroy()
+			self.launcherContext = None
+		if self.r1Dress:
+			self.r1Dress.Destroy()
+			self.r1Dress = None
+		try:
+			import uichannelbar
+			uichannelbar.DestroyAll()
+		except ImportError:
+			pass
+
 		self.ClearDictionary()
 
 		self.__Initialize()
 
 	def SetSkillTreeButtonEvent(self, event):
-		self.__LoadWindow()
-		self.SkillTreeButton.SetEvent(event)
+		# Kept for interfacemodule: the skill-tree launcher uses this callback
+		# in whichever slot the player placed it.
+		self.skillTreeEvent = event
+
+	def RefreshLauncherPanel(self):
+		"""Re-read the per-PC panel state and apply it to the launcher slots."""
+		if not self.launcherSlots:
+			return
+		interface = getattr(self, "interface", None)
+		# No VIP channel without VIP in game (root/minimappanel.py ShownInGame).
+		minimappanel.MarkVip(self)
+		entries = dict((entry.action_id, entry) for entry in minimappanel.ShownInGame(minimappanel.Catalog(interface)))
+		self.ApplyLauncherLayout(minimappanel.LoadLayout(tuple(entries)), entries)
+		if self.launcherMenu and self.launcherMenu.IsShow():
+			self.launcherMenu.Refresh()
+
+	def __ClipOrbit(self, orbit, slots):
+		"""End a ring connector under the centre of its last shown launcher."""
+		if not orbit:
+			return
+		if len(slots) < 2:
+			orbit.Hide()
+			return
+		lastY = slots[-1].GetLocalPosition()[1] + 14
+		top = orbit.GetLocalPosition()[1]
+		height = max(1, orbit.GetHeight())
+		orbit.SetRenderingRect(0.0, 0.0, 0.0, float(lastY - top - height) / height)
+		orbit.Show()
+
+	def ApplyLauncherLayout(self, layout, entries):
+		# An empty place ('') from Settings keeps its slot, so a function put into
+		# ring 2 shows there exactly as in the Settings preview (audit 1.5).
+		# Functions not shown now (feature flag, VIP channel without VIP) are
+		# skipped and the following ones move up.
+		layout = [actionId for actionId in layout if actionId == "" or actionId in entries]
+		while layout and layout[-1] == "":
+			layout.pop()
+		layout = tuple(layout[:len(self.launcherSlots)])
+		self.launcherLayout = layout
+		self.launcherEntries = entries
+		for index, slot in enumerate(self.launcherSlots):
+			tooltip = self.launcherTooltips[index] if index < len(self.launcherTooltips) else None
+			if index >= len(layout) or not layout[index]:
+				slot.Hide()
+				if tooltip:
+					tooltip.Hide()
+				continue
+			actionId = layout[index]
+			slot.SetUpVisual(minimappanelicons.Visual(actionId, "normal"))
+			slot.SetOverVisual(minimappanelicons.Visual(actionId, "hover"))
+			slot.SetDownVisual(minimappanelicons.Visual(actionId, "pressed"))
+			mark = minimappanelicons.Mark(actionId)
+			if mark or slot.ButtonText:
+				slot.SetText(mark)
+			slot.SetEvent(ui.__mem_func__(self.__OnClickLauncher), index)
+			# ui.Button.OnMouseRightButtonUp only dispatches its string-event table.
+			slot.SAFE_SetStringEvent("MOUSE_RIGHT_BUTTON_UP", self.OpenLauncherContext, index)
+			if tooltip:
+				tooltip.SetText(minimappanel.TooltipText(entries[actionId]))
+			slot.Show()
+		ringSize = minimappanel.RING_SIZES[0]
+		shown = [slot if index < len(layout) and layout[index] else None
+			for index, slot in enumerate(self.launcherSlots)]
+		# Each ring keeps its own connector; a single launcher needs none.
+		self.__ClipOrbit(self.launcherOrbit, [slot for slot in shown[:ringSize] if slot])
+		self.__ClipOrbit(self.launcherOrbitOuter, [slot for slot in shown[ringSize:] if slot])
+		dress = getattr(self, "r1Dress", None)
+		if dress:
+			dress.Orbits(self.launcherOrbit, self.launcherOrbitOuter)   # R1: no arc (minimappanelicons.R1_ARC)
+		self.__PlaceLauncherTooltips()
+		self.__SyncLauncherBadges()
+
+	def __SyncLauncherBadges(self):
+		"""Badges and states on the shown launchers; the "More" control gets one dot
+		for the functions behind it (root/uibuttonpanelbadges.py)."""
+		import uibuttonpanelbadges
+		if getattr(self, "launcherBadges", None) is None:
+			self.launcherBadges = uibuttonpanelbadges.PanelBadges("medallion")
+		self.launcherBadges.Sync(list(zip(self.launcherSlots, self.launcherLayout)))
+		known = tuple(self.launcherEntries)
+		try:
+			menu = minimappanel.MenuIds(minimappanel.LoadState(known), known)
+		except Exception:
+			menu = ()
+		more = [(self.launcherMoreButton, (13, -3))] if self.launcherMoreButton else []
+		self.launcherBadges.SetMore(more, menu)
+
+	def __LauncherPicker(self):
+		if self.launcherMenu is None:
+			import uibuttonpanelpicker
+			self.launcherMenu = uibuttonpanelpicker.FunctionPicker()
+		return self.launcherMenu
+
+	def __PickerPosition(self):
+		"""Left of both launcher rings, top-aligned with the "More" control."""
+		(x, y) = self.launcherMoreButton.GetGlobalPosition() if self.launcherMoreButton else self.GetGlobalPosition()
+		picker = self.__LauncherPicker()
+		return (x - 111 - 90 - picker.GetWidth(), y - 50)
+
+	def ToggleLauncherMenu(self):
+		"""Open or close the "More" window with every function outside the rings."""
+		import uiminimappanelmenu
+		picker = self.__LauncherPicker()
+		if picker.IsShow():
+			picker.Close()
+			return
+		picker.EnableBadges(getattr(self, "interface", None))
+		uiminimappanelmenu.OpenMore(picker, getattr(self, "interface", None),
+			ui.__mem_func__(self.RunLauncherAction), self.__PickerPosition())
+
+	def OpenLauncherPicker(self, index):
+		"""Choose the function of launcher slot ``index`` (assign, swap or empty)."""
+		import uiminimappanelmenu
+		# Functions not shown now are skipped in game, so the following launchers
+		# move up: map the shown launcher back to its stored slot.
+		if index < len(self.launcherLayout):
+			stored = minimappanel.LoadLayout(tuple(self.launcherEntries))
+			actionId = self.launcherLayout[index]
+			if actionId in stored:
+				index = stored.index(actionId)
+		uiminimappanelmenu.OpenSlotPicker(self.__LauncherPicker(), getattr(self, "interface", None), index,
+			ui.__mem_func__(self.RefreshLauncherPanel), self.__PickerPosition())
+
+	def OpenLauncherSettings(self):
+		"""The small cogwheel: Settings -> Panely tlačítek -> Minimapa."""
+		import buttonpanelsettings
+		return buttonpanelsettings.Open(getattr(self, "interface", None), "minimap")
+
+	def ToggleLauncherSettings(self):
+		"""The small cogwheel opens Settings -> Panely tlačítek -> Minimapa; a second click closes it."""
+		import buttonpanelsettings
+		return buttonpanelsettings.Toggle(getattr(self, "interface", None), "minimap")
+
+	def OpenLauncherContext(self, index):
+		"""Right click (or Shift+click) on a launcher: Change… / Remove / Move to More."""
+		if index >= len(self.launcherLayout) or not self.launcherLayout[index]:
+			return
+		# Like the inventory rail: a right click while an item is on the cursor
+		# belongs to the item, not to the panel (audit 2.4).
+		import mouseModule
+		if mouseModule.mouseController.isAttached():
+			return
+		import uibuttonpanelcontext
+		import uiminimappanelmenu
+		if self.launcherContext is None:
+			self.launcherContext = uibuttonpanelcontext.ContextMenu()
+		entries = uiminimappanelmenu.SlotMenuEntries(lambda selected=index: self.OpenLauncherPicker(selected),
+			getattr(self, "interface", None), self.launcherLayout[index], ui.__mem_func__(self.RefreshLauncherPanel))
+		import uibuttonpanelbadges
+		entries = tuple(entries) + uibuttonpanelbadges.ContextEntries(self.launcherLayout[index])
+		(x, y) = self.launcherSlots[index].GetGlobalPosition()
+		self.launcherContext.Open(entries, (x - 184 - 4, y))
+
+	def RunLauncherAction(self, actionId):
+		if actionId == "information.skill_tree" and self.skillTreeEvent:
+			self.skillTreeEvent()
+			return True
+		return minimappanel.Invoke(actionId, getattr(self, "interface", None))
+
+	def __LauncherHintBody(self, actionId):
+		if actionId != "system.pvp_matchmaking":
+			return None
+		try:
+			import buttonpanelstatus
+			return buttonpanelstatus.HintBody(actionId, buttonpanelstatus.Context(getattr(self, "interface", None)))
+		except Exception:
+			return None
+
+	def __PlaceLauncherTooltips(self):
+		for index, slot in enumerate(self.launcherSlots):
+			if index < len(self.launcherTooltips):
+				(ButtonPosX, ButtonPosY) = slot.GetGlobalPosition()
+				self.launcherTooltips[index].SetTooltipPosition(ButtonPosX, ButtonPosY)
+		if self.launcherMoreButton and self.tooltipMoreOpen:
+			(ButtonPosX, ButtonPosY) = self.launcherMoreButton.GetGlobalPosition()
+			self.tooltipMoreOpen.SetTooltipPosition(ButtonPosX, ButtonPosY)
+
+	def __OnClickLauncher(self, index):
+		if index >= len(self.launcherLayout) or not self.launcherLayout[index]:
+			return
+		shift = [getattr(app, name, None) for name in ("DIK_LSHIFT", "DIK_RSHIFT")]
+		if any(key is not None and app.IsPressed(key) for key in shift):
+			self.OpenLauncherContext(index)
+			return
+		self.RunLauncherAction(self.launcherLayout[index])
 
 	def UpdateObserverCount(self, observerCount):
 		if observerCount>0:
@@ -955,6 +1348,12 @@ class MiniMap(ui.ScriptWindow):
 				self.fpsCounter.SetText(uiScriptLocale.OPTION_FPS_COUNTER % (fps, frameTime))
 
 		self.__RefreshStatus()
+		self.__CloseBlockedAtlas()
+
+		if self.launcherSlots and minimappanel.VipChanged(self):
+			self.RefreshLauncherPanel()   # VIP channels appear / disappear
+		if self.launcherBadges:
+			self.launcherBadges.Update(getattr(self, "interface", None))
 
 		if self.tooltipInfo:
 			if (not self.HasDungeonObjective()) and 1 == self.MiniMapWindow.IsIn():
@@ -1004,6 +1403,7 @@ class MiniMap(ui.ScriptWindow):
 			self.tooltipScaleDown.Hide()
 
 		if True == self.AtlasShowButton.IsIn():
+			self.__SyncAtlasTooltip()
 			self.tooltipAtlasOpen.Show()
 		else:
 			self.tooltipAtlasOpen.Hide()
@@ -1027,35 +1427,25 @@ class MiniMap(ui.ScriptWindow):
 			else:
 				self.tooltipCombatZoneOpen.Hide()
 
-		if app.ENABLE_PLAYER_RANKING:
-			if True == self.PlayerRankingButton.IsIn():
-				self.tooltipPlayerRankingOpen.Show()
+		for index, slot in enumerate(self.launcherSlots):
+			if index >= len(self.launcherTooltips):
+				break
+			if index < len(self.launcherLayout) and self.launcherLayout[index] and True == slot.IsIn():
+				tooltip = self.launcherTooltips[index]
+				body = self.__LauncherHintBody(self.launcherLayout[index])
+				if body != getattr(tooltip, "r1Body", None):
+					tooltip.SetBody(body)   # a live state (the rated arena): shown again with the new lines
+					tooltip.Hide()
+				if not tooltip.IsShow():
+					tooltip.Show()
+					tooltip.SetTop()  # above every other window, like game tooltips
 			else:
-				self.tooltipPlayerRankingOpen.Hide()	
-
-		if app.ENABLE_EVENT_MANAGER:
-			if True == self.EventManagerButton.IsIn():
-				self.tooltipEventManagerOpen.Show()
+				self.launcherTooltips[index].Hide()
+		if self.launcherMoreButton and self.tooltipMoreOpen:
+			if True == self.launcherMoreButton.IsIn():
+				self.tooltipMoreOpen.Show()
 			else:
-				self.tooltipEventManagerOpen.Hide()
-
-		if app.ENABLE_BATTLE_PASS:
-			if True == self.BattlePassButton.IsIn():
-				self.tooltipBattlePassOpen.Show()
-			else:
-				self.tooltipBattlePassOpen.Hide()
-
-		if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-			if True == self.SavedPositionsButton.IsIn():
-				self.tooltipSavedPositionsOpen.Show()
-			else:
-				self.tooltipSavedPositionsOpen.Hide()
-
-		if ARENA_LAUNCHER_ENABLED:
-			if True == self.ArenaButton.IsIn():
-				self.tooltipArenaOpen.Show()
-			else:
-				self.tooltipArenaOpen.Hide()
+				self.tooltipMoreOpen.Hide()
 
 		if app.ENABLE_GUILD_DRAGONLAIR_PARTY_SYSTEM:
 			self.GuildTextUpdate()
@@ -1179,7 +1569,43 @@ class MiniMap(ui.ScriptWindow):
 			# Preserve the network callback; ONLINE is never a minimap state.
 			pass
 
+	def __AtlasBlockedText(self):
+		"""Notice text when the large map stays closed on this map (atlaspolicy), otherwise None."""
+		key = atlaspolicy.BlockedMessage(net.GetMapIndex())
+		if not key:
+			return None
+		return getattr(localeInfo, key, localeInfo.MINIMAP_CAN_NOT_SHOW_AREAMAP)
+
+	def __AtlasBlocked(self):
+		"""True, with the notice in chat, when the player may not open the large map here (atlaspolicy)."""
+		text = self.__AtlasBlockedText()
+		if text is None:
+			return False
+		chat.AppendChat(chat.CHAT_TYPE_INFO, text)
+		return True
+
+	def IsAtlasBlocked(self):
+		"""True when the large map stays closed on this map; no notice (warp window restore)."""
+		return self.__AtlasBlockedText() is not None
+
+	def __CloseBlockedAtlas(self):
+		# A warp restore or re-shown windows must not leave the large map open on a blocked map.
+		if self.AtlasWindow and self.AtlasWindow.IsShow() and self.__AtlasBlockedText() is not None:
+			self.AtlasWindow.Close()
+
+	def __SyncAtlasTooltip(self):
+		text = self.__AtlasBlockedText()
+		if text == self.atlasTooltipBlocked:
+			return
+		self.atlasTooltipBlocked = text
+		if text is not None:
+			self.tooltipAtlasOpen.SetText(text)
+		elif self.atlasTooltipText is not None:
+			self.tooltipAtlasOpen.SetText(self.atlasTooltipText)
+
 	def ShowAtlas(self):
+		if not self.AtlasWindow.IsShow() and self.__AtlasBlocked():
+			return
 		if not miniMap.IsAtlas():
 			return
 		if self.AtlasWindow.IsShow():
@@ -1192,6 +1618,8 @@ class MiniMap(ui.ScriptWindow):
 			return self.AtlasWindow.IsShow()
 
 	def ToggleAtlasWindow(self):
+		if not self.AtlasWindow.IsShow() and self.__AtlasBlocked():
+			return
 		if not miniMap.IsAtlas():
 			return
 
@@ -1287,34 +1715,16 @@ class MiniMap(ui.ScriptWindow):
 			if interface != None:
 				interface.OpenDungeonInfo()
 
-	if app.ENABLE_EVENT_MANAGER:
-		def ToggleEventManagerButton(self):
-			self.interface.OpenEventCalendar()
-
-	if app.ENABLE_PLAYER_RANKING:
-		def TogglePlayerRankingButton(self):
-			self.interface.ShowRankGlobal()
-
-	if app.ENABLE_BATTLE_PASS:
-		def ToggleBattlePassButton(self):
-			if self.interface:
-				if self.interface.wndBattlePass:
-					if self.interface.wndBattlePass.IsShow():
-						self.interface.wndBattlePass.Close()
-						return
-
-			self.interface.ShowBattlePass()
-
-	if getattr(app, "ENABLE_CUSTOM_PORTS", 0):
-		def ToggleSavedPositionsButton(self):
-			if self.interface:
-				self.interface.ToggleCustomPortsWindow()
-
-	if ARENA_LAUNCHER_ENABLED:
-		def ToggleArenaButton(self):
-			if self.interface:
-				self.interface.TogglePvPMatchmakingWindow()
-
 	def BindInterfaceClass(self, interface):
 		from _weakref import proxy
 		self.interface = proxy(interface)
+		self.RefreshLauncherPanel()
+		# A pinned channel bar (root/uichannelbar.py) shows again after login.
+		try:
+			import uichannelbar
+			uichannelbar.RestorePinned(self.interface)
+		except ImportError:
+			pass
+
+
+MiniMap.R1_LOADER = staticmethod(_R1MinimapDress)

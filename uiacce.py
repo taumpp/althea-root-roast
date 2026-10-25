@@ -9,6 +9,7 @@ import acce
 import player
 import uiToolTip
 import localeInfo
+import acceabsorbpolicy
 import uiInventory
 import mouseModule
 import uiScriptLocale
@@ -19,9 +20,27 @@ if app.WJ_ENABLE_TRADABLE_ICON:
 	if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
 		SPECIAL_INVENTORY_PAGE_SIZE = player.SPECIAL_INVENTORY_PAGE_SIZE
 
+def _DressR1(window, kind):
+	"""R1 look of the window (root/uir1theowahdan.py, inside the shared R1 frame of root/uir1frame.py); "Starý vzhled"
+	or a failure keeps the original window."""
+	try:
+		import uir1theowahdan
+		uir1theowahdan.Dress(window, kind)
+	except Exception:
+		pass
+
+def _SetR1Cost(window, amount=None, text=None):
+	try:
+		import uir1theowahdan
+		uir1theowahdan.SetCost(window, amount, text)
+	except Exception:
+		pass
+
 class CombineWindow(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'btnAccept')
 		self.isLoaded = 0
 		self.PositionOut = 0
 		self.PositionStartX = 0
@@ -94,6 +113,7 @@ class CombineWindow(ui.ScriptWindow):
 		self.btnCancel.SetEvent(ui.__mem_func__(self.OnClose))
 		self.btnAccept.SetEvent(ui.__mem_func__(self.OnAccept))
 		self.tooltipItem = None
+		_DressR1(self, "combine")
 
 	def SetItemToolTip(self, itemTooltip):
 		self.tooltipItem = itemTooltip
@@ -102,8 +122,10 @@ class CombineWindow(ui.ScriptWindow):
 		(resultVnum, chance, unusedMax) = acce.GetResultItem()
 		if resultVnum and uiresonance.IsSealVnum(resultVnum):
 			self.cost.SetText(localeInfo.RARITY_CHANCE % str(chance))
+			_SetR1Cost(self, text=self.cost.GetText())
 		else:
 			self.cost.SetText(localeInfo.ACCE_ABSORB_COST % acce.GetPrice())
+			_SetR1Cost(self, amount=acce.GetPrice())
 
 	def IsOpened(self):
 		if self.IsShow() and self.isLoaded:
@@ -343,6 +365,8 @@ class CombineWindow(ui.ScriptWindow):
 class AbsorbWindow(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'btnAccept')
 		self.isLoaded = 0
 		self.PositionOut = 0
 		self.PositionStartX = 0
@@ -411,6 +435,7 @@ class AbsorbWindow(ui.ScriptWindow):
 		self.btnAccept.SetEvent(ui.__mem_func__(self.OnAccept))
 
 		self.tooltipItem = None
+		_DressR1(self, "absorb")
 
 	def SetItemToolTip(self, itemTooltip):
 		self.tooltipItem = itemTooltip
@@ -468,6 +493,19 @@ class AbsorbWindow(ui.ScriptWindow):
 	def OnAccept(self):
 		acce.SendRefineRequest()
 
+	def RefuseMaterial(self, invenType, slotPos, targetSlot):
+		"""only a weapon is absorbed (acceabsorbpolicy); anything else stays in the inventory with a
+		message instead of being sent. Returns True when the item was refused."""
+		itemIndex = player.GetItemIndex(invenType, slotPos)
+		if not itemIndex:
+			return False
+		item.SelectItem(itemIndex)
+		refusal = acceabsorbpolicy.Refusal(item, targetSlot)
+		if refusal:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, refusal)
+			return True
+		return False
+
 	if app.WJ_ENABLE_TRADABLE_ICON:
 		def __ClearTradableIconState(self):
 			if self.interface:
@@ -500,7 +538,7 @@ class AbsorbWindow(ui.ScriptWindow):
 					if player.GetItemSealDate(player.INVENTORY, slotIndex) == -1 or player.GetItemSealDate(player.INVENTORY, slotIndex) > 0: #봉인아이템 걸러냄.
 						return True
 
-				if ((item.GetItemType() != item.ITEM_TYPE_ARMOR or item.GetItemSubType() != item.ARMOR_BODY) and item.GetItemType() != item.ITEM_TYPE_WEAPON and (item.GetItemType() != item.ITEM_TYPE_COSTUME or item.GetItemSubType() != item.COSTUME_TYPE_ACCE)):
+				if not acceabsorbpolicy.IsAbsorbable(item): # a sash or a weapon, never armour
 					return True
 					
 				#check limit 120lv
@@ -603,6 +641,8 @@ class AbsorbWindow(ui.ScriptWindow):
 		mouseModule.mouseController.DeattachObject()
 		#if attachedSlotType == player.SLOT_TYPE_INVENTORY and attachedInvenType == player.INVENTORY:
 		if attachedSlotType == player.SLOT_TYPE_INVENTORY or attachedSlotType == player.SLOT_TYPE_COSTUME_INVENTORY:
+			if self.RefuseMaterial(attachedInvenType, attachedSlotPos, selectedSlotPos):
+				return
 			acce.Add(attachedInvenType, attachedSlotPos, selectedSlotPos)
 
 	def OnSelectItemSlot(self, selectedSlotPos):

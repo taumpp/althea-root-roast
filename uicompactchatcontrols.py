@@ -38,6 +38,15 @@ def label(parent, x, y, value='', size=12, color=INK):
     return text
 
 
+def _R1Hint():
+    """uir1 when the R1 look is on (Settings -> "Starý vzhled" keeps the original tooltip board), else None."""
+    try:
+        import uir1
+        return uir1 if uir1.UseR1() else None
+    except Exception:
+        return None
+
+
 class IconControl(ui.Window):
     def __init__(self, parent, x, y, icon, tooltip, event, width=24, text='', height=24):
         ui.Window.__init__(self)
@@ -89,6 +98,10 @@ class IconControl(ui.Window):
     def OnMouseOverIn(self):
         self.hover = True
         if self.tooltip:
+            if _R1Hint():
+                # R1 look: the one R1 hint above the control (the header tabs and icons stay these controls).
+                _R1Hint().ShowHint(None, self, self.tooltip)
+                return
             if not self.tip:
                 self.tip = uiToolTip.ToolTip()
                 self.tip.AutoAppendNewTextLineResize(self.tooltip)
@@ -99,6 +112,8 @@ class IconControl(ui.Window):
         self.pressed = False
         if getattr(self, 'tip', None):
             self.tip.HideToolTip()
+        if _R1Hint():
+            _R1Hint().HideHint(self)
 
     def OnMouseLeftButtonDown(self):
         self.pressed = self.enabled
@@ -158,6 +173,40 @@ def checkbox(parent, x, y, width, text, checked, event):
     control.text.SetText('')
     control.text.SetText(text)
     return control
+
+
+def section(parent, x, y, width, text):
+    """Section heading of a panel (upper case, gold)."""
+    return label(parent, x, y, text.upper(), 11, GOLD)
+
+
+def tabs(parent, titles, selected, make_event, tooltip):
+    """Page tabs of a panel; make_event(title) returns the click callback. Returns the controls."""
+    controls = []
+    for index, title in enumerate(titles):
+        button = IconControl(parent, 6+index*103, 33, None, tooltip + title, make_event(title), 103, title, 28)
+        button.SetSelected(title == selected)
+        controls.append(button)
+    return controls
+
+
+def slider(parent, x, y, position, event):
+    """Opacity slider (0..1) of the settings panel."""
+    control = ui.SliderBar()
+    control.SetParent(parent)
+    path = 'd:/ymir work/ui/public/crimson/controls/slider/'
+    control.SetButtonVisual(path, 'small_thumb_01.tga', 'small_thumb_02.tga', 'small_thumb_03.tga')
+    control.SetBackgroundVisual(path + 'small_track.tga')
+    control.SetPosition(x, y)
+    control.SetSliderPos(position)
+    control.SetEvent(event)
+    control.Show()
+    return control
+
+
+def divider(parent, x, y, width):
+    """No divider in the original look."""
+    return None
 
 
 class ResizeGrip(IconControl):
@@ -355,6 +404,8 @@ class Panel(ui.Window):
         self.close = IconControl(self, width-27, 3, 'close', 'Zavřít panel', close_event or ui.__mem_func__(self.Hide))
 
     def OnRender(self):
+        if getattr(self, 'r1', None):
+            return
         x, y = self.GetGlobalPosition()
         bar(x, y, self.GetWidth(), 1, (.47, .38, .27))
 
@@ -386,6 +437,9 @@ class Panel(ui.Window):
         self.Hide()
         self.Clear()
         self.close.Destroy()
+        if getattr(self, 'r1', None):
+            self.r1.Destroy()
+            self.r1 = None
         self.title = None
         self.title_icon = None
         self.chrome = None

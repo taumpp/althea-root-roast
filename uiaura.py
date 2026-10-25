@@ -15,6 +15,15 @@ import auraprogression
 
 USE_AURA_WINDOW_LIMIT_RANGE = 1000
 
+def _NeedYang(amount):
+	"""The yang an aura upgrade needs: the one R1 yang price of the client ("1.000.000 Yang", root/uir1price.py,
+	); "Starý vzhled" keeps localeInfo.AURA_TOOLTIP_NEED_YANG ("1000000 Yangů")."""
+	try:
+		import uir1price
+		return uir1price.Text(amount, lambda: localeInfo.AURA_TOOLTIP_NEED_YANG % (amount))
+	except Exception:
+		return localeInfo.AURA_TOOLTIP_NEED_YANG % (amount)
+
 if app.WJ_ENABLE_TRADABLE_ICON:
 	INVENTORY_PAGE_SIZE = player.INVENTORY_PAGE_SIZE
 	if app.ENABLE_SPECIAL_INVENTORY_SYSTEM:
@@ -28,6 +37,8 @@ class AuraWindow(ui.ScriptWindow):
 			return
 
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'AcceptButton', child=True)
 		self.Initialize()
 
 	def __del__(self):
@@ -112,6 +123,14 @@ class AuraWindow(ui.ScriptWindow):
 		wndItem.SetSelectItemSlotEvent(ui.__mem_func__(self.SelectItemSlot))
 		wndItem.Show()
 		self.wndItem = wndItem
+
+		# R1 look (root/uir1theowahdan.py, inside the shared R1 frame of root/uir1frame.py); "Starý vzhled" or a
+		# failure keeps the original window
+		try:
+			import uir1theowahdan
+			uir1theowahdan.Dress(self, "aura_absorb" if type == player.AURA_WINDOW_TYPE_ABSORB else "aura_levelup")
+		except Exception:
+			pass
 
 	def ClearAuraLevelUpWindowToolTip(self):
 		if self.auraRefineWindowType == player.AURA_WINDOW_TYPE_GROWTH or self.auraRefineWindowType == player.AURA_WINDOW_TYPE_EVOLVE:
@@ -517,8 +536,11 @@ class AuraWindow(ui.ScriptWindow):
 						self.AuraToolTip3.SetText(localeInfo.AURA_TOOLTIP_EVOLUTION_PER % (evolPer))
 
 						self.AuraToolTip4.SetText(localeInfo.AURA_TOOLTIP_RESOURCE)
-						self.AuraToolTip5.SetText(localeInfo.AURA_TOOLTIP_RESOURCE_ITEM % (item.GetItemNameByVnum(needMaterialVnum), needMaterialCount))
-						self.AuraToolTip6.SetText(localeInfo.AURA_TOOLTIP_NEED_YANG % (needGold))
+						# "Name  12 / 25", the count green / red (root/ownedcount.py)
+						import ownedcount
+						self.AuraToolTip5.SetText("%s  %s" % (item.GetItemNameByVnum(needMaterialVnum),
+							ownedcount.Tagged(ownedcount.Owned(needMaterialVnum), needMaterialCount)))
+						self.AuraToolTip6.SetText(_NeedYang(needGold))
 
 		self.wndItem.RefreshSlot()
 

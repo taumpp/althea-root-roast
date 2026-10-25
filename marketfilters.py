@@ -4,24 +4,24 @@ from copy import deepcopy
 
 ANY = -1
 CATEGORIES = ((0, 'Všechny předměty'), (1, 'Zbraně'), (2, 'Výbava'),
-    (3, 'Kostýmy'), (11, 'Šerpy'), (4, 'Mazlíčci'), (5, 'Mounti'),
+    (3, 'Kostýmy'), (11, 'Šerpy'), (4, 'Mazlíci'), (5, 'Mounti'),
     (6, 'Alchymie'), (7, 'Knihy'), (8, 'Kameny'), (9, 'Spotřební'), (10, 'Materiály'))
 # Server category 12 is the complement of 1..11. Offer it only after the
 # server's `virtualmarketcategoryotherv1` capability: an older server
 # disconnects a client that sends an unknown category.
 OTHER = 12
 OTHER_CATEGORY = (OTHER, 'Ostatní')
-JOBS = ((-1, 'Všechna'), (0, 'Válečník'), (1, 'Ninja'), (2, 'Sura'), (3, 'Šaman'), (4, 'Lykan'))
+JOBS = ((-1, 'Všechna'), (0, 'Válečník'), (1, 'Ninja'), (2, 'Sura'), (3, 'Šaman'))
 GENDERS = ((-1, 'Libovolné'), (0, 'Muž'), (1, 'Žena'))
-GRADES = ('Surová', 'Broušená', 'Vzácná', 'Antická', 'Legendární', 'Mytická')
+GRADES = ('Surová', 'Broušená', 'Vzácná', 'Starověká', 'Legendární', 'Mýtická')
 STEPS = ('Matná', 'Čistá', 'Bezchybná', 'Brilantní', 'Excelentní')
 SUBTYPE_NAMES = {
     1: ('Meče', 'Dýky', 'Luky', 'Obouruční zbraně', 'Zvony', 'Vějíře', 'Šípy', 'Jezdecká kopí', 'Drápy', 'Toulce', 'Kytice'),
     2: ('Brnění', 'Přilby', 'Štíty', 'Náramky', 'Boty', 'Náhrdelníky', 'Náušnice', 'Talismany', 'Rukavice', 'Srdce talismanu'),
-    28: ('Tělo', 'Účesy', 'Kostýmoví mounti', 'Šerpy', 'Zbraně', 'Aury', 'Efekty zbraní', 'Efekty brnění', 'Vzhledy šerp', 'Kostýmoví mazlíčci'),
-    37: ('Vejce', 'Vychovatelní mazlíčci', 'Přepravní boxy', 'Krmivo', 'Knihy schopností', 'Odstranění schopnosti', 'Změna jména', 'Zkušenosti', 'Odstranění všech schopností', 'Zkušenosti v procentech', 'Určení vlastností', 'Změna vlastností', 'Platby', 'Prémiové krmivo'),
-    5: ('Kůže', 'Krev', 'Kořeny', 'Jehly', 'Šperky', 'Alchymie: běžné zesílení', 'Alchymie: požehnané zesílení', 'Alchymie: dračí zesílení', 'Alchymie: změna bonusů', 'Zbraně', 'Brnění', 'Šerpy', 'Elementy'),
-    29: ('Dračí diamant', 'Dračí rubín', 'Dračí jadeit', 'Dračí safír', 'Dračí granát', 'Dračí onyx'),
+    28: ('Tělo', 'Účesy', 'Kostýmoví mounti', 'Šerpy', 'Zbraně', 'Aury', 'Efekty zbraní', 'Efekty brnění', 'Vzhledy šerp', 'Kostýmoví mazlíci'),
+    37: ('Vejce', 'Vychovatelní mazlíci', 'Přepravní boxy', 'Krmivo', 'Knihy schopností', 'Odstranění schopnosti', 'Změna jména', 'Zkušenosti', 'Odstranění všech schopností', 'Zkušenosti v procentech', 'Určení vlastností', 'Změna vlastností', 'Platby', 'Prémiové krmivo'),
+    5: ('Výrobní materiály', 'Krev', 'Kořeny', 'Jehly', 'Šperky', 'Alchymie: běžné zesílení', 'Alchymie: požehnané zesílení', 'Alchymie: dračí zesílení', 'Alchymie: změna bonusů', 'Zbraně', 'Brnění', 'Šerpy', 'Elementy'),
+    29: ('Dračí diamant', 'Dračí rubín', 'Dračí nefrit', 'Dračí safír', 'Dračí granát', 'Dračí onyx'),
 }
 TYPE_NAMES = {4: 'Automatické lektvary', 10: 'Kameny ducha', 14: 'Ušlechtilé materiály',
     17: 'Knihy schopností', 22: 'Zapomínání schopností', 27: 'Směsi', 31: 'Speciální předměty',
@@ -50,17 +50,32 @@ def available_categories(other=False):
     return CATEGORIES + ((OTHER_CATEGORY,) if other else ())
 
 
+# Shared immutable translation table; Wiki folds thousands of indexed names.
+_FOLD_GROUPS = {'a': 'áäàâãåąă', 'c': 'čćç', 'd': 'ďđ', 'e': 'éěëèêę', 'i': 'íïìî',
+    'l': 'ĺľł', 'n': 'ńňñ', 'o': 'óöòôõő', 'r': 'ŕř', 's': 'šśş', 't': 'ťţ',
+    'u': 'úůüùûű', 'y': 'ýÿ', 'z': 'žźż'}
+_FOLD_ACCENTS = str.maketrans({accent: base for base, letters in _FOLD_GROUPS.items() for accent in letters})
+
+
 def folded(text):
-    # Keep the embedded client independent of an external unicodedata extension.
-    groups = {'a': 'áäàâãåąă', 'c': 'čćç', 'd': 'ďđ', 'e': 'éěëèêę', 'i': 'íïìî',
-        'l': 'ĺľł', 'n': 'ńňñ', 'o': 'óöòôõő', 'r': 'ŕř', 's': 'šśş', 't': 'ťţ',
-        'u': 'úůüùûű', 'y': 'ýÿ', 'z': 'žźż'}
-    accents = str.maketrans({accent: base for base, letters in groups.items() for accent in letters})
-    return ''.join(c for c in str(text).lower().translate(accents) if not 0x300 <= ord(c) <= 0x36f)
+    return ''.join(c for c in str(text).lower().translate(_FOLD_ACCENTS) if not 0x300 <= ord(c) <= 0x36f)
+
+
+def _rail_extras(category, catalog, result):
+    # Rail entries outside the type lists below (truhly, klíče in Ostatní; drahokamy, pečetě in Spotřební).
+    for extra_category, key, name in RAIL_EXTRA:
+        if extra_category == category and key not in dict(result) and key[0] not in SUBTYPE_NAMES and \
+                key[0] not in TYPE_NAMES and key[0] != 3 and _catalog_has(category, key[0], key[1], catalog):
+            result.append((key, name))
+    if category == 9:
+        for extra_category, key, name in RAIL_EXTRA:
+            if extra_category == 9 and key[0] == 3 and key[1] >= 0 and _catalog_has(9, 3, key[1], catalog):
+                result.append((key, name))
 
 
 def subcategories(category, catalog):
     result = [((-1, -1), 'Všechny')]
+    _rail_extras(category, catalog, result)
     if category in (0, 11, OTHER): return result
     seen_types = set()
     for kind, subtype, flags, sample, refines, variants, bonuses in catalog:
@@ -77,6 +92,64 @@ def subcategories(category, catalog):
         elif kind == 3 and kind not in seen_types:
             result.append(((kind, -1), 'Použitelné předměty'))
             seen_types.add(kind)
+    return result
+
+
+# The market's category rail uses the server's searchable types and subtypes. A row is
+#   (key, header category, folder, entries); an entry is (category, (kind, subtype), name or None = catalog name).
+# A plain row searches its header category and opens into its entries. A folder row (Zbroj, Šperky, Mazlíci a
+# mounti, Kameny, Truhly a klíče) groups entries of one or more server categories that no single query covers; it
+# opens and searches its first entry. Entries list tradeable, playable items:
+# no ANTI_MYSHOP / ANTI_GIVE or test / GM items. Left out on purpose: Jezdecká kopí, Drápy (Lykan cannot be
+# created), Toulce, Kytice, Srdce talismanu, Aury and Kostýmoví mazlíci (untradeable), Efekty zbraní / brnění (placeholder items) and the single-item subtypes.
+USE_PUT_INTO_ACCESSORY_SOCKET = 21
+USE_RESONANCE_SEAL = 50
+RAIL_ROWS = (
+    ('weapons', 1, False, tuple((1, (1, subtype), name) for subtype, name in
+        enumerate(('Meče', 'Dýky', 'Luky', 'Obouruční zbraně', 'Zvony', 'Vějíře', 'Šípy')))),
+    ('armor', 2, True, ((2, (2, 0), 'Brnění'), (2, (2, 1), 'Přilby'), (2, (2, 2), 'Štíty'), (2, (2, 4), 'Boty'),
+        (2, (2, 8), 'Rukavice'))),
+    ('jewelry', 2, True, ((2, (2, 3), 'Náramky'), (2, (2, 5), 'Náhrdelníky'), (2, (2, 6), 'Náušnice'),
+        (2, (2, 7), 'Talismany'), (2, (34, -1), 'Opasky'))),
+    ('sashes', 11, False, ()),
+    ('looks', 3, False, ((3, (28, 0), 'Oblek'), (3, (28, 1), 'Účesy'), (3, (28, 4), 'Zbraně'),
+        (3, (28, 8), 'Vzhledy šerp'))),
+    ('pets_mounts', 4, True, ((4, (-1, -1), 'Mazlíci'), (4, (37, 0), 'Vejce'), (4, (37, 4), 'Knihy mazlíků'),
+        (5, (-1, -1), 'Mounti'))),
+    ('stones', 8, True, ((8, (-1, -1), 'Kameny ducha'), (9, (3, USE_PUT_INTO_ACCESSORY_SOCKET), 'Drahokamy do šperků'),
+        (9, (3, USE_RESONANCE_SEAL), 'Pečetě'))),
+    ('alchemy', 6, False, tuple((6, (29, subtype), None) for subtype in range(7))),
+    ('books', 7, False, ()),
+    ('consumables', 9, False, ((9, (3, -1), 'Použitelné předměty'), (9, (27, -1), 'Rosy a směsi'))),
+    ('materials', 10, False, ((10, (5, 0), 'Výrobní materiály'), (10, (14, -1), 'Ušlechtilé materiály'))),
+    ('chests', OTHER, True, ((OTHER, (23, -1), 'Truhly'), (OTHER, (20, -1), 'Pokladnice'),
+        (OTHER, (21, -1), 'Klíče'), (OTHER, (36, -1), 'Truhly štěstí'))),
+    ('other', OTHER, False, ()),
+)
+RAIL = dict((key, (category, folder, entries)) for key, category, folder, entries in RAIL_ROWS)
+# Rail entries the filter dialog's Podkategorie list has no own name for (a type / subtype inside another category).
+RAIL_EXTRA = tuple((category, key, name) for unused, unused2, unused3, entries in RAIL_ROWS
+    for category, key, name in entries if key[0] >= 0 and name)
+
+
+def _catalog_has(category, kind, subtype, catalog):
+    return any(matches_category(category, row[0], row[1]) and row[0] == kind and (subtype < 0 or row[1] == subtype)
+        for row in catalog)
+
+
+def rail_entries(key, catalog):
+    """The entries ((category, (kind, subtype)), name) a rail row opens into, those the catalog has, in order. A whole
+    category entry ((kind, subtype) = (-1, -1)) is always there."""
+    if key not in RAIL:
+        return []
+    result = []
+    for category, sub, name in RAIL[key][2]:
+        if sub == (-1, -1):
+            result.append(((category, sub), name))
+            continue
+        names = dict(subcategories(category, catalog))
+        if sub in names:
+            result.append(((category, sub), name or names[sub]))
     return result
 
 
@@ -124,9 +197,9 @@ def normalize(state, catalog, other=False):
     output = {'category': category, 'subtype': subtype}
     info = profile(output, catalog)
     fields = info['fields']
-    for key, options in (('job', range(5)), ('gender', range(2))):
+    for key, options in (('job', dict(JOBS)), ('gender', dict(GENDERS))):
         value = number(state.get(key), -1)
-        if key in fields and value in options: output[key] = value
+        if key in fields and value != ANY and value in options: output[key] = value
     for key in ('level', 'refine', 'absorption', 'strength'):
         if key not in fields: continue
         for bound in ('minimum_', 'maximum_'):
@@ -163,7 +236,7 @@ def validate(state, catalog):
         if low >= 0 and high >= 0 and low > high:
             return key, 'Hodnota Od nesmí být větší než Do.'
     if any(value < -32768 or value > 32767 for _, value in state.get('applies', ())):
-        return 'applies', 'Hodnota bonusu musí být od −32768 do 32767.'
+        return 'applies', 'Hodnota bonusu musí být od -32768 do 32767.'
     if state.get('category') == 6:
         variants = profile(state, catalog)['variants']
         if not any((state.get('grade', -1) < 0 or grade == state['grade']) and
@@ -210,6 +283,12 @@ class FilterState:
 
     def select_category(self, category):
         self.applied = normalize(dict(self.applied, category=category, subtype=(-1, -1)),
+            self.catalog, self.other)
+        self.cancel()
+
+    def select_subcategory(self, category, subtype):
+        # The market's category rail: one click sets the category and its subcategory, other filters stay.
+        self.applied = normalize(dict(self.applied, category=category, subtype=tuple(subtype)),
             self.catalog, self.other)
         self.cancel()
 

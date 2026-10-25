@@ -11,6 +11,7 @@ import time
 import ui
 import uiToolTip
 import uimaterialrow
+import ownedcount
 
 
 MODE_PROMOTION = 0
@@ -149,14 +150,24 @@ class RarityDialog(ui.ScriptWindow):
 	CONTROL_ROW_HEIGHT = CHECKBOX_ROW_HEIGHT + CHECKBOX_ROW_GAP
 	STATUS_ROW_HEIGHT = 23
 	ACTION_BOTTOM_MARGIN = 24
+	# R1 look (): the R1 price (root/uir1price.py) in an R1 well instead of the footer strip and the R1
+	# OK / Zrušit row (26 px buttons, 10 px above the bottom edge: uir1price.BUTTON_BOTTOM)
+	R1_PRICE_X = MATERIAL_ROW_X			# the R1 price well spans the material rows (slot + name frame)
+	R1_PRICE_W = MATERIAL_TEXT_X + 214
+	r1Price = None
+	r1Buttons = None
+	r1Checks = ()		# uir1price.CheckBoxTwin of the two check boxes (box, gap, label; left margin of the rows)
 
 	pendingSince = 0.0
 	lateCommit = False
 	lateCommitMode = None
 	rerollQuestion = None
+	openingPreview = False
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.interface = None
 		self.isLoaded = False
 		self.mode = MODE_PROMOTION
@@ -230,6 +241,7 @@ class RarityDialog(ui.ScriptWindow):
 		self.fastRefineCheck.Hide()
 
 		self.__CreateYangRow()
+		self.__BuildR1()
 		for index in range(self.MAX_COST_ROWS):
 			self.materialRows.append(self.__CreateMaterialRow(index))
 		self.__ResizeForMaterials(1, False)
@@ -270,6 +282,70 @@ class RarityDialog(ui.ScriptWindow):
 		self.yangParts = [background, moneyIcon]
 		self.costText = costText
 
+	def __BuildR1(self):
+		"""R1 look (the board dressed by root/uir1frame.py): the shared R1 price in an R1 well and the R1 OK / Zrušit
+		row (root/uir1price.py). The original yang strip and buttons stay for "Starý vzhled"; a failure here or a
+		later frame failure gives them back."""
+		if self.__dict__.get("r1frame") is None:
+			return
+		try:
+			import uir1price
+			self.r1Price = uir1price.PriceField(self.yangPanel, self.R1_PRICE_X, 0, self.R1_PRICE_W)
+			self.r1Buttons = uir1price.ConfirmButtons(self.board, self.acceptButton, self.cancelButton)
+			self.r1Buttons.Place(self.board.GetWidth(), self.board.GetHeight() - uir1price.BUTTON_BOTTOM)
+			self.r1Checks = tuple(uir1price.CheckBoxTwin(self.board, native, self.R1_PRICE_X - 42)
+				for native in (self.boosterCheck, self.fastRefineCheck))
+			for part in self.yangParts + [self.costText]:
+				part.Hide()
+			# a later failure of the frame (uir1frame.FrameSkin.Undo) gives the original row and buttons back too
+			self.r1frame.undo.append(ui.__mem_func__(self.__DropR1))
+		except Exception:
+			try:
+				import uir1price
+				uir1price.TraceFailure("the rarity dialog price and buttons")
+			except Exception:
+				pass
+			self.__DropR1()
+
+	def __DropR1(self):
+		checks, self.r1Checks = self.r1Checks, ()
+		for check in checks:
+			check.Restore()
+		if self.r1Buttons is not None:
+			self.r1Buttons.Restore()
+		if self.r1Price is not None:
+			self.r1Price.Destroy()
+		self.r1Price = None
+		self.r1Buttons = None
+		for part in self.yangParts + ([self.costText] if getattr(self, "costText", None) else []):
+			part.Show()
+
+	def __IsR1(self):
+		if self.r1Price is None:
+			return False
+		if self.__dict__.get("r1frame") is None:	# the frame failed after it was built: the original look
+			self.__DropR1()
+			return False
+		return True
+
+	def __SetCost(self, yang):
+		"""The yang of the preview (None: no preview) in the original strip and in the R1 price."""
+		if yang is None:
+			self.costText.SetText("")
+		else:
+			self.costText.SetText(
+				"%s %s" % (
+					localeInfo.NumberToString(int(yang)),
+					localeInfo.CHEQUE_SYSTEM_UNIT_YANG,
+				)
+			)
+		if self.r1Price is not None:
+			if yang is None:
+				self.r1Price.Clear()
+			else:
+				import uir1price
+				self.r1Price.SetPrice(int(yang), uir1price.CanAfford(int(yang)))
+
 	def __CreateMaterialRow(self, index):
 		row = uimaterialrow.MaterialRow(
 			self.toolTipItem, ui.__mem_func__(self.__SearchMaterial))
@@ -285,6 +361,10 @@ class RarityDialog(ui.ScriptWindow):
 		slot.SetPosition(0, self.MATERIAL_SLOT_Y)
 		slot.SetSize(32, 32)
 		slot.SetSlotBaseImage("d:/ymir work/ui/public/Slot_Base.sub", 1.0, 1.0, 1.0, 1.0)
+		r1frame = self.__dict__.get("r1frame")
+		if r1frame is not None:
+			# R1 (root/uir1frame.py): the item slot C; a frame failure puts the original back
+			r1frame.SetSlot(slot, "d:/ymir work/ui/public/Slot_Base.sub")
 		slot.AppendSlot(index, 0, 0, 32, 32)
 		slot.AddFlag("not_pick")
 		slot.Show()
@@ -339,6 +419,10 @@ class RarityDialog(ui.ScriptWindow):
 		statusY = fastRefineY + self.CONTROL_ROW_HEIGHT
 		buttonY = statusY + (self.STATUS_ROW_HEIGHT if withStatus else 0)
 		windowHeight = buttonY + self.ACTION_BOTTOM_MARGIN
+		isR1 = self.__IsR1()
+		if isR1:
+			import uir1price
+			windowHeight = buttonY + self.r1Buttons.Height() + uir1price.BUTTON_BOTTOM
 
 		for index, rowData in enumerate(self.materialRows):
 			rowData[0].SetPosition(
@@ -357,12 +441,18 @@ class RarityDialog(ui.ScriptWindow):
 			self.statusText.Hide()
 		self.acceptButton.SetPosition(75, buttonY)
 		self.cancelButton.SetPosition(148, buttonY)
+		if isR1:
+			self.r1Buttons.Place(self.WINDOW_WIDTH, windowHeight - uir1price.BUTTON_BOTTOM)
 		self.board.SetSize(self.WINDOW_WIDTH, windowHeight)
 		self.titleBar.SetWidth(self.WINDOW_WIDTH + 8)
 		self.SetSize(self.WINDOW_WIDTH, windowHeight)
 
 	def Destroy(self):
 		self.Close()
+		if self.r1Price is not None:
+			self.r1Price.Destroy()
+		self.r1Price = None
+		self.r1Buttons = None
 		self.ClearDictionary()
 		self.materialRows = []
 		self.yangParts = []
@@ -397,6 +487,9 @@ class RarityDialog(ui.ScriptWindow):
 		if not player.GetItemIndex(player.INVENTORY, targetSlot):
 			return False
 
+		# Eligibility belongs to the server catalog, not a second client item list.
+		self.Hide()
+		self.openingPreview = mode == MODE_PROMOTION
 		self.mode = mode
 		self.targetSlot = int(targetSlot)
 		self.previewRequestId = 0
@@ -417,18 +510,21 @@ class RarityDialog(ui.ScriptWindow):
 		self.targetGradeText.SetText("")
 		self.chanceText.SetText("")
 		self.bonusText.SetText(FormatRarityBonus(0))
-		self.costText.SetText("")
+		self.__SetCost(None)
 		self.statusText.SetText("")
 		self.__ClearMaterials()
 		self.__ResizeForMaterials(1, False)
 		self.__RefreshTarget()
-		if mode == MODE_PROMOTION:
-			self.SetCenterPosition()
-			self.SetTop()
-			self.Show()
 		return self.__RequestPreview()
 
+	def __ShowPromotion(self):
+		self.openingPreview = False
+		self.SetCenterPosition()
+		self.SetTop()
+		self.Show()
+
 	def Close(self):
+		self.openingPreview = False
 		self.__CloseRerollQuestion()
 		if self.pendingPreview:
 			self.discardPendingPreview = True
@@ -515,7 +611,7 @@ class RarityDialog(ui.ScriptWindow):
 		self.targetGradeText.SetText("")
 		self.chanceText.SetText("")
 		self.bonusText.SetText("")
-		self.costText.SetText("")
+		self.__SetCost(None)
 		self.__ClearMaterials()
 		self.boosterCheck.Hide()
 		self.upgradeArrow.Hide()
@@ -543,6 +639,13 @@ class RarityDialog(ui.ScriptWindow):
 			textLine.SetText("")
 			countLine.SetText("")
 			row.Hide()
+		self.shownCosts = []
+
+	def RefreshOwnedCounts(self):
+		"""The "owned / need" of the shown materials again (the interface calls it when the inventory changes)."""
+		for index, (vnum, count) in enumerate(getattr(self, "shownCosts", [])):
+			if index < len(self.materialRows):
+				ownedcount.Paint(self.materialRows[index][4], ownedcount.Owned(vnum), count)
 
 	def __SetWaiting(self, waiting):
 		self.waiting = bool(waiting)
@@ -581,6 +684,8 @@ class RarityDialog(ui.ScriptWindow):
 			currentGrade = itemrarityaura.InventoryGrade(self.targetSlot)
 		if self.mode == MODE_PROMOTION and currentGrade >= raritypreview.MAXIMUM_GRADE:
 			self.__ShowMaximum(currentGrade)
+			if self.openingPreview:
+				self.__ShowPromotion()
 			return True
 		# A changed booster choice has no authoritative chance until the reply.
 		self.chanceText.SetText("")
@@ -594,7 +699,7 @@ class RarityDialog(ui.ScriptWindow):
 		if not sent:
 			self.__ClearPreview()
 			self.__SetWaiting(False)
-			if self.mode == MODE_REROLL:
+			if self.mode == MODE_REROLL or self.openingPreview:
 				chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.RARITY_REQUEST_FAILED)
 				self.Close()
 			else:
@@ -660,10 +765,14 @@ class RarityDialog(ui.ScriptWindow):
 			return
 		if int(mode) != self.mode:
 			return
-		if self.mode == MODE_PROMOTION and not self.IsShow():
+		if self.mode == MODE_PROMOTION and not self.IsShow() and not self.openingPreview:
 			return
 		if self.mode == MODE_REROLL:
 			self.__HandleHeadlessRerollPreview(result, requestId)
+			return
+		if self.openingPreview and int(result) != getattr(net, "RARITY_RESULT_OK", 0):
+			chat.AppendChat(chat.CHAT_TYPE_INFO, ResultText(result))
+			self.Close()
 			return
 		if int(result) != getattr(net, "RARITY_RESULT_OK", 0):
 			self.__ClearPreview()
@@ -675,6 +784,10 @@ class RarityDialog(ui.ScriptWindow):
 				self.__SetStatusText(ResultText(result))
 			return
 		if not (0 <= int(currentGrade) < int(targetGrade) <= raritypreview.MAXIMUM_GRADE):
+			if self.openingPreview:
+				chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.RARITY_RESULT_INVALID_TARGET)
+				self.Close()
+				return
 			self.__ClearPreview()
 			self.__RefreshTarget(currentGrade)
 			self.__SetStatusText(localeInfo.RARITY_RESULT_INVALID_TARGET)
@@ -716,29 +829,22 @@ class RarityDialog(ui.ScriptWindow):
 		else:
 			self.chanceText.SetText(FormatRarityChance(chanceBp))
 		self.bonusText.SetText(FormatRarityBonus(5 if self.boosterSelected else 0))
-		self.costText.SetText(
-			"%s %s" % (
-				localeInfo.NumberToString(int(yang)),
-				localeInfo.CHEQUE_SYSTEM_UNIT_YANG,
-			)
-		)
+		self.__SetCost(int(yang))
 
 		self.__ClearMaterials()
 		for index, row in enumerate(visibleCosts[:self.MAX_COST_ROWS]):
 			vnum, count = int(row[0]), int(row[1])
-			owned = int(player.GetItemCountByVnum(vnum))
+			owned = ownedcount.Owned(vnum)
 			item.SelectItem(vnum)
 			materialRow, materialSlot, materialFrame, materialText, materialCount = self.materialRows[index]
 			materialRow.SetItem(vnum)
 			materialSlot.SetItemSlot(index, vnum, count)
 			materialSlot.RefreshSlot()
-			hasEnough = HasEnoughRarityMaterial(owned, count)
-			textColor = uiToolTip.ToolTip.TITLE_COLOR if hasEnough else uiToolTip.ToolTip.DISABLE_COLOR
-			countColor = RARITY_MATERIAL_COUNT_COLOR if hasEnough else uiToolTip.ToolTip.DISABLE_COLOR
-			materialText.SetText("%s x%d" % (item.GetItemName(), count))
-			materialCount.SetText("[%d]" % owned)
-			materialText.SetPackedFontColor(textColor)
-			materialCount.SetPackedFontColor(countColor)
+			# the name stays neutral, "owned / need" green / red (root/ownedcount.py)
+			materialText.SetText(item.GetItemName())
+			materialText.SetPackedFontColor(uiToolTip.ToolTip.TITLE_COLOR)
+			ownedcount.Paint(materialCount, owned, count)
+			self.shownCosts.append((vnum, count))
 			if localeInfo.IsARABIC():
 				materialText.SetPosition(
 					materialFrame.GetWidth() - self.MATERIAL_TEXT_PADDING,
@@ -762,6 +868,8 @@ class RarityDialog(ui.ScriptWindow):
 				)
 				materialCount.SetHorizontalAlignRight()
 			materialRow.Show()
+		if self.openingPreview:
+			self.__ShowPromotion()
 
 	def __Confirm(self):
 		if self.waiting or not self.previewRequestId:

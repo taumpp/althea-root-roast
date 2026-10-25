@@ -267,6 +267,8 @@ class SelectCharacterWindow(ui.Window):
 
 	def __LoadQuestionDialog(self, fileName):
 		self.dlgQuestion = ui.ScriptWindow()
+		import uiconfirm
+		uiconfirm.Bind(self.dlgQuestion, "accept", child=True)
 
 		try:
 			pyScrLoader = ui.PythonScriptLoader()

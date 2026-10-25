@@ -13,6 +13,21 @@ if app.ENABLE_DUNGEON_INFO:
 	import uiDungeonTrack
 
 
+def _R1Skin():
+	"""uir1teleport.Skin for the R1 look (default), None for Settings -> "Starý vzhled" or when it cannot load."""
+	try:
+		import uir1teleport
+		if uir1teleport.UseR1():
+			return uir1teleport.Skin()
+	except Exception:
+		try:
+			import uir1
+			uir1.TraceFailure("Teleportace")
+		except Exception:
+			pass
+	return None
+
+
 TELEPORT_SKIN_PATH = "d:/ymir work/ui/game/teleport/"
 MODULAR_SKIN_PATH = TELEPORT_SKIN_PATH + "modular_c_large/"
 SWITCH_SKIN_PATH = "d:/ymir work/ui/game/crimson_ember/teleport_atlas/switch_v10/btn_"
@@ -61,12 +76,20 @@ class AtlasLevelHint(ui.Window):
 	AVAILABLE_HOVER_DELAY = 0.5
 	LOCKED_HOVER_DELAY = 0.0
 
-	def __init__(self, parent):
+	def __init__(self, parent, r1=None):
 		ui.Window.__init__(self)
 		self.SetParent(parent)
 		self.SetSize(self.WIDTH, self.HEIGHT)
 		self.AddFlag("not_pick")
 		self.AddFlag("float")
+		self.r1Face = None
+		if r1:
+			# R1: tooltip frame, the original level icon, the label and the level in gold (uir1teleport.LevelHint).
+			import uir1teleport
+			self.r1Face = uir1teleport.LevelHint(self, r1.kit, LEVEL_ICON_PATH, u"Přístup od úrovně")
+			self.background = self.levelIcon = self.label = self.value = None
+			self.Hide()
+			return
 
 		self.background = ui.ExpandedImageBox()
 		self.background.SetParent(self)
@@ -107,6 +130,9 @@ class AtlasLevelHint(ui.Window):
 		ui.Window.__del__(self)
 
 	def SetLevel(self, required_level, locked):
+		if self.r1Face:
+			self.r1Face.SetLevel(required_level)
+			return
 		self.value.SetText(u"%d" % int(required_level))
 
 	def ShowHint(self):
@@ -118,6 +144,7 @@ class AtlasLevelHint(ui.Window):
 
 	def Destroy(self):
 		self.Hide()
+		self.r1Face = None
 		self.background = None
 		self.levelIcon = None
 		self.label = None
@@ -242,14 +269,20 @@ class TeleportDestinationDialog(ui.Window):
 	ROW_STEP = 27
 	BASE_HEIGHT = 46
 
-	def __init__(self, owner):
+	def __init__(self, owner, r1=None):
 		ui.Window.__init__(self)
 		self.owner = owner
 		self.rows = []
+		self.r1 = r1
 		self.SetSize(self.WIDTH, self.BASE_HEIGHT + 4 * self.ROW_STEP)
 		self.AddFlag("float")
 
-		self.board = ui.BoardWithTitleBar()
+		if r1:
+			# R1: dialog frame with the title, vein and X; the choices are R1 buttons (uir1teleport).
+			import uir1teleport
+			self.board = uir1teleport.DialogBoard(r1.kit, self.WIDTH, self.BASE_HEIGHT + 4 * self.ROW_STEP)
+		else:
+			self.board = ui.BoardWithTitleBar()
 		self.board.SetParent(self)
 		self.board.SetPosition(0, 0)
 		self.board.SetSize(self.WIDTH, self.BASE_HEIGHT + 4 * self.ROW_STEP)
@@ -263,8 +296,12 @@ class TeleportDestinationDialog(ui.Window):
 		row_count = len(choices)
 		while len(self.rows) < row_count:
 			index = len(self.rows)
-			row = CrimsonLocationRow(self.__RequestTeleport)
-			row.SetParent(self.board)
+			if self.r1:
+				import uir1teleport
+				row = uir1teleport.LocationRow(self.board, self.r1.kit, self.__RequestTeleport, self.ROW_WIDTH)
+			else:
+				row = CrimsonLocationRow(self.__RequestTeleport)
+				row.SetParent(self.board)
 			row.SetPosition(self.ROW_X, 38 + index * self.ROW_STEP)
 			row.Hide()
 			self.rows.append(row)
@@ -306,6 +343,8 @@ class TeleportDestinationDialog(ui.Window):
 			self.board.SetCloseEvent(None)
 		for row in self.rows:
 			row.callback = None
+			if self.r1:
+				row.Destroy()
 		self.owner = None
 		self.rows = []
 		self.board = None
@@ -329,6 +368,7 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 	MAP_X = (BOARD_WIDTH - teleportmapdata.MAP_WIDTH) // 2
 	MAP_Y = 8
 	MAP_HEIGHT = teleportmapdata.MAP_HEIGHT + teleportmapdata.MAP_OFFSET_Y
+	r1 = None         # uir1teleport.Skin of the R1 look, None = the original look
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
@@ -362,13 +402,51 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.compactTitleBar = screen_width < self.WIDTH + 8
 		self.windowWidth = self.WIDTH if self.mapScale >= 1.0 else self.BOARD_X + self.__Scaled(self.BOARD_WIDTH) + 4
 		self.windowHeight = self.OCEAN_Y + self.__Scaled(self.OCEAN_HEIGHT)
-		self.__BuildWindow()
+		# R1 look (uir1teleport) unless Settings -> "Starý vzhled"; a failure builds the original window instead.
+		self.r1 = _R1Skin()
+		if self.r1:
+			try:
+				self.__BuildWindow()
+			except Exception:
+				import uir1teleport
+				uir1teleport.Trace("Teleportace")
+				self.__DropR1Build()
+				self.r1 = None
+				self.__BuildWindow()
+		else:
+			self.__BuildWindow()
 
 	def __del__(self):
 		ui.ScriptWindow.__del__(self)
 
 	def __Scaled(self, value):
 		return int(round(value * self.mapScale))
+
+	def __DropR1Build(self):
+		"""Hides and forgets a half-built R1 window, so the original one can be built in its place."""
+		for name in ("mapSwitch", "dungeonSwitch", "board", "destinationDialog"):
+			widget = getattr(self, name, None)
+			if widget:
+				widget.Hide()
+		for name in ("mapSwitch", "dungeonSwitch"):
+			widget = getattr(self, name, None)
+			if widget and hasattr(widget, "Destroy"):
+				widget.Destroy()
+		if self.dungeonPage:
+			try:
+				self.dungeonPage.ClosePage()
+				self.dungeonPage.Destroy()
+			except Exception:
+				pass
+		self.mapRegionImages = {}
+		self.mapRegionStates = {}
+		self.mapPortalImages = {}
+		self.mapPortalStates = {}
+		self.mapNameplates = {}
+		self.mapSharedImages = []
+		self.mapShadowOverlay = self.mapHoverOverlay = self.mapSelectedOverlay = None
+		self.mapInteraction = self.levelHint = self.dungeonPage = self.listPage = self.listToggle = None
+		self.destinationDialog = self.board = self.mapSwitch = self.dungeonSwitch = None
 
 	def __ContentY(self, value):
 		return self.OCEAN_Y + self.__Scaled(value - self.OCEAN_Y)
@@ -390,6 +468,10 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.board.SetTitleName("Teleportace")
 		self.board.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.board.Show()
+		if self.r1:
+			# R1 background under the map (the frame edges and the header follow over it in FinishFrame).
+			self.r1.BeginFrame(self.board, self.__Scaled(self.BOARD_WIDTH), self.windowHeight, "Teleportace",
+				ui.__mem_func__(self.Close))
 
 		self.ocean = ui.ExpandedImageBox()
 		self.ocean.SetParent(self.board)
@@ -400,18 +482,25 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.ocean.Show()
 
 		self.__BuildMapAtlas()
-		self.frameOverlay = ui.ExpandedImageBox()
-		self.frameOverlay.SetParent(self.board)
-		self.frameOverlay.AddFlag("not_pick")
-		self.frameOverlay.AddFlag("float")
-		self.frameOverlay.SetPosition(self.OCEAN_X, self.OCEAN_Y)
-		self.frameOverlay.LoadImage(MODULAR_SKIN_PATH + "shared/frame_overlay.png")
-		self.frameOverlay.SetScale(self.mapScale, self.mapScale)
+		if self.r1:
+			# R1 draws its own frame over the map (uir1teleport.AtlasFrame): no old double frame overlay.
+			self.frameOverlay = ui.Window()
+			self.frameOverlay.SetParent(self.board)
+			self.frameOverlay.AddFlag("not_pick")
+			self.frameOverlay.AddFlag("float")
+		else:
+			self.frameOverlay = ui.ExpandedImageBox()
+			self.frameOverlay.SetParent(self.board)
+			self.frameOverlay.AddFlag("not_pick")
+			self.frameOverlay.AddFlag("float")
+			self.frameOverlay.SetPosition(self.OCEAN_X, self.OCEAN_Y)
+			self.frameOverlay.LoadImage(MODULAR_SKIN_PATH + "shared/frame_overlay.png")
+			self.frameOverlay.SetScale(self.mapScale, self.mapScale)
 		self.frameOverlay.Show()
 		self.frameOverlay.SetTop()
 		self.board.titleBar.AddFlag("float")
 		self.board.titleBar.SetTop()
-		self.destinationDialog = TeleportDestinationDialog(self)
+		self.destinationDialog = TeleportDestinationDialog(self, self.r1)
 		self.destinationDialog.SetParent(self)
 		self.destinationDialog.Hide()
 		if app.ENABLE_DUNGEON_INFO:
@@ -423,16 +512,23 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.listPage.SetParent(self.board)
 		self.listPage.SetPosition(0, self.OCEAN_Y)
 		self.listPage.Hide()
-		self.listToggle = ui.CheckBox_N()
-		self.listToggle.SetParent(self.board)
-		self.listToggle.AddFlag("float")
-		self.listToggle.SetPosition(self.__Scaled(614), self.__ContentY(39))
-		self.listToggle.text.SetFontName(fontconfig.FontForRole(fontconfig.ROLE_BODY, 0))
-		self.listToggle.text.AddFlag("not_pick")
-		self.listToggle.SetText("Zobrazit jako seznam")
-		self.listToggle.SetTextColor(0xffe8e0cf)
+		if self.r1:
+			# R1 check box with the whole label in the header row, left of the title, no frame (uir1teleport.ListToggle,
+			# the CheckBox_N API; it places itself).
+			self.listToggle = self.r1.ListToggle(self.board, "Zobrazit jako seznam", self.listEnabled)
+		else:
+			self.listToggle = ui.CheckBox_N()
+			self.listToggle.SetParent(self.board)
+			self.listToggle.AddFlag("float")
+			self.listToggle.SetPosition(self.__Scaled(614), self.__ContentY(39))
+			self.listToggle.text.SetFontName(fontconfig.FontForRole(fontconfig.ROLE_BODY, 0))
+			self.listToggle.text.AddFlag("not_pick")
+			self.listToggle.SetText("Zobrazit jako seznam")
+			self.listToggle.SetTextColor(0xffe8e0cf)
 		self.listToggle.SetChecked(self.listEnabled)
 		self.listToggle.SetEvent(ui.__mem_func__(self.ToggleListView))
+		if self.r1:
+			self.r1.frame.Finish()
 		self.__ShowMaps()
 
 	def __BuildMapAtlas(self):
@@ -496,7 +592,7 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.mapInteraction.SetSize(self.__Scaled(teleportmapdata.MAP_WIDTH), self.__Scaled(teleportmapdata.MAP_HEIGHT))
 		self.mapInteraction.Show()
 
-		self.levelHint = AtlasLevelHint(self.mapPanel)
+		self.levelHint = AtlasLevelHint(self.mapPanel, self.r1)
 
 	def __CreateMapOverlay(self):
 		overlay = ui.ExpandedImageBox()
@@ -507,12 +603,19 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		return overlay
 
 	def __BuildSwitches(self):
-		self.mapSwitch = AtlasSwitchButton(self.__ShowMaps, "Mapy", "map")
+		if self.r1:
+			# R1 plates with the original icons (uir1teleport.SwitchPlate, the AtlasSwitchButton API).
+			self.mapSwitch = self.r1.Switch(self, self.__ShowMaps, "Mapy", "map")
+		else:
+			self.mapSwitch = AtlasSwitchButton(self.__ShowMaps, "Mapy", "map")
 		self.mapSwitch.SetParent(self)
 		self.mapSwitch.SetPosition(self.BOARD_X - 30, 71)
 		self.mapSwitch.Show()
 
-		self.dungeonSwitch = AtlasSwitchButton(self.__ShowDungeons, "Dungeony", "dungeon")
+		if self.r1:
+			self.dungeonSwitch = self.r1.Switch(self, self.__ShowDungeons, "Dungeony", "dungeon")
+		else:
+			self.dungeonSwitch = AtlasSwitchButton(self.__ShowDungeons, "Dungeony", "dungeon")
 		self.dungeonSwitch.SetParent(self)
 		self.dungeonSwitch.SetPosition(self.BOARD_X - 30, 105)
 		self.dungeonSwitch.Show()
@@ -598,6 +701,11 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 			self.levelHint.Destroy()
 		if self.destinationDialog:
 			self.destinationDialog.Destroy()
+		if self.r1:
+			for switch in (self.mapSwitch, self.dungeonSwitch):
+				if switch:
+					switch.Destroy()
+			self.r1 = None
 		self.ClearDictionary()
 		self.mapRegionImages = {}
 		self.mapRegionStates = {}
@@ -644,6 +752,9 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.frameOverlay.SetTop()
 		self.listToggle.SetTop()
 		self.board.titleBar.SetTop()
+		if self.r1:
+			self.r1.Raise()
+			self.listToggle.SetTop()		# the R1 check box lies IN the header row: above the header and its drag strip
 
 	def ShowMaps(self):
 		self.__ShowMaps()
@@ -679,6 +790,8 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 		self.frameOverlay.Hide()
 		self.dungeonPage.OpenPage()
 		self.board.titleBar.SetTop()
+		if self.r1:
+			self.r1.Raise()
 
 	def RefreshDungeons(self):
 		if self.dungeonPage:
@@ -823,6 +936,10 @@ class TeleportAtlasWindow(ui.ScriptWindow):
 	def __RequestSelectedDestination(self, destination_id):
 		if not destination_id:
 			return
-		net.SendChatPacket("/teleport_atlas %s" % destination_id)
 		self.destinationDialog.Close()
 		self.Close()
+		# A running passage trial fails on the warp: the player confirms first.
+		def send():
+			net.SendChatPacket("/teleport_atlas %s" % destination_id)
+		import passagetrialstate
+		passagetrialstate.ConfirmTeleport(send)

@@ -6,6 +6,10 @@ ACTION_PICK = "pick"
 
 MULTIPLE_SELECT_FLOW_ENABLED = False
 
+# Exorcism Scroll and Concentrated Reading are consumed only by the
+# skill reading windows (character and Buffi). Using them directly does nothing.
+READING_SUPPORT_VNUMS = (71001, 71094)
+
 
 def ResolveLeftClick(altPressed, shiftPressed, ctrlPressed):
 	if altPressed and shiftPressed:
@@ -21,3 +25,7 @@ def ResolveLeftClick(altPressed, shiftPressed, ctrlPressed):
 
 def IsMultipleSelectEnabled(binaryCapability):
 	return bool(binaryCapability and MULTIPLE_SELECT_FLOW_ENABLED)
+
+
+def IsReadingSupportItem(itemVnum):
+	return itemVnum in READING_SUPPORT_VNUMS

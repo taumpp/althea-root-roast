@@ -39,7 +39,7 @@ class CaptchaReadyPulse(ui.Window):
 			return
 		x, y = self.GetGlobalPosition()
 		for inset in (1, 2):
-			grp.SetColor(grp.GenerateColor(0.94, 0.80, 0.47,
+			grp.SetColor(grp.GenerateColor(0.96, 0.16, 0.13,
 				0.55 * remaining / self.DURATION / inset))
 			grp.RenderBox(int(x + 252 * SCENE_SCALE) - inset,
 				int(y + 66 * SCENE_SCALE) - inset,
@@ -246,7 +246,7 @@ class CaptchaWindow(ui.BoardWithTitleBar):
 			minutes, seconds = divmod(max(0, self.retryAt - now), 60)
 			self.timer.SetText("Další pokus za %02d:%02d" % (minutes, seconds))
 		elif self.submissionPending or now >= self.deadlineAt:
-			self.timer.SetText("Ověřování…")
+			self.timer.SetText("Ověřování...")
 		else:
 			minutes, seconds = divmod(max(0, self.deadlineAt - now), 60)
 			self.timer.SetText("Čas na dokončení: %02d:%02d" % (minutes, seconds))
@@ -348,6 +348,15 @@ class CaptchaDragCanvas(ui.ExpandedImageBox):
 		point = self.Point()
 		if point is None:
 			return True
+		if self.owner.IsClickKind():
+			# one click is the whole answer; only the server judges it.
+			now = app.GetTime()
+			if now - self.lastPickAt < 0.30:
+				return True
+			self.lastPickAt = now
+			self.requestAt = now
+			self.owner.SendClick(point)
+			return True
 		self.down = True
 		if self.held:
 			return True  # Second click places the already selected tile.
@@ -400,7 +409,7 @@ class CaptchaDragCanvas(ui.ExpandedImageBox):
 			return
 		active = self.start is not None or self.held or self.awaiting
 		self.ClearPointer()
-		if self.original:
+		if self.original and self.owner.CanShowScene():
 			self.Paint(self.original)
 		if active:
 			self.cancelling = True
@@ -415,6 +424,9 @@ class CaptchaDragCanvas(ui.ExpandedImageBox):
 		self.FollowPointer()
 		if self.awaiting and app.GetTime() - self.requestAt > 2.0:
 			self.Cancel()
+		elif (self.owner and self.owner.IsClickKind() and self.owner.submissionPending and
+			app.GetTime() - self.requestAt > 2.0):
+			self.owner.submissionPending = False  # no reply: the same image can be clicked again
 
 	def Destroy(self):
 		self.ClearPointer()
@@ -424,24 +436,115 @@ class CaptchaDragCanvas(ui.ExpandedImageBox):
 		self.owner = None
 
 
+# R1 look A "Věrná" (): the original layout in the R1 frame, steps by brightness,
+# the countdown on the right, attempts as dots. Colours are R1 tokens as floats.
+INK = (0.93, 0.90, 0.85)
+INK_DIM = (0.75, 0.71, 0.67)
+MUTED = (0.57, 0.55, 0.52)
+DOT_ON = 0xFFD30D0E
+DOT_OFF = 0xFF383434
+
+# Click kinds named by CaptchaV4Stage (kind * 100 + step * 10 + steps): presentation only.
+KIND_RECIPE, KIND_COUNT, KIND_ROTATE, KIND_ODD = 5, 6, 7, 8
+KIND_ARROW, KIND_LINES, KIND_SHARD, KIND_DICE, KIND_SEAL = 9, 10, 11, 12, 13
+KIND_GEARS, KIND_COMPASS, KIND_SHADOWS = 14, 15, 16
+KIND_TEXT = {
+	KIND_RECIPE: ("Krok %d ze %d", "Klikej na suroviny v pořadí podle receptu nahoře.",
+		"Na stole jsou i podobné suroviny. Kliknutí se nedá vrátit."),
+	KIND_COUNT: ("Kolo %d ze %d", "Spočítej předmět z rámečku a klikni na správné číslo.",
+		"Předměty se překrývají a jsou různě natočené."),
+	KIND_ROTATE: ("Kolo %d ze %d", "Otoč runu na kotouči, aby stála jako vzor.",
+		"Šipkou otočíš runu o 30°. Pak klikni na tlačítko s fajfkou."),
+	KIND_ODD: ("Kolo %d ze %d", "Klikni na předmět, který mezi ostatní nepatří.",
+		"Ostatní předměty jsou stejného druhu, jen jinak natočené."),
+	KIND_ARROW: ("Kolo %d ze %d", "Na který předmět míří šipka?",
+		"Ostatní šipky jsou návnady. Klikni na předmět, na který míří."),
+	KIND_LINES: ("Kolo %d ze %d", "Která ryba visí na vlasci s velkým splávkem s bílým kroužkem?",
+		"Vlasce mají stejnou barvu a kříží se. Klikni na rybu."),
+	KIND_SHARD: ("Kolo %d ze %d", "Který úlomek přesně zapadne do díry ve skále?",
+		"Úlomky jsou natočené. Rozhoduje tvar zubaté hrany."),
+	KIND_DICE: ("Kolo %d ze %d", "Sečti oka na horních stranách kostek a klikni na součet.",
+		"Oka na bocích kostek se nepočítají."),
+	KIND_SEAL: ("Kolo %d ze %d", "Kterým prstenem byla otištěna pečeť?",
+		"Otisk je zrcadlový. Prsteny i pečeť jsou natočené."),
+	KIND_GEARS: ("Kolo %d ze %d", "Kam se točí kolo s bílou tečkou? Klikni na směr.",
+		"Rudá šipka ukazuje první kolo. Kolo bez záběru se netočí."),
+	KIND_COMPASS: ("Kolo %d ze %d", "Který předmět leží na sever (S) od stanu?",
+		"Kompas je pokaždé jinak natočený. Klikni na předmět."),
+	KIND_SHADOWS: ("Kolo %d ze %d", "Který předmět vrhá stín špatným směrem?",
+		"Stíny míří od pochodně. Klikni na předmět."),
+}
+# Owner 21. 10.: one round per puzzle (the server sends steps = 1). No "Kolo 1 ze 1": the
+# heading is neutral and the recipe asks for one ingredient. Older three-round stages keep
+# the round copy above.
+SINGLE_HEADING = "Ověření přítomnosti"
+SINGLE_INSTRUCTION = {
+	KIND_RECIPE: "Klikni na surovinu z receptu nahoře.",
+}
+# Arrow kind (owner 11. 10.): the stage names the asked colour as (colour + 1) * 10000.
+# The word is drawn in the arrow's colour. Owner 21. 10. (colour-blind players): the task
+# names the head shape first, the colour only in brackets. Heads as the server draws
+# them, in the same order 0 red .. 4 white.
+ARROW_COLOURS = (
+	("RUDÁ", "FFF0302A", "s hrotem do V"),
+	("MODRÁ", "FF8C88FF", "s plným trojúhelníkem"),
+	("ZELENÁ", "FF6DB265", "s kosočtvercem"),
+	("ZLATÁ", "FFDEC86F", "s dvojitým hrotem"),
+	("BÍLÁ", "FFFFFFFF", "s kuličkou"),
+)
+ARROW_INSTRUCTION = "Kam ukazuje šipka %s (|c%s%s|r)?"
+# A one-line hint under the task, only where the picture alone could mislead. Never the answer.
+KIND_HINT = {}  # owner 11. 10.: the compass task itself says "na sever (S)"; no hint line now
+CHEST_HELP = "Táhni myší, nebo klikni na předmět a potom na cíl."
+CHEST_INSTRUCTION = "Odkryj celý čtverec truhly, pak ji vlož do vaku."
+# Owner 11. 10.: no image means no task copy. The cooldown shows only neutral text;
+# the countdown itself is the timer on the right ("Další pokus za mm:ss").
+WAIT_HEADING = "Ověření přítomnosti"
+WAIT_INSTRUCTION = "Po odpočtu dostaneš nový obrázek."
+
+
 class CaptchaUncoverWindow(CaptchaWindow):
 	def __init__(self):
 		CaptchaWindow.__init__(self)
 		self.canvas.Destroy()
 		self.canvas = CaptchaDragCanvas(self)
 		self.SetSize(532, 402)
+		self.kind = None
 		self.heading.SetHorizontalAlignLeft()
 		self.heading.SetPosition(26, 39)
+		self.heading.SetText("1  Odkryj truhlu")
+		self.stepTwo = self.Text("2  Vlož ji do vaku", 136, 39, True)
+		self.stepTwo.SetHorizontalAlignLeft()
 		self.timer.SetHorizontalAlignRight()
-		self.timer.SetPosition(506, 41)
-		self.timer.SetFontColor(0.70, 0.68, 0.63)
+		self.timer.SetPosition(506, 39)
+		self.timer.SetFontName(fontconfig.FontForRole(fontconfig.ROLE_SECTION))
+		self.timer.SetFontColor(*INK)
 		self.instruction.SetPosition(266, 61)
-		self.instruction.SetText("Odkryj celý čtverec truhly, pak ji vlož do vaku.")
+		self.instruction.SetText(CHEST_INSTRUCTION)
+		self.hint = self.Text("", 266, 68)
+		self.hint.SetFontColor(*INK_DIM)
+		self.hint.Hide()
+		self.instruction.SetFontColor(*INK)
 		self.canvas.SetPosition(26, 82)
-		self.feedback.SetPosition(266, 356)
-		self.help.SetPosition(266, 378)
-		self.help.SetText("Táhni myší, nebo klikni na předmět a potom na cíl.")
-		self.help.SetFontColor(0.70, 0.68, 0.63)
+		self.feedback.SetPosition(266, 358)
+		self.feedback.SetFontColor(0.96, 0.16, 0.13)
+		self.help.SetHorizontalAlignLeft()
+		self.help.SetPosition(26, 378)
+		self.help.SetText(CHEST_HELP)
+		self.help.SetFontColor(*MUTED)
+		self.attemptsLabel = self.Text("Pokusy", 450, 378)
+		self.attemptsLabel.SetHorizontalAlignRight()
+		self.attemptsLabel.SetFontColor(*MUTED)
+		self.attemptDots = []
+		for index in range(3):
+			dot = ui.Bar()
+			dot.SetParent(self)
+			dot.SetPosition(462 + index * 14, 383)
+			dot.SetSize(7, 7)
+			dot.SetColor(DOT_ON)
+			dot.AddFlag("not_pick")
+			dot.Show()
+			self.attemptDots.append(dot)
 		self.stage = None
 		self.readyPulse = CaptchaReadyPulse(self.canvas)
 		self.bagLabels = []
@@ -451,6 +554,83 @@ class CaptchaUncoverWindow(CaptchaWindow):
 			label.SetPosition(int(282 * SCENE_SCALE), int(y * SCENE_SCALE))
 			label.SetFontColor(0.70, 0.68, 0.63)
 			self.bagLabels.append(label)
+		# No overlay labels for click kinds: every scene places its parts differently,
+		# so the raster carries everything (the rune's confirm button has a check mark).
+		self.kindLabels = []
+		self.ShowChestCopy()
+		self.r1frame = None
+		try:
+			import uir1frame
+			self.r1frame = uir1frame.Dress(self, dict(board=None, close=False))
+		except Exception:
+			self.r1frame = None
+
+	def IsClickKind(self):
+		return self.kind in KIND_TEXT
+
+	def ShowChestCopy(self, stage=None):
+		self.kind = None
+		self.heading.SetText("1  Odkryj truhlu")
+		self.heading.SetFontColor(*(INK if stage != 2 else MUTED))
+		self.stepTwo.SetFontColor(*(INK if stage == 2 else MUTED))
+		self.stepTwo.Show()
+		self.help.SetText(CHEST_HELP)
+		self.instruction.SetPosition(266, 61)
+		self.hint.Hide()
+		for label in self.bagLabels:
+			label.Show()
+		for label in self.kindLabels:
+			label.Hide()
+
+	def ShowWaitCopy(self):
+		"""Cooldown or error: no scene is shown, so no chest or click-kind copy either."""
+		self.kind = None
+		self.stage = None
+		self.readyPulse.Stop()
+		self.heading.SetText(WAIT_HEADING)
+		self.heading.SetFontColor(*INK)
+		self.stepTwo.Hide()
+		self.instruction.SetPosition(266, 61)
+		self.instruction.SetText(WAIT_INSTRUCTION
+			if self.status == app.CAPTCHA_STATUS_COOLDOWN else "")
+		self.hint.Hide()
+		self.help.SetText("")
+		for label in self.bagLabels:
+			label.Hide()
+		for label in self.kindLabels:
+			label.Hide()
+
+	def ShowKindCopy(self, kind, step, steps, colour=0):
+		heading, instruction, help = KIND_TEXT[kind]
+		if steps <= 1:
+			heading = SINGLE_HEADING
+			instruction = SINGLE_INSTRUCTION.get(kind, instruction)
+		if kind == KIND_ARROW and 1 <= colour <= len(ARROW_COLOURS):
+			word, tint, shape = ARROW_COLOURS[colour - 1]
+			instruction = ARROW_INSTRUCTION % (shape, tint, word)
+		self.kind = kind
+		self.readyPulse.Stop()
+		self.heading.SetText(heading % (step, steps) if "%" in heading else heading)
+		self.heading.SetFontColor(*INK)
+		self.stepTwo.Hide()
+		self.instruction.SetText(instruction)
+		self.help.SetText(help)
+		hint = KIND_HINT.get(kind, "")
+		self.hint.SetText(hint)
+		if hint:
+			self.instruction.SetPosition(266, 54)  # the hint takes the line above the scene
+			self.hint.Show()
+		else:
+			self.instruction.SetPosition(266, 61)
+			self.hint.Hide()
+		for label in self.bagLabels:
+			label.Hide()
+		for label in self.kindLabels:
+			label.Hide()
+
+	def SetAttempts(self, remaining):
+		for index, dot in enumerate(self.attemptDots):
+			dot.SetColor(DOT_ON if index < remaining else DOT_OFF)
 
 	def SetStage(self, sessionId, generation, stage):
 		"""The server repeats only the public visual step after its snapshot."""
@@ -458,12 +638,22 @@ class CaptchaUncoverWindow(CaptchaWindow):
 			sessionId, generation, stage = int(sessionId), int(generation), int(stage)
 		except (TypeError, ValueError, OverflowError):
 			return
-		if (stage not in (1, 2) or not sessionId or not generation or
+		colour, base = stage // 10000, stage % 10000
+		kind, step, steps = base // 100, base // 10 % 10, base % 10
+		click = (kind in KIND_TEXT and 1 <= step <= steps <= 3 and (colour == 0 or
+			(kind == KIND_ARROW and colour <= len(ARROW_COLOURS))))
+		if ((stage not in (1, 2) and not click) or not sessionId or not generation or
 			(sessionId, generation) != (self.sessionId, self.generation) or
 			not self.IsShow() or not self.canvas or not self.canvas.IsShow() or
 			self.status not in (app.CAPTCHA_STATUS_PENDING, app.CAPTCHA_STATUS_WRONG,
 				app.CAPTCHA_STATUS_HELD) or self.deadlineAt <= app.GetGlobalTimeStamp()):
 			return
+		if click:
+			self.stage = stage
+			self.ShowKindCopy(kind, step, steps, colour)
+			return
+		if self.IsClickKind():
+			return  # a chest hint never reaches a click-kind puzzle of this session
 		if stage == 2:
 			self.instruction.SetText("Přesuň truhlu do vaku.")
 			if self.stage != 2:
@@ -472,8 +662,9 @@ class CaptchaUncoverWindow(CaptchaWindow):
 			self.instruction.SetText("Odkryj celý čtverec truhly.")
 			self.readyPulse.Stop()
 		self.stage = stage
+		self.ShowChestCopy(stage)
 		for label in self.bagLabels:
-			label.SetFontColor(*((0.94, 0.80, 0.47) if stage == 2 else (0.70, 0.68, 0.63)))
+			label.SetFontColor(*(INK if stage == 2 else (0.70, 0.68, 0.63)))
 
 	def OnUpdate(self):
 		if not self.IsShow():
@@ -484,7 +675,7 @@ class CaptchaUncoverWindow(CaptchaWindow):
 		elif self.status == app.CAPTCHA_STATUS_COOLDOWN:
 			text = "Další pokus za %02d:%02d" % divmod(max(0, self.retryAt - now), 60)
 		elif now >= self.deadlineAt:
-			text = "Čekám na server…"
+			text = "Načítání..."
 			self.readyPulse.Stop()
 		else:
 			# Keep time visible during PICK/MOVE round trips instead of flickering
@@ -501,6 +692,15 @@ class CaptchaUncoverWindow(CaptchaWindow):
 		CaptchaWindow.Destroy(self)
 		self.readyPulse = None
 		self.bagLabels = []
+		self.kindLabels = []
+		self.attemptDots = []
+		self.attemptsLabel = self.stepTwo = self.hint = None
+		self.r1frame = None
+
+	def CanShowScene(self):
+		"""Only a live puzzle repaints its last scene; never a cooldown or an error."""
+		return self.status in (app.CAPTCHA_STATUS_PENDING, app.CAPTCHA_STATUS_WRONG,
+			app.CAPTCHA_STATUS_HELD)
 
 	def CanInteract(self):
 		return (self.IsShow() and self.status in (app.CAPTCHA_STATUS_PENDING,
@@ -512,12 +712,24 @@ class CaptchaUncoverWindow(CaptchaWindow):
 		if status != app.CAPTCHA_STATUS_HELD:
 			if sessionId != self.sessionId:
 				self.stage = None
+				self.kind = None
 			self.readyPulse.Stop()
-			self.instruction.SetText("Odkryj celý čtverec truhly, pak ji vlož do vaku.")
-			for label in self.bagLabels:
-				label.SetFontColor(0.70, 0.68, 0.63)
+			image = status in (app.CAPTCHA_STATUS_PENDING, app.CAPTCHA_STATUS_WRONG)
+			if not image:
+				# The previous scene no longer exists on the server: forget it, so no
+				# Esc/right-click/failed send can paint it back during the cooldown.
+				self.canvas.ClearPointer()
+				self.canvas.original = None
+			elif not self.IsClickKind():
+				self.instruction.SetText(CHEST_INSTRUCTION)
+				self.ShowChestCopy()
+				for label in self.bagLabels:
+					label.SetFontColor(0.70, 0.68, 0.63)
+			self.SetAttempts(attemptsRemaining)
 			CaptchaWindow.OpenChallenge(self, status, attemptsRemaining, sessionId,
 				generation, deadlineAt, retryAt, pixels)
+			if not image or self.status == app.CAPTCHA_STATUS_ERROR:
+				self.ShowWaitCopy()
 			return
 		if (sessionId, generation) != (self.sessionId, self.generation):
 			return
@@ -531,6 +743,11 @@ class CaptchaUncoverWindow(CaptchaWindow):
 			self.canvas.ClearPointer()
 			self.feedback.SetText("Obrázek nelze zobrazit. Zkus se znovu přihlásit.")
 
+	def SendClick(self, point):
+		"""A click-kind answer: PICK at the clicked raster point, nothing else."""
+		if self.SendPointer(3, point):
+			self.canvas.ClearPointer()
+
 	def SendPointer(self, action, start=(0, 0), end=(0, 0)):
 		self.submissionPending = True
 		try:
@@ -541,7 +758,7 @@ class CaptchaUncoverWindow(CaptchaWindow):
 		if not sent:
 			self.submissionPending = False
 			self.canvas.ClearPointer()
-			if self.canvas.original:
+			if self.canvas.original and self.CanShowScene():
 				self.canvas.Paint(self.canvas.original)
 			self.feedback.SetText("Tah se nepodařilo odeslat. Zkus to znovu.")
 		return sent

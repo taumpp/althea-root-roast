@@ -6,6 +6,7 @@ import net
 import player
 import resonanceuihelpers
 import ui
+import ownedcount
 
 
 RESONANCE_SLOT_COUNT = 3
@@ -32,6 +33,16 @@ RESONANCE_RESULT_MESSAGES = {
 	getattr(net, "RESONANCE_RESULT_NOT_ENOUGH_KEYS", 14): ("RESONANCE_NOT_ENOUGH_KEYS", "You do not have enough Resonance Keys."),
 	getattr(net, "RESONANCE_RESULT_NOT_ENOUGH_YANG", 15): ("RESONANCE_NOT_ENOUGH_YANG", "You do not have enough Yang."),
 }
+
+
+def _YangText(amount):
+	"""The cost as the one R1 yang price of the client ("1.000.000 Yang", root/uir1price.py
+	) beside the window's own coin; "Starý vzhled" keeps localeInfo.NumberToMoneyString."""
+	try:
+		import uir1price
+		return uir1price.Text(amount, lambda: localeInfo.NumberToMoneyString(amount))
+	except Exception:
+		return localeInfo.NumberToMoneyString(amount)
 
 
 def _Locale(key, fallback):
@@ -69,14 +80,6 @@ def _HasSealDestination(vnum):
 	return False
 
 
-def _CountInventoryVnum(vnum):
-	count = 0
-	for cell in range(player.INVENTORY_SLOT_COUNT):
-		if int(player.GetItemIndex(player.INVENTORY, cell)) == int(vnum):
-			count += int(player.GetItemCount(player.INVENTORY, cell))
-	return count
-
-
 class ResonanceUnlockDialog(ui.ScriptWindow):
 	YANG_BAR_IMAGE = "d:/ymir work/ui/game/crimson_ember/inventory/currency_footer.png"
 	YANG_BAR_X = 38
@@ -86,6 +89,8 @@ class ResonanceUnlockDialog(ui.ScriptWindow):
 
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.targetWindow = player.INVENTORY
 		self.targetCell = -1
 		self.targetInstanceId = 0
@@ -198,10 +203,10 @@ class ResonanceUnlockDialog(ui.ScriptWindow):
 		self.materialSlot.RefreshSlot()
 		item.SelectItem(self.keyVnum)
 		self.materialName.SetText(item.GetItemName())
-		self.materialCount.SetText(
-			"%d / %d" % (_CountInventoryVnum(self.keyVnum), int(requiredKeyCount))
-		)
-		self.costText.SetText(localeInfo.NumberToMoneyString(int(yangCost)))
+		# "owned / need" green / red (root/ownedcount.py)
+		self.requiredKeyCount = int(requiredKeyCount)
+		ownedcount.Paint(self.materialCount, ownedcount.Owned(self.keyVnum), self.requiredKeyCount)
+		self.costText.SetText(_YangText(int(yangCost)))
 		self.slotText.SetText(u"%d. %s -> %s" % (
 			self.targetSlot + 1,
 			_Locale("RESONANCE_LOCKED_SLOT", "Locked"),
@@ -210,6 +215,11 @@ class ResonanceUnlockDialog(ui.ScriptWindow):
 		self.SetTop()
 		self.Show()
 		return True
+
+	def RefreshOwnedCounts(self):
+		"""The keys' "owned / need" again (the interface calls it when the inventory changes)."""
+		if getattr(self, "keyVnum", 0) and getattr(self, "requiredKeyCount", 0):
+			ownedcount.Paint(self.materialCount, ownedcount.Owned(self.keyVnum), self.requiredKeyCount)
 
 	def Close(self):
 		self.Hide()

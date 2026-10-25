@@ -19,7 +19,10 @@ class ServerCommandParser(object):
 			"newyear_boom" : self.__XMasBoom_Enable,
 			"item_mall" : self.__ItemMall_Open,
 			"ResonanceSealValuesV1" : self.__PreserveSealValues,
+			"AltheaMeteorLockV1" : self.__PreserveMeteorLock,
+			"AltheaMeteorLockRemoveV1" : self.__PreserveMeteorRemove,
 			"PetAlbumCapabilityV1" : self.__PreserveAlbumCapability,
+			"DungeonEquipmentBindingOfferV1" : self.__PreserveDungeonEquipmentBindingOffer,
 			# Only state is kept while loading; no window exists to answer.
 			"FeatureAvailabilityV1" : featureavailability.receiver.Receive,
 		}
@@ -42,6 +45,16 @@ class ServerCommandParser(object):
 
 	def __PreserveCommand(self, line):
 		net.PreserveServerCommand(line)
+
+	def __PreserveMeteorLock(self, vid, owned, deadline):
+		self.__PreserveCommand("AltheaMeteorLockV1 %s %s %s" % (vid, owned, deadline))
+
+	def __PreserveMeteorRemove(self, vid):
+		self.__PreserveCommand("AltheaMeteorLockRemoveV1 %s" % vid)
+
+	def __PreserveDungeonEquipmentBindingOffer(self):
+		# Preserve capability only; the active game window requests fresh state.
+		self.__PreserveCommand("DungeonEquipmentBindingOfferV1")
 
 	def __PreserveAlbumCapability(self, digest, epoch, profile, active):
 		# Warp offers can arrive while the loading window owns the phase.

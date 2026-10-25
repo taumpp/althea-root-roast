@@ -54,7 +54,6 @@ USE_ITEM_WEAPON_TABLE_ATTACK_BONUS = 0
 ADD_DEF_BONUS_ENABLE = 0
 LOGIN_COUNT_LIMIT_ENABLE = 0
 PVPMODE_PROTECTED_LEVEL = 15
-TWO_HANDED_WEAPON_ATT_SPEED_DECREASE_VALUE = 10
 
 isItemQuestionDialog = 0
 
@@ -270,6 +269,13 @@ AUTO_POTION_SP_VNUMS = (39040, 39041, 39042, 72727, 72728, 72729, 72730, 76004, 
 def IS_AUTO_POTION(itemVnum):
 	return IS_AUTO_POTION_HP(itemVnum) or IS_AUTO_POTION_SP(itemVnum)
 
+# automatic Bravery Cape is an inventory toggle; the server sets
+# metin socket 2 while it is active (sockets 0/1 hold the first-use expiry).
+AUTO_BRAVE_CAPE_ACTIVE_SOCKET = 2
+
+def IS_AUTO_BRAVE_CAPE(itemVnum):
+	return 501001 <= itemVnum <= 501004
+
 # 해당 vnum이 HP 자동물약인가?
 def IS_AUTO_POTION_HP(itemVnum):
 	if itemVnum in AUTO_POTION_HP_VNUMS:
@@ -382,3 +388,19 @@ if app.ENABLE_REFINE_ELEMENT_SYSTEM:
 			refine_element = player.GetItemRefineElement(window_type, slotIndex)
 
 		return AppendRefineElementToItemLink(link, refine_element)
+
+# VIP elf outfits of the elf-form Buffi: the whole range the server accepts.
+VIP_ELF_OUTFIT_FIRST = 49101
+VIP_ELF_OUTFIT_LAST = 49109
+
+def IS_VIP_ELF_OUTFIT(vnum):
+	return VIP_ELF_OUTFIT_FIRST <= vnum <= VIP_ELF_OUTFIT_LAST
+
+# Sigil I-V. The item table gives them no kind of their own (ITEM_MATERIAL like
+# other materials) and the client receives no server list of shop price items,
+# so the icon price row of the shop keeps this one range.
+SIGIL_FIRST = 91200
+SIGIL_LAST = 91204
+
+def IS_SIGIL(vnum):
+	return SIGIL_FIRST <= vnum <= SIGIL_LAST

@@ -1,3 +1,4 @@
+import dungeonequipmentbinding
 import item
 import dbg
 import mouseModule
@@ -75,10 +76,13 @@ class TalismanWindow(ui.BoardWithTitleBar):
 		self.AddFlag("movable")
 		self.AddFlag("float")
 		self.Children = []
+		self.dungeonLockOverlays = {}
 		self.ElementDictionary = {}
 		self.tooltipItem = None
 		self.capability = False
 		self.closeEvent = None
+		self.r1 = None
+		self.r1Failed = False
 		self.isLoaded = self.__LoadWindow()
 
 	def __del__(self):
@@ -143,6 +147,26 @@ class TalismanWindow(ui.BoardWithTitleBar):
 	def IsLoaded(self):
 		return self.isLoaded
 
+	def __SyncLook(self):
+		"""The R1 look (root/uitalismanr1.py) unless Settings -> "Starý vzhled" chose the original window; the switch
+		takes effect on the next opening. A failure traces to syserr and keeps the original look (not retried)."""
+		try:
+			import uir1
+			wanted = uir1.UseR1() and not self.r1Failed
+		except Exception:
+			wanted = False
+		if wanted and not self.r1:
+			try:
+				import uitalismanr1
+				self.r1 = uitalismanr1.TalismanSkin(self)
+			except Exception:
+				uir1.TraceFailure("the talisman window")
+				self.r1Failed = True
+				self.r1 = None
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def SetItemToolTip(self, tooltipItem):
 		self.tooltipItem = tooltipItem
 
@@ -161,10 +185,12 @@ class TalismanWindow(ui.BoardWithTitleBar):
 			self.Close()
 
 	def Refresh(self):
+		dungeonequipmentbinding.HideWindow(self.dungeonLockOverlays, self.slots)
 		for equipmentCell in TALISMAN_EQUIPMENT_CELLS:
 			vnum = player.GetItemIndex(equipmentCell)
 			if vnum:
 				self.slots.SetItemSlot(equipmentCell, vnum, 0)
+				dungeonequipmentbinding.SetOverlay(self.dungeonLockOverlays, self.slots, equipmentCell, equipmentCell, vnum)
 				self.watermarks[equipmentCell].Hide()
 			else:
 				self.slots.ClearSlot(equipmentCell)
@@ -223,6 +249,8 @@ class TalismanWindow(ui.BoardWithTitleBar):
 	def Open(self):
 		if not self.capability:
 			return False
+		if self.isLoaded:
+			self.__SyncLook()
 		self.Refresh()
 		self.SetCenterPosition()
 		self.Show()
@@ -240,7 +268,11 @@ class TalismanWindow(ui.BoardWithTitleBar):
 		self.Hide()
 
 	def Destroy(self):
+		dungeonequipmentbinding.Clear(getattr(self, "dungeonLockOverlays", {}))
 		self.Close()
+		if getattr(self, "r1", None):
+			r1, self.r1 = self.r1, None
+			r1.Destroy()
 		self.tooltipItem = None
 		self.closeEvent = None
 		self.slots = None

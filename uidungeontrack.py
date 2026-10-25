@@ -4,10 +4,24 @@
 import app, player, grp, net, chat, event, item, wndMgr, WikiRenderTarget
 
 #static
-import ui, _weakref, os, pickle as cPickle, operator, osfInfo, localeInfo, math
+import ui, _weakref, os, dungeonsettings, operator, osfInfo, localeInfo, math
 import nonplayer
+import ownedcount
 import dungeonpresentation
+import uimonsterindicators
 import featureavailability
+import wikicatalog
+import ticketnoticemodel
+
+
+def BeginTicketEntry(dungeonInfo):
+	"""The player asked to enter: remember the dungeon's ticket(s) for the "ticket used" notice (ticketnoticemodel)."""
+	try:
+		import background
+		ticketnoticemodel.STATE.BeginEntry(dungeonInfo.get("ticket"), player.GetItemCountByVnum,
+			background.GetCurrentMapName(), app.GetTime(), player.GetName())
+	except Exception:
+		ticketnoticemodel.STATE.Reset()
 
 #second
 LOG_UPDATE_TIME = 1
@@ -36,11 +50,6 @@ DUNGEON_COLOR_NAME = _DungeonSignedColor(0xffeee6dc)
 
 DUNGEON_TRACK_BODY_TOP = 31
 DUNGEON_SETTINGS_VERSION = 8
-DUNGEON_WIKI_COMMANDS = {
-	2092 : "dungeon#20",
-	2493 : "dungeon#21",
-	6192 : "dungeon#24",
-}
 
 def _AtlasLocale(key, fallback):
 	return getattr(localeInfo, key, fallback)
@@ -606,6 +615,8 @@ class DungeonTrack(ui.ExpandedImageBox):
 			return
 		if questMode == "ENTER":
 			self.Close()
+			if currentDungeon in dungeonData:
+				BeginTicketEntry(dungeonData[currentDungeon])
 		osfInfo.dungeonInfoCMD = questMode + "#" + str(currentDungeon)
 		event.QuestButtonClick(int(osfInfo.dungeonInfoQuestIdx))
 
@@ -624,11 +635,12 @@ class DungeonTrack(ui.ExpandedImageBox):
 	def __WikiBtn(self):
 		currentDungeon = self.GetCurrentSelectedDungeon()
 
-		if currentDungeon in DUNGEON_WIKI_COMMANDS:
+		if currentDungeon in dungeonData:
 			interface = osfInfo.GetInterfaceInstance()
 			if interface:
-				interface.OpenWikiWindow()
-				interface.wndWiki.LoadData(DUNGEON_WIKI_COMMANDS[currentDungeon])
+				interface.MakeWiki()
+				interface.wndWiki.Open()
+				interface.wndWiki.OpenDungeon(currentDungeon)
 				interface.wndWiki.SetTop()
 
 	def __ClickCheckBox(self):
@@ -1026,7 +1038,7 @@ def __GetSettingsDirectory():
 	return "UserData/dungeon_info"
 
 def __GetSettingsPath():
-	return "{}/{}_track".format(__GetSettingsDirectory(), player.GetName())
+	return dungeonsettings.path(str(player.GetName()))
 
 def __EnsureSettingsDirectory():
 	settingsDirectory = __GetSettingsDirectory()
@@ -1055,9 +1067,7 @@ def LoadSettings():
 			entry.update(listIndex=entry["static_listIndex"], showStatus=True, alarm=False, autoTicket=False, selected=vnum == first)
 	_settingsCharacter = character
 	try:
-		f = old_open(__GetSettingsPath(), "rb")
-		currentSettings = cPickle.load(f)
-		f.close()
+		currentSettings = dungeonsettings.load(__GetSettingsPath(), DUNGEON_SETTINGS_VERSION)
 		if not isinstance(currentSettings, dict):
 			return
 
@@ -1216,7 +1226,7 @@ def LoadSettings():
 			saveMigratedSettings = True
 		if saveMigratedSettings:
 			SaveSettings()
-	except (IOError, EOFError, cPickle.UnpicklingError, ValueError, TypeError):
+	except (IOError, ValueError, TypeError, RecursionError):
 		pass
 def SaveSettings():
 	global dungeonData
@@ -1235,9 +1245,8 @@ def SaveSettings():
 			"version" : DUNGEON_SETTINGS_VERSION,
 			"dungeons" : dungeonSettings,
 		}
-		with old_open(__GetSettingsPath(), 'wb') as f:
-			cPickle.dump(settings, f)
-	except IOError:
+		dungeonsettings.save(__GetSettingsPath(), settings, DUNGEON_SETTINGS_VERSION)
+	except (IOError, ValueError, TypeError, RecursionError):
 		pass
 
 class ScrollBarSpecial(ui.Window):
@@ -1478,6 +1487,19 @@ class MultiTextLine(ui.Window):
 				else:
 					textType()
 
+def _R1Begin(page):
+	try:
+		import uir1dungeon
+	except Exception:
+		return None
+	return uir1dungeon.Begin(page)
+
+def _R1Finish(skin):
+	if skin is None:
+		return None
+	import uir1dungeon
+	return uir1dungeon.Finish(skin)
+
 class DungeonTeleportRow(ui.Window):
 	WIDTH = 231
 	HEIGHT = 54
@@ -1684,6 +1706,8 @@ class DungeonTeleportPage(ui.Window):
 	BOSS_PREVIEW_RETRY_INTERVAL = 2.0
 
 	def __init__(self, owner, scale = 1.0):
+		# The base constructor dispatches to our Hide override.
+		self.monsterIndicators = None
 		ui.Window.__init__(self)
 		self.owner = _weakref.proxy(owner)
 		self.scale = float(scale)
@@ -1710,7 +1734,10 @@ class DungeonTeleportPage(ui.Window):
 		self.elementIcons = []
 		self.elementBossVnum = None
 		self.staticWidgets = []
+		# R1 look (root/uir1dungeon.py) unless the original one is wanted; it falls back to the original page.
+		self.r1 = _R1Begin(self)
 		self.__BuildWindow()
+		self.r1 = _R1Finish(self.r1)
 		LoadSettings()
 		self.Refresh()
 
@@ -1823,18 +1850,11 @@ class DungeonTeleportPage(ui.Window):
 			self.staticWidgets.append(caption)
 		self.bossName = self._Text(self, (dungeonpresentation.NAME_X, dungeonpresentation.NAME_Y), "", DUNGEON_COLOR_GOLD)
 		self.bossName.SetFontName("Tahoma:14" if self.scale >= 0.9 else "Tahoma:12")
+		self.bossLevel = self._Text(self, (dungeonpresentation.NAME_X, dungeonpresentation.LEVEL_Y), "", DUNGEON_COLOR_DIM)
+		self.bossLevel.SetFontName("Tahoma:12")
 
-		for element in dungeonpresentation.ELEMENT_ASSETS:
-			icon = ui.ExpandedImageBox()
-			icon.SetParent(self)
-			icon.LoadImage(dungeonpresentation.ELEMENT_ROOT + "element_%s_24.png" % element)
-			factor = float(self._Scaled(dungeonpresentation.ICON_SIZE)) / icon.GetWidth()
-			if factor != 1.0:
-				icon.SetScale(factor, factor)
-			icon.AddFlag("not_pick")
-			icon.Hide()
-			self.elementIcons.append(icon)
-			self.staticWidgets.append(icon)
+		self.monsterIndicators = uimonsterindicators.MonsterIndicators(
+			self, self._Scaled(dungeonpresentation.ICON_SIZE), self._Scaled(dungeonpresentation.ICON_GAP))
 
 		self.levelValue = self.__BuildInfoRow(246, "level_20.png", _AtlasLocale("DUNGEON_TRACK_LEVEL_INFO", "Required level"))
 		self.groupValue = self.__BuildInfoRow(277, "group_20.png", _AtlasLocale("DUNGEON_TRACK_GROUP_INFO", "Group required"))
@@ -2051,8 +2071,14 @@ class DungeonTeleportPage(ui.Window):
 			self.scrollOffset = newOffset
 			self._RefreshCatalogue()
 
+	def RefreshOwnedCounts(self):
+		"""The ticket's "owned / need" again (the interface calls it when the inventory changes)."""
+		if getattr(self, "ticketVnum", 0) and getattr(self, "ticketNeed", 0):
+			ownedcount.Paint(self.ticketCount, ownedcount.Owned(self.ticketVnum), self.ticketNeed)
+
 	def _RefreshTicket(self, dungeonInfo):
 		self.ticketVnum = 0
+		self.ticketNeed = 0
 		self.ticketIcon.Hide()
 		self.ticketName.SetText(_AtlasLocale("DUNGEON_TRACK_NO_TICKET", "No ticket required"))
 		self.ticketCount.SetText("")
@@ -2069,7 +2095,9 @@ class DungeonTeleportPage(ui.Window):
 			self.ticketIcon.Show()
 			self.ticketVnum = ticketVnum
 			self.ticketName.SetText(itemName)
-			self.ticketCount.SetText("x%d" % ticketCount if ticketCount > 1 else "")
+			# "owned / need" green / red (root/ownedcount.py); it was "x2" without what the player has
+			self.ticketNeed = max(1, int(ticketCount))
+			ownedcount.Paint(self.ticketCount, ownedcount.Owned(ticketVnum), self.ticketNeed)
 		except (RuntimeError, TypeError):
 			self.ticketIcon.Hide()
 			self.ticketName.SetText(_AtlasLocale("DUNGEON_TRACK_NO_TICKET", "No ticket required"))
@@ -2079,18 +2107,20 @@ class DungeonTeleportPage(ui.Window):
 			self.shopButton.Show()
 
 	def _RefreshBossElements(self, bossVnum):
-		if self.elementBossVnum == bossVnum:
+		elements = wikicatalog.DungeonElements(bossVnum)
+		key = (bossVnum, elements)
+		if self.elementBossVnum == key:
 			return
-		self.elementBossVnum = bossVnum
-		elements = dungeonpresentation.ReadBossElements(
-			bossVnum, getattr(app, "ENABLE_ELEMENT_ADD", False), nonplayer)
-		for icon in self.elementIcons:
-			icon.Hide()
-		for element, x, y in dungeonpresentation.ElementPositions(elements):
-			icon = self.elementIcons[element]
-			icon.SetPosition(self._Scaled(x), self._Scaled(y))
-			icon.Show()
-		self.bossName.SetLimitWidth(self._Scaled(dungeonpresentation.BossNameWidth(elements)))
+		self.elementBossVnum = key
+		width = self.monsterIndicators.SetMonster(bossVnum, elements)
+		left = self._Scaled(dungeonpresentation.ICON_RIGHT) - width
+		self.monsterIndicators.SetPosition(left, self._Scaled(dungeonpresentation.ICON_Y))
+		if width:
+			self.monsterIndicators.Show()
+		else:
+			self.monsterIndicators.Hide()
+		self.bossName.SetLimitWidth(max(0, left - self._Scaled(dungeonpresentation.NAME_X + dungeonpresentation.NAME_GAP)))
+		self.bossLevel.SetLimitWidth(max(0, left - self._Scaled(dungeonpresentation.NAME_X + dungeonpresentation.NAME_GAP)))
 
 	def _RefreshDetails(self):
 		mobIdx = self.GetCurrentSelectedDungeon()
@@ -2101,6 +2131,7 @@ class DungeonTeleportPage(ui.Window):
 		if getattr(self, "dropWindow", None) and self.dropWindow.IsShow():
 			self.dropWindow.SetDungeon(dungeonInfo["finalBossVnum"], dungeonInfo["name"])
 		self.bossName.SetText(nonplayer.GetMonsterName(dungeonInfo["finalBossVnum"]))
+		self.bossLevel.SetText(dungeonpresentation.BossLevelText(dungeonInfo["finalBossVnum"], nonplayer))
 		self._RefreshBossElements(dungeonInfo["finalBossVnum"])
 		self.levelValue.SetText("LV. %d+" % dungeonInfo["minLevel"])
 		lockedByLevel = IsDungeonLevelLocked(dungeonInfo, player.GetStatus(player.LEVEL))
@@ -2136,7 +2167,7 @@ class DungeonTeleportPage(ui.Window):
 		else:
 			self.enterButton.SetText(_AtlasLocale("DUNGEON_ATLAS_ENTER", "ENTER"))
 			self.enterButton.Hide()
-		if mobIdx in DUNGEON_WIKI_COMMANDS:
+		if mobIdx in dungeonData:
 			self.guideButton.Enable()
 		else:
 			self.guideButton.Disable()
@@ -2169,12 +2200,13 @@ class DungeonTeleportPage(ui.Window):
 
 	def _OpenGuide(self):
 		currentDungeon = self.GetCurrentSelectedDungeon()
-		if currentDungeon not in DUNGEON_WIKI_COMMANDS:
+		if currentDungeon not in dungeonData:
 			return
 		interface = osfInfo.GetInterfaceInstance()
 		if interface:
-			interface.OpenWikiWindow()
-			interface.wndWiki.LoadData(DUNGEON_WIKI_COMMANDS[currentDungeon])
+			interface.MakeWiki()
+			interface.wndWiki.Open()
+			interface.wndWiki.OpenDungeon(currentDungeon)
 			interface.wndWiki.SetTop()
 
 	def _ToggleDrop(self):
@@ -2203,6 +2235,7 @@ class DungeonTeleportPage(ui.Window):
 		if not dungeonData[currentDungeon]["directEntry"]:
 			return
 		self.owner.Close()
+		BeginTicketEntry(dungeonData[currentDungeon])
 		if dungeonData[currentDungeon]["autoTicket"] and player.IsVipActive():
 			self._SendQuestAction("AUTO_ENTER")
 		else:
@@ -2367,12 +2400,21 @@ class DungeonTeleportPage(ui.Window):
 		self._RefreshCatalogue()
 		self._RefreshDetails()
 
+	def Hide(self):
+		if self.monsterIndicators:
+			self.monsterIndicators.HideTooltip()
+		ui.Window.Hide(self)
+
 	def OpenPage(self):
+		interface = osfInfo.GetInterfaceInstance()
+		if app.ENABLE_WIKI and interface:
+			interface.UseWikiCatalog()
 		net.SendChatPacket("/dungeon_info update")
 		self.Show()
 		self.Refresh()
 
 	def ClosePage(self):
+		self.monsterIndicators.HideTooltip()
 		if self.dropWindow:
 			self.dropWindow.Close()
 		self._ResetRenderTarget()
@@ -2399,6 +2441,9 @@ class DungeonTeleportPage(ui.Window):
 			self._RefreshRank()
 
 	def Destroy(self):
+		if self.monsterIndicators:
+			self.monsterIndicators.Destroy()
+			self.monsterIndicators = None
 		self._ResetRenderTarget()
 		self._RemoveRenderTarget()
 		if self.dropWindow:

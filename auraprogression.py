@@ -1,6 +1,9 @@
-ABSORPTION_BY_GRADE = (1, 5, 10, 15, 20, 25)
-REQUIRED_POINTS_BY_GRADE = (500, 1500, 3500, 6000, 10000, 0)
-LEVEL_MAX_BY_GRADE = (49, 99, 149, 199, 249, 250)
+# Gameplay values are generated from the connected release's server authority.
+from auraprogressiondata import CATALOG
+
+ABSORPTION_BY_GRADE = tuple(row["absorption_percent"] for row in CATALOG["grades"])
+REQUIRED_POINTS_BY_GRADE = tuple(row["required_points"] for row in CATALOG["grades"])
+LEVEL_MAX_BY_GRADE = tuple(row["level_max"] for row in CATALOG["grades"])
 PROGRESS_SOCKET_VERSION_BASE = 2000
 
 
@@ -52,3 +55,14 @@ def Progress(itemVnum, progressSocket):
 def IsReadyToEvolve(itemVnum, progressSocket):
 	(current, required) = Progress(itemVnum, progressSocket)
 	return required > 0 and current >= required
+
+
+def RefineInfo(level, info):
+    # Compatibility for the native legacy window API; manual fees are retired.
+    keys = ("grade", "level_min", "level_max", "required_points")
+    if info < 0 or info >= len(keys):
+        return 0
+    for row in CATALOG["grades"]:
+        if row["level_min"] <= level <= row["level_max"]:
+            return row[keys[info]]
+    return 0

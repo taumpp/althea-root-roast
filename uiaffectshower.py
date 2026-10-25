@@ -4,15 +4,22 @@ import dewcatalog
 import servergamedata
 import pvmpersonaltext
 import uieffecttooltipstyle
+import uiaffecthover
 import chr, app, skill, player, uiToolTip, chat, item, wndMgr
 from uiToolTip import GET_AFFECT_STRING
 
 AFFECT_GROUP_THRESHOLD = 1
+# Biologist rewards: one permanent server affect per bonus point (AFFECT_COLLECT, game/src/biolog_research.cpp). The
+# bar icon is built from these affects, so it survives a warp to another core, where the Biologist window sends no
+# snapshot (TCK-0351: the bonus stayed, the icon vanished until "Odměna" was clicked in the window).
+BIOLOG_AFFECT = 515
 
-def SortAffectRowsByLength(rows):
-	"""Return non-empty rows longest-first while preserving stable ties."""
+def SortAffectRowsByLength(rows, firstRowPinned=False):
+	"""Sort non-empty rows by length, optionally keeping the first row on top."""
 	indexedRows = [(index, row) for index, row in enumerate(rows) if row]
 	indexedRows.sort(key=lambda data: (-len(data[1]), data[0]))
+	if firstRowPinned and rows and rows[0]:
+		indexedRows = [(0, rows[0])] + [data for data in indexedRows if data[0] != 0]
 	return [row for unusedIndex, row in indexedRows]
 
 def ShouldCollapseAffectGroup(memberCount, expanded, threshold=AFFECT_GROUP_THRESHOLD):
@@ -26,10 +33,98 @@ def AppendAffectTitle(tooltip, title):
 	finally:
 		tooltip.SetDefaultFontName(font)
 
+# Skill affects show the tile the skill window shows for that skill now (owner 8. 10., tester "Špatné ikonky pro
+# pasivky warriora": "prostě ta aktuální co máš v schopnosti"). The skill window draws skill.GetIconImageNew(skill,
+# grade): CPythonSkill::__RegisterGradeIconImage loads d:/ymir work/ui/skill/<job>/<icon>_0<grade + 1>.sub with job
+# and icon from <locale>/SkillDesc.txt, and the grade is clamped to 0 .. 3 (S keeps the P tile). GetIconImageNew
+# hands out an image pointer, ImageBox.LoadImage needs the path, so the path is built from that same SkillDesc.txt
+# (pack.Get) instead of a hand-written table (11. 10.: a table lookup gave Bojové zuření the poison and Aura meče
+# the slow icon). A skill the player does not have (a party member's buff) shows the _03 tile; a skill SkillDesc
+# has no graded tile for (Buffi's support skills 194 .. 198) keeps the path of the affect table.
+SKILL_ICON_ROOT = "d:/ymir work/ui/skill/"
+SKILL_ICON_GRADES = 4
+SKILL_ICON_DEFAULT_GRADE = 2
+# CPythonSkill::m_PathNameMap for the jobs whose skills have grade tiles.
+SKILL_ICON_JOB_DIRS = {
+	"WARRIOR": "warrior", "ASSASSIN": "assassin", "SURA": "sura", "SHAMAN": "shaman", "WOLFMAN": "wolfman",
+	"PASSIVE": "passive", "78SKILL": "78skill",
+}
+SKILLDESC_JOB_COLUMN = 1
+SKILLDESC_ICON_COLUMN = 12
+_skillIconBases = None
+
+def ParseSkillIconBases(raw):
+	"""{skill vnum: d:/ymir work/ui/skill/<job>/<icon>} from the text of SkillDesc.txt."""
+	if isinstance(raw, bytes):
+		raw = raw.decode("latin-1")		# job and icon columns are ASCII, the names around them cp1250
+	bases = {}
+	for line in raw.splitlines():
+		cells = line.split("\t")
+		if len(cells) <= SKILLDESC_ICON_COLUMN:
+			continue
+		try:
+			index = int(cells[0])
+		except ValueError:
+			continue
+		job = SKILL_ICON_JOB_DIRS.get(cells[SKILLDESC_JOB_COLUMN].strip())
+		icon = cells[SKILLDESC_ICON_COLUMN].strip()
+		if job and icon:
+			bases[index] = "%s%s/%s" % (SKILL_ICON_ROOT, job, icon)
+	return bases
+
+def SkillIconBases():
+	global _skillIconBases
+	if _skillIconBases is None:
+		try:
+			import pack
+			bases = ParseSkillIconBases(pack.Get(app.GetLocalePath() + "/SkillDesc.txt"))
+		except Exception:
+			return {}
+		_skillIconBases = bases
+	return _skillIconBases
+
+def SkillWindowIcon(skillIndex, grade):
+	"""The tile the skill window draws for skillIndex at grade, "" when SkillDesc has no grade tiles for it."""
+	base = SkillIconBases().get(skillIndex) if skillIndex else None
+	if not base:
+		return ""
+	grade = min(max(int(grade), 0), SKILL_ICON_GRADES - 1)
+	return "%s_%02d.sub" % (base, grade + 1)
+
+def PlayerSkillGrade(skillIndex):
+	"""The grade of one of the player's own skills (as the skill window shows it), None when the player has none."""
+	if not skillIndex:
+		return None
+	try:
+		slot = player.GetSkillSlotIndex(skillIndex)
+		if player.GetSkillIndex(slot) != skillIndex:
+			return None
+		return int(player.GetSkillGrade(slot))
+	except Exception:
+		return None
+
+def CurrentSkillIcon(path, skillIndex):
+	"""The affect icon of a skill: the skill window's tile of the player's grade (_03 for a skill the player does not
+	have), a lower grade when the art ends early (wolfman tiles end at _03), else path."""
+	grade = PlayerSkillGrade(skillIndex)
+	if grade is None:
+		grade = SKILL_ICON_DEFAULT_GRADE
+	grade = min(max(grade, 0), SKILL_ICON_GRADES - 1)
+	for tier in range(grade, -1, -1):
+		tile = SkillWindowIcon(skillIndex, tier)
+		if not tile:
+			break
+		try:
+			if not app.IsExistFile(tile):
+				continue
+		except Exception:
+			pass
+		return tile
+	return path
+
 if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 	import uiCommon, osfInfo, net
 	from _weakref import proxy
-	overInImage = None
 	affectDict={}
 
 	def UpsertAffectTooltipEntry(affectData, pointIdx, value, duration, now):
@@ -128,6 +223,16 @@ if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 		}
 		return _dict[affect] if affect in _dict else affect
 
+	def SkillToAffect(skillIndex, affects):
+		"""The skill affect of a skill among affects, None when there is none. TypeToAffect returns an unmapped affect
+		unchanged, so TypeToAffect(affect) == skill alone lets AFFECT_POISON (3) and AFFECT_SLOW (4) pass for the
+		skills 3 (Bojové zuření) and 4 (Aura meče)."""
+		for affect in affects:
+			mapped = TypeToAffect(affect)
+			if mapped != affect and mapped == skillIndex:
+				return affect
+		return None
+
 	def SupportSkillTooltip(rawAffect):
 		_supportPairs = (
 			(chr.AFFECT_HOSIN, 194),
@@ -143,6 +248,8 @@ if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 
 	def GetAffectTooltipData(rawAffect, isSkillAffect):
 		affect = SupportSkillTooltip(rawAffect) if isSkillAffect else rawAffect
+		if not isSkillAffect and rawAffect in (chr.AFFECT_POISON, chr.AFFECT_SLOW, chr.AFFECT_STUN):
+			affect = ("actor", rawAffect)
 		return affectDict.get(affect, {})
 
 	def AffectToSkillIndex(rawAffect):
@@ -175,23 +282,21 @@ if app.ENABLE_MULTI_FARM_BLOCK:
 				self.LoadImage("d:/ymir work/ui/game/farm/can_farm.tga")
 			else:
 				self.LoadImage("d:/ymir work/ui/game/farm/cant_farm.tga")
+		def _BuildHover(self, tooltip):
+			tooltip.AppendTextLine("|cffF1E6C0"+localeInfo.MULTI_FARM_TITLE)
+			tooltip.AppendSpace(5)
+			tooltip.AppendTextLine(localeInfo.MULTI_FARM_TEXT)
+			tooltip.AppendSpace(5)
+			for name in self.players:
+				tooltip.AppendTextLine("|cffF1E6C0"+name)
+		def ShowHover(self):
+			interface = osfInfo.GetInterfaceInstance()
+			tooltip = interface.tooltipItem if interface else None
+			return uiaffecthover.ShowTooltip(tooltip, self, (self.multiFarmStatus, tuple(self.players)), self._BuildHover)
 		def OnMouseOverIn(self):
-			interface = osfInfo.GetInterfaceInstance()
-			if interface != None:
-				if interface.tooltipItem:
-					interface.tooltipItem.ClearToolTip()
-					interface.tooltipItem.AppendTextLine("|cffF1E6C0"+localeInfo.MULTI_FARM_TITLE)
-					interface.tooltipItem.AppendSpace(5)
-					interface.tooltipItem.AppendTextLine(localeInfo.MULTI_FARM_TEXT)
-					interface.tooltipItem.AppendSpace(5)
-					for name in self.players:
-						interface.tooltipItem.AppendTextLine("|cffF1E6C0"+name)
-					interface.tooltipItem.ShowToolTip()
+			uiaffecthover.Over(self)
 		def OnMouseOverOut(self):
-			interface = osfInfo.GetInterfaceInstance()
-			if interface != None:
-				if interface.tooltipItem:
-					interface.tooltipItem.HideToolTip()
+			uiaffecthover.Out(self)
 
 class LovePointImage(ui.ExpandedImageBox):
 	def __del__(self):
@@ -228,21 +333,18 @@ class LovePointImage(ui.ExpandedImageBox):
 		except:
 			import dbg
 			dbg.TraceError("LovePointImage.SetLoverInfo(lovePoint=%d) - LoadError %s" % (self.lovePoint, fileName))
+	def _BuildHover(self, tooltip):
+		tooltip.AutoAppendNewTextLineResize(self.loverName, 0xffE9E7D2)
+		tooltip.AppendSpace(5)
+		tooltip.AutoAppendNewTextLineResize(localeInfo.AFF_LOVE_POINT % self.lovePoint)
+	def ShowHover(self):
+		interface = osfInfo.GetInterfaceInstance()
+		tooltip = interface.tooltipItem if interface else None
+		return uiaffecthover.ShowTooltip(tooltip, self, (self.loverName, self.lovePoint), self._BuildHover)
 	def OnMouseOverIn(self):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			tooltipItem = interface.tooltipItem
-			if tooltipItem:
-				tooltipItem.ClearToolTip()
-				tooltipItem.AutoAppendNewTextLineResize(self.loverName, 0xffE9E7D2)
-				tooltipItem.AppendSpace(5)
-				tooltipItem.AutoAppendNewTextLineResize(localeInfo.AFF_LOVE_POINT % self.lovePoint)
-				tooltipItem.ShowToolTip()
+		uiaffecthover.Over(self)
 	def OnMouseOverOut(self):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			if interface.tooltipItem:
-				interface.tooltipItem.HideToolTip()
+		uiaffecthover.Out(self)
 
 if app.ENABLE_CONQUEROR_LEVEL:
 	class SungMaAffectImage(ui.ExpandedImageBox):
@@ -285,11 +387,15 @@ if app.ENABLE_CONQUEROR_LEVEL:
 			self.toolTip.AutoAppendTextLine(localeInfo.TOOLTIP_AFFECT_SUNGMA_IMMUNE % (self.sungmaImmune), self.toolTip.FONT_COLOR, False)
 			self.toolTip.ResizeToolTip()
 
-		def OnMouseOverIn(self):
+		def ShowHover(self):
 			self.toolTip.ShowToolTip()
+			return self.toolTip.HideToolTip
+
+		def OnMouseOverIn(self):
+			uiaffecthover.Over(self)
 
 		def OnMouseOverOut(self):
-			self.toolTip.HideToolTip()
+			uiaffecthover.Out(self)
 
 class HorseImage(ui.ExpandedImageBox):
 	def __del__(self):
@@ -346,21 +452,19 @@ class HorseImage(ui.ExpandedImageBox):
 				return
 	def __AppendText(self, text):
 		self.descriptions.append(text)
+	def _BuildHover(self, tooltip):
+		for text in self.descriptions:
+			tooltip.AutoAppendNewTextLineResize(text)
+	def ShowHover(self):
+		if not self.descriptions:
+			return None
+		interface = osfInfo.GetInterfaceInstance()
+		tooltip = interface.tooltipItem if interface else None
+		return uiaffecthover.ShowTooltip(tooltip, self, tuple(self.descriptions), self._BuildHover)
 	def OnMouseOverIn(self):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			tooltipItem = interface.tooltipItem
-			if tooltipItem:
-				tooltipItem.ClearToolTip()
-				for text in self.descriptions:
-					tooltipItem.AutoAppendNewTextLineResize(text)
-				if len(self.descriptions):
-					tooltipItem.ShowToolTip()
+		uiaffecthover.Over(self)
 	def OnMouseOverOut(self):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			if interface.tooltipItem:
-				interface.tooltipItem.HideToolTip()
+		uiaffecthover.Out(self)
 
 if app.ENABLE_GROWTH_PET_SYSTEM:
 	class GrowthPetImage(ui.ExpandedImageBox):
@@ -410,7 +514,7 @@ SAGE_COMPLETION_AFFECT = 815
 # (servergamedata.COOKED_FISH_BUFFS); ci/tests/test_fishing_client_data.py
 # requires a label for every exported apply.
 COOKED_FISH_LABELS = {
-	'ATTBONUS_METIN': ('Metins', 'Síla proti meteorům', '%'),
+	'ATTBONUS_METIN': ('Meteors', 'Síla proti meteorům', '%'),
 	'ATTBONUS_BOSS': ('Bosses', 'Síla proti bossům', '%'),
 	'ATTBONUS_UNDEAD': ('Undead', 'Síla proti nemrtvým', '%'),
 	'ATTBONUS_DEVIL': ('Devils', 'Síla proti ďáblům', '%'),
@@ -448,6 +552,7 @@ class AffectImage(ui.ExpandedImageBox):
 		self.endTime = 0
 		self.affect = None
 		self.isClocked = True
+		self.hoverTimeLine = None
 		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 			self.isCanRemove=False
 
@@ -542,110 +647,144 @@ class AffectImage(ui.ExpandedImageBox):
 			if [pointIdx, pointVal] in self.affectList:
 				del self.affectList[self.affectList.index([pointIdx, pointVal])]
 
-	def OnMouseOverIn(self):
-		global overInImage
-		if app.ENABLE_RENEWAL_AFFECT_SHOWER and self.pvmPersonalSkill and pvmpersonal.current():
-			overInImage = proxy(self)
+	if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+		# The bar keeps one hover surface (root/uiaffecthover.py): the icon only says Over / Out, the controller shows
+		# this icon's tooltip, hides the previous one and checks the mouse every frame. The content is built into the
+		# shared tooltip once per data change; while shown, only the remaining time line is rewritten each second.
+		def _HoverIsPersonal(self):
+			return bool(self.pvmPersonalSkill and pvmpersonal.current())
+
+		def _HoverTooltip(self):
 			interface = osfInfo.GetInterfaceInstance()
-			if interface and interface.tooltipSkill:
-				tooltip = interface.tooltipSkill
-				tooltip.ClearToolTip()
+			if not interface:
+				return None
+			if self._HoverIsPersonal() or self.IsSkillAffect():
+				return interface.tooltipSkill
+			return interface.tooltipItem
+
+		def _HoverKey(self):
+			if self._HoverIsPersonal():
+				# Title, value and countdown come from the live personal model: each second is new content.
+				return ("pvm", self.pvmPersonalSkill, self.description, int(app.GetTime()))
+			rawAffect = self.GetAffect()
+			data = GetAffectTooltipData(rawAffect, self.IsSkillAffect())
+			return (rawAffect, self.description, self.IsSkillAffect(), self.isCanRemove, self.endTime,
+				repr(sorted(data.items())) if data else "")
+
+		def _HoverTimeText(self, endTime):
+			return "%s: %s" % (localeInfo.LEFT_TIME, self.FormatTime(endTime - app.GetGlobalTimeStamp()))
+
+		def _RefreshHoverTime(self):
+			if self.hoverTimeLine:
+				line, endTime = self.hoverTimeLine
+				line.SetText(self._HoverTimeText(endTime))
+
+		def _BuildHover(self, tooltip):
+			self.hoverTimeLine = None
+			if self._HoverIsPersonal():
 				AppendAffectTitle(tooltip, pvmpersonaltext.title(self.pvmPersonalSkill, skill.GetSkillName(self.pvmPersonalSkill), app.GetTime()))
 				row = pvmpersonal.current().rows.get(self.pvmPersonalSkill)
 				role = {0: "combat", 1: "defense", 2: "defense"}.get(row.get("role"), "stat") if row else "stat"
 				pvmpersonaltext.append_bonus(tooltip, self.pvmPersonalSkill, app.GetTime(),
 					value_color=uieffecttooltipstyle.ColorForRole(role))
-				tooltip.ShowToolTip()
-			return
-		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
-			interface = osfInfo.GetInterfaceInstance()
-			if interface:
-				tooltip = interface.tooltipSkill if self.IsSkillAffect() else interface.tooltipItem
-				if tooltip:
-					tooltip.ClearToolTip()
-					global affectDict
-					overInImage = proxy(self)
-					rawAffect = self.GetAffect()
-					skillIndex = AffectToSkillIndex(rawAffect) if self.IsSkillAffect() else 0
-					if rawAffect == chr.NEW_AFFECT_AUTO_HP_RECOVERY or rawAffect == chr.NEW_AFFECT_AUTO_SP_RECOVERY:
-						tooltip.AutoAppendNewTextLineResize(self.description, 0xffC5C7C4)
+				return
+			rawAffect = self.GetAffect()
+			skillIndex = AffectToSkillIndex(rawAffect) if self.IsSkillAffect() else 0
+			if rawAffect == chr.NEW_AFFECT_AUTO_HP_RECOVERY or rawAffect == chr.NEW_AFFECT_AUTO_SP_RECOVERY:
+				tooltip.AutoAppendNewTextLineResize(self.description, 0xffC5C7C4)
+				return
+			affectData = GetAffectTooltipData(rawAffect, self.IsSkillAffect())
+			affectList = affectData["affect"] if "affect" in affectData else []
+			maxDuration = affectData["duration"] if "duration" in affectData else 0
+			if self.description:
+				AppendAffectTitle(tooltip, self.description)
+				tooltip.AppendSpace(5)
 
-					else:
-						affectData = GetAffectTooltipData(rawAffect, self.IsSkillAffect())
-						affectList = affectData["affect"] if "affect" in affectData else []
-						maxDuration = affectData["duration"] if "duration" in affectData else 0
-						if self.description:
-							AppendAffectTitle(tooltip, self.description)
-							tooltip.AppendSpace(5)
-
-						if rawAffect == BALANCED_RARITY_AFFECT:
-							percent = int(affectList[0][1]) if affectList else 0
-							grade = max(0, min(6, percent // 2))
-							tooltip.AutoAppendNewTextLineResize(localeInfo.TOOLTIP_MELEE_MAGIC_ATTBONUS_PER(percent), 0xff95A693 - 0x100000000)
-							import uiRarity
-							tooltip.AutoAppendNewTextLineResize(localeInfo.RARITY_BALANCED_MINIMUM % uiRarity.GradeName(grade))
-						if self.IsSkillAffect():
+			if rawAffect == BALANCED_RARITY_AFFECT:
+				percent = int(affectList[0][1]) if affectList else 0
+				grade = max(0, min(6, percent // 2))
+				tooltip.AutoAppendNewTextLineResize(localeInfo.TOOLTIP_MELEE_MAGIC_ATTBONUS_PER(percent), 0xff95A693 - 0x100000000)
+				import uiRarity
+				tooltip.AutoAppendNewTextLineResize(localeInfo.RARITY_BALANCED_MINIMUM % uiRarity.GradeName(grade))
+			if self.IsSkillAffect():
+				try:
+					role = uieffecttooltipstyle.RoleForPoint(affectList[0][0]) if affectList else "stat"
+					tooltip.SetSkillEx(skillIndex, color=uieffecttooltipstyle.ColorForRole(role))
+				except:
+					for data in affectList:
+						val = uiToolTip.ItemToolTip.POINT_DICT.get(data[0])
+						text_line = None
+						if callable(val):
+							text_line = val(data[1])
+						elif isinstance(val, str):
 							try:
-								role = uieffecttooltipstyle.RoleForPoint(affectList[0][0]) if affectList else "stat"
-								tooltip.SetSkillEx(skillIndex, color=uieffecttooltipstyle.ColorForRole(role))
-							except:
-								for data in affectList:
-									val = uiToolTip.ItemToolTip.POINT_DICT.get(data[0])
-									text_line = None
-									if callable(val):
-										text_line = val(data[1])
-									elif isinstance(val, str):
-										try:
-											text_line = val % data[1]
-										except Exception:
-											text_line = "{} {}".format(val, data[1])
-									else:
-										text_line = "{}: {}".format(data[0], data[1])
-									if text_line:
-										tooltip.AutoAppendNewTextLineResize(text_line, uieffecttooltipstyle.ColorForRole(uieffecttooltipstyle.RoleForPoint(data[0])))
+								text_line = val % data[1]
+							except Exception:
+								text_line = "{} {}".format(val, data[1])
 						else:
-							try:
-								for data in affectList:
-									if data[0] != 0 and data[0] in uiToolTip.ItemToolTip.POINT_DICT:
-										tooltip.AutoAppendNewTextLineResize(uiToolTip.ItemToolTip.POINT_DICT[data[0]](data[1]), uieffecttooltipstyle.ColorForRole(uieffecttooltipstyle.RoleForPoint(data[0])))
-							except:
-								pass
+							text_line = "{}: {}".format(data[0], data[1])
+						if text_line:
+							tooltip.AutoAppendNewTextLineResize(text_line, uieffecttooltipstyle.ColorForRole(uieffecttooltipstyle.RoleForPoint(data[0])))
+			else:
+				try:
+					for data in affectList:
+						if data[0] != 0 and data[0] in uiToolTip.ItemToolTip.POINT_DICT:
+							tooltip.AutoAppendNewTextLineResize(uiToolTip.ItemToolTip.POINT_DICT[data[0]](data[1]), uieffecttooltipstyle.ColorForRole(uieffecttooltipstyle.RoleForPoint(data[0])))
+				except:
+					pass
 
-						if rawAffect == chr.NEW_AFFECT_AUTO_METIN_FARM:
-							tooltip.AppendSpace(5)
-							tooltip.AutoAppendNewTextLineResize(localeInfo.AFFECT_METIN_QUEUE_INFO)
+			if rawAffect == chr.NEW_AFFECT_AUTO_METIN_FARM:
+				tooltip.AppendSpace(5)
+				tooltip.AutoAppendNewTextLineResize(localeInfo.AFFECT_METIN_QUEUE_INFO)
 
-						elif rawAffect == chr.NEW_AFFECT_BRAVE_CAPE:
-							tooltip.AppendSpace(5)
-							tooltip.AutoAppendNewTextLineResize(localeInfo.BRAVERY_CAPE_TEXT)
+			elif rawAffect == chr.NEW_AFFECT_BRAVE_CAPE:
+				tooltip.AppendSpace(5)
+				tooltip.AutoAppendNewTextLineResize(localeInfo.BRAVERY_CAPE_TEXT)
 
-						if self.endTime > 0 and (self.endTime-app.GetGlobalTimeStamp()) < (60*60*24*365):
-							tooltip.AppendSpace(5)
-							tooltip.AutoAppendNewTextLineResize("%s: %s" % (localeInfo.LEFT_TIME, self.FormatTime(self.endTime - app.GetGlobalTimeStamp())), 0xffC5C7C4)
-						elif maxDuration > 0 and (maxDuration-app.GetGlobalTimeStamp()) < (60*60*24*365):
-							tooltip.AppendSpace(5)
-							tooltip.AutoAppendNewTextLineResize("%s: %s" % (localeInfo.LEFT_TIME, self.FormatTime(maxDuration - app.GetGlobalTimeStamp())), 0xffC5C7C4)
-						if self.isCanRemove:
-							tooltip.AppendSpace(7)
-							tooltip.AutoAppendNewTextLineResize(localeInfo.AFFECTSHOWER_REMOVE_TEXT)
-					tooltip.ShowToolTip()
-		else:
-			if self.toolTipText:
-				self.toolTipText.Show()
+			timeEnd = 0
+			if self.endTime > 0 and (self.endTime-app.GetGlobalTimeStamp()) < (60*60*24*365):
+				timeEnd = self.endTime
+			elif maxDuration > 0 and (maxDuration-app.GetGlobalTimeStamp()) < (60*60*24*365):
+				timeEnd = maxDuration
+			if timeEnd:
+				tooltip.AppendSpace(5)
+				line = tooltip.AutoAppendNewTextLineResize(self._HoverTimeText(timeEnd), 0xffC5C7C4)
+				if line is not None:
+					self.hoverTimeLine = (line, timeEnd)
+			if self.isCanRemove:
+				tooltip.AppendSpace(7)
+				tooltip.AutoAppendNewTextLineResize(localeInfo.AFFECTSHOWER_REMOVE_TEXT)
+
+		def ShowHover(self):
+			tooltip = self._HoverTooltip()
+			if tooltip is None:
+				return None
+			if not uiaffecthover.Fill(tooltip, self, self._HoverKey(), self._BuildHover):
+				self._RefreshHoverTime()
+			tooltip.ShowToolTip()
+			return uiaffecthover.Hider(tooltip, self)
+
+		def TickHover(self):
+			tooltip = self._HoverTooltip()
+			if tooltip is None or not uiaffecthover.Owns(tooltip, uiaffecthover.Owner(self)):
+				return None
+			if uiaffecthover.Fill(tooltip, self, self._HoverKey(), self._BuildHover):
+				tooltip.ShowToolTip()
+			else:
+				self._RefreshHoverTime()
+			return uiaffecthover.Hider(tooltip, self)
+
+	def OnMouseOverIn(self):
+		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+			uiaffecthover.Over(self)
+		elif self.toolTipText:
+			self.toolTipText.Show()
 
 	def OnMouseOverOut(self):
 		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
-			global overInImage
-			overInImage = None
-			interface = osfInfo.GetInterfaceInstance()
-			if interface:
-				if interface.tooltipItem:
-					interface.tooltipItem.HideToolTip()
-				if interface.tooltipSkill:
-					interface.tooltipSkill.HideToolTip()
-		else:
-			if self.toolTipText:
-				self.toolTipText.Hide()
+			uiaffecthover.Out(self)
+		elif self.toolTipText:
+			self.toolTipText.Hide()
 
 if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 	class AffectGroupImage(ui.ExpandedImageBox):
@@ -717,26 +856,35 @@ if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 		def GetSummaryTitle(self):
 			return GetAffectGroupText(self.groupKey)
 
-		def OnMouseOverIn(self):
+		def ShowHover(self):
 			if not self.members:
-				return
+				return None
 			if self.onSummaryOpen:
 				self.onSummaryOpen(self.groupKey)
 			if self.summary is None:
 				self.summary = self.CreateSummary()
-			global overInImage
-			overInImage = None
-			interface = osfInfo.GetInterfaceInstance()
-			if interface:
-				if interface.tooltipItem:
-					interface.tooltipItem.HideToolTip()
-				if interface.tooltipSkill:
-					interface.tooltipSkill.HideToolTip()
 			self.summary.Open()
+			return self.summary.Close
+
+		def HoverHeld(self):
+			# The summary is a panel the mouse may cross to; it closes itself after its own grace (uiaffectsummary).
+			return bool(self.summary and self.summary.IsShow())
+
+		def HoverGuard(self, other):
+			# An icon of the row below lies on the way to the panel: it waits a moment before taking over. The window
+			# height (25 x 26), not ImageBox.GetHeight = the texture (32 / 53 / 64 px).
+			try:
+				window = getattr(ui, "Window", None)
+				height = window.GetHeight(self) if window else self.GetHeight()
+				return other.GetGlobalPosition()[1] >= self.GetGlobalPosition()[1] + height - 1
+			except Exception:
+				return False
+
+		def OnMouseOverIn(self):
+			uiaffecthover.Over(self)
 
 		def OnMouseOverOut(self):
-			# The owned view keeps the short icon-to-panel crossing reachable.
-			pass
+			uiaffecthover.Out(self)
 
 		def CloseSummary(self):
 			if self.summary:
@@ -767,12 +915,64 @@ if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 			from uiaffectsummary import CompactAffectSummary
 			return CompactAffectSummary(self)
 
+		def SetPointMembers(self, members):
+			# [(point, value)] of the server affect; SetMembers keeps [(apply, value)] of the Biologist window.
+			self.byPoint = True
+			self.SetMembers(members)
+
+		def SetApplyMembers(self, members):
+			self.byPoint = False
+			self.SetMembers(members)
+
 		def GetSummaryRows(self):
-			return [(None, GET_AFFECT_STRING(kind, value), (), 0,
-				uieffecttooltipstyle.RoleForPoint(item.GetApplyPoint(kind)))
-				for kind, value in self.members]
+			if not getattr(self, "byPoint", False):
+				return [(None, GET_AFFECT_STRING(kind, value), (), 0,
+					uieffecttooltipstyle.RoleForPoint(item.GetApplyPoint(kind)))
+					for kind, value in self.members]
+			rows = []
+			for point, value in self.members:
+				formatter = uiToolTip.ItemToolTip.POINT_DICT.get(point)
+				if point == AffectShower.MELEE_MAGIC_ATTACK_POINT:
+					formatter = uiToolTip.ItemToolTip.AFFECT_DICT.get(item.APPLY_MELEE_MAGIC_ATTBONUS_PER)
+				text = (formatter(value) if callable(formatter) else formatter) if formatter else None
+				if text:
+					rows.append((None, text, (), 0, uieffecttooltipstyle.RoleForPoint(point)))
+			return rows
+
+class PenetrationOverflowImage(AffectImage):
+	# Existing server/client wire point, already stored by the native player.
+	# Read the calculated bonus; its conversion rate remains server authority.
+	POINT_RARITY_OVERFLOW_ATTACK = 170
+
+	def __init__(self):
+		AffectImage.__init__(self)
+		self.attack = 0
+		self.LoadImage("icon/affect/penetration_overflow.png")
+		self.SetScale(0.7, 0.7)
+		self.SetSize(22, 22)
+
+	def SetAttack(self, attack):
+		self.attack = attack
+		self.SetDescription(localeInfo.PENETRATION_OVERFLOW_TITLE)
+		if not app.ENABLE_RENEWAL_AFFECT_SHOWER:
+			self.SetToolTipText("%s: %s / %s" % (self.description,
+				localeInfo.TOOLTIP_ATT_GRADE(attack), localeInfo.TOOLTIP_MAGIC_ATT_GRADE(attack)), 0, 40)
+
+	def _HoverKey(self):
+		return ("penetration-overflow", self.description, self.attack)
+
+	def _BuildHover(self, tooltip):
+		AppendAffectTitle(tooltip, self.description)
+		tooltip.AppendSpace(5)
+		color = uieffecttooltipstyle.ColorForRole("combat")
+		tooltip.AutoAppendNewTextLineResize(localeInfo.TOOLTIP_ATT_GRADE(self.attack), color)
+		tooltip.AutoAppendNewTextLineResize(localeInfo.TOOLTIP_MAGIC_ATT_GRADE(self.attack), color)
+
 
 class AffectShower(ui.Window):
+	# Server affect types below AFFECT_MOV_SPEED (200) are skill identifiers.
+	# Actor flags use a separate, overlapping namespace and own their icons.
+	SKILL_AFFECT_TYPE_LIMIT = 200
 
 	MALL_DESC_IDX_START = 1000
 	CONSUMABLE_DESC_IDX_START = 2000
@@ -820,6 +1020,7 @@ class AffectShower(ui.Window):
 	INDEPENDENT_AFFECTS = (
 		BALANCED_RARITY_AFFECT,
 		SAGE_COMPLETION_AFFECT,
+		chr.AFFECT_ATT_SPEED_POTION,
 		chr.NEW_AFFECT_AUTO_HP_RECOVERY,
 		chr.NEW_AFFECT_AUTO_SP_RECOVERY,
 	)
@@ -860,7 +1061,7 @@ class AffectShower(ui.Window):
 			chr.AFFECT_SLOW : (localeInfo.SKILL_SLOW, "d:/ymir work/ui/skill/common/affect/slow.sub", 2, 0),
 			chr.AFFECT_STUN : (localeInfo.SKILL_STUN, "d:/ymir work/ui/skill/common/affect/stun.sub", 2, 0),
 
-			chr.AFFECT_ATT_SPEED_POTION : (localeInfo.SKILL_INC_ATKSPD, "d:/ymir work/ui/skill/common/affect/Increase_Attack_Speed.sub", 3, 0),
+			chr.AFFECT_ATT_SPEED_POTION : (localeInfo.SKILL_INC_ATKSPD, "d:/ymir work/ui/skill/common/affect/Increase_Attack_Speed.sub", 1, 2),
 			chr.AFFECT_MOV_SPEED_POTION : (localeInfo.SKILL_INC_MOVSPD, "d:/ymir work/ui/skill/common/affect/Increase_Move_Speed.sub", 3, 0),
 			chr.AFFECT_FISH_MIND : (localeInfo.SKILL_FISHMIND, "d:/ymir work/ui/skill/common/affect/fishmind.sub", 3, 0),
 
@@ -998,9 +1199,10 @@ class AffectShower(ui.Window):
 		self.lastUpdateTime=0
 		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 			self.removeAffectDialog = None
-			global affectDict, overInImage
+			global affectDict
 			affectDict={}
-			overInImage=None
+		if getattr(self, "hover", None):
+			uiaffecthover.Uninstall(self.hover)
 		self.horseImage=None
 		self.lovePointImage=None
 		self.afkImage=None
@@ -1024,9 +1226,68 @@ class AffectShower(ui.Window):
 		self.affectGroupImageDict={}
 		self.expandedAffectGroups=set()
 		self.Destroy()
+		# One tooltip / summary for the whole bar, driven by the icon under the mouse (root/uiaffecthover.py).
+		# within: the bar window itself is under the mouse (a gap of an icon's cell) -> the frame check runs.
+		self.hover = uiaffecthover.HoverController(app.GetTime, ui.__mem_func__(self.__HoverPointed),
+			report=AffectShower.__HoverReport, within=ui.__mem_func__(self.IsIn))
+		uiaffecthover.Install(self.hover)
 
 		self.SetPosition(10, 10)
 		self.Show()
+
+	def __HoverCandidates(self):
+		images = list(self.affectImageDict.values())
+		images += list(getattr(self, "affectGroupImageDict", {}).values())
+		images += list(getattr(self, "pvmPersonalImages", {}).values())
+		for name in ("biologImage", "skillTreeImage", "horseImage", "lovePointImage", "afkImage", "farmStatusImage",
+				"sungmaImage", "penetrationOverflowImage"):
+			image = getattr(self, name, None)
+			if image:
+				images.append(image)
+		return [image for image in images if image.IsShow()]
+
+	@staticmethod
+	def __HoverReport(text):
+		import dbg
+		dbg.TraceError(text)
+
+	def __HoverPointed(self, hovered):
+		"""The bar icon under the mouse, or None. The engine decides whether the mouse is on the bar at all (a window
+		over the bar or the open summary panel takes it), the geometry decides which icon: an icon moved, hidden or
+		replaced by a refresh under a still mouse gets no Over / Out from the engine.
+
+		an icon owns its cell of the bar (IMAGE_STEP x the row step, or its window when larger), so the gap
+		between two icons belongs to one of them and never blinks the tooltip; sizes are the window's
+		(ui.Window.GetWidth), not ImageBox.GetWidth, which is the texture (32 px for a 22 px icon)."""
+		images = self.__HoverCandidates()
+		x, y = wndMgr.GetMousePosition()
+		window = getattr(ui, "Window", None)
+		step = getattr(self, "IMAGE_STEP", 25)
+		rowStep = 26
+
+		def size(image):
+			if window:
+				return window.GetWidth(image), window.GetHeight(image)
+			return image.GetWidth(), image.GetHeight()
+
+		def under(image, cell=True):
+			left, top = image.GetGlobalPosition()
+			width, height = size(image)
+			if cell:
+				width, height = max(width, step), max(height, rowStep)
+			return left <= x < left + width and top <= y < top + height
+
+		if hovered is not None and not any(image is hovered for image in images):
+			# A button of the Pasivky row (uipvmpersonal) shares the surface: it stays while it is the pointed window.
+			return hovered if hovered.IsShow() and hovered.IsIn() and under(hovered, False) else None
+		if not (self.IsIn() or any(image.IsIn() for image in images)):
+			return None
+		if hovered is not None and any(image is hovered for image in images) and under(hovered):
+			return hovered
+		for image in sorted(images, key=lambda image: image.GetGlobalPosition()[::-1]):
+			if under(image):
+				return image
+		return None
 
 	def SetSkillTreeState(self, remaining, members):
 		image = getattr(self, "skillTreeImage", None)
@@ -1037,11 +1298,17 @@ class AffectShower(ui.Window):
 			image.SetParent(self)
 			self.skillTreeImage = image
 		if image:
+			image.summaryAnchor = ui.__mem_func__(self.__SummaryAnchor)
 			image.SetState(remaining, members)
 			if wasVisible != bool(remaining > 0):
 				self.__ArrangeImageList()
 
 	def ClearAllAffects(self):
+		if getattr(self, "penetrationOverflowImage", None):
+			self.penetrationOverflowImage.Hide()
+		self.penetrationOverflowImage = None
+		for image in getattr(self, "affectImageDict", {}).values():
+			image.Hide()
 		if getattr(self, "biologImage", None):
 			self.biologImage.Destroy()
 		self.biologImage = None
@@ -1051,10 +1318,11 @@ class AffectShower(ui.Window):
 		for image in getattr(self, "pvmPersonalImages", {}).values():
 			image.Hide()
 		self.pvmPersonalImages = {}
+		if getattr(self, "hover", None):
+			self.hover.Reset()
 		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
-			global affectDict, overInImage
+			global affectDict
 			affectDict = {}
-			overInImage = None
 		self.horseImage=None
 		self.lovePointImage=None
 		self.afkImage=None
@@ -1074,10 +1342,44 @@ class AffectShower(ui.Window):
 			self.expandedAffectGroups=set()
 		self.__ArrangeImageList()
 
+	def RefreshPenetrationOverflow(self):
+		attack = max(0, int(player.GetStatus(PenetrationOverflowImage.POINT_RARITY_OVERFLOW_ATTACK)))
+		image = getattr(self, "penetrationOverflowImage", None)
+		if not attack:
+			if image:
+				image.Hide()
+				self.penetrationOverflowImage = None
+				self.__ArrangeImageList()
+			return
+		if image is None:
+			image = PenetrationOverflowImage()
+			image.SetParent(self)
+			self.penetrationOverflowImage = image
+			image.SetAttack(attack)
+			image.Show()
+			self.__ArrangeImageList()
+		elif image.attack != attack:
+			image.SetAttack(attack)
+
 	def SetBiologBonuses(self, bonuses):
+		# The Biologist window snapshot; only a fallback while no AFFECT_COLLECT arrived (the affect is the truth).
 		if not app.ENABLE_RENEWAL_AFFECT_SHOWER:
 			return
-		if not bonuses:
+		if self.__BiologAffectMembers():
+			self.RefreshBiologAffect()
+			return
+		self.__ShowBiologImage(sorted(bonuses.items()) if bonuses else [], False)
+
+	def __BiologAffectMembers(self):
+		data = affectDict.get(BIOLOG_AFFECT, {}) if app.ENABLE_RENEWAL_AFFECT_SHOWER else {}
+		return sorted((entry[0], entry[1]) for entry in data.get("entries", []) if entry[0] and entry[1])
+
+	def RefreshBiologAffect(self):
+		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+			self.__ShowBiologImage(self.__BiologAffectMembers(), True)
+
+	def __ShowBiologImage(self, members, byPoint):
+		if not members:
 			if self.biologImage:
 				self.biologImage.Destroy()
 				self.biologImage = None
@@ -1086,7 +1388,11 @@ class AffectShower(ui.Window):
 		if self.biologImage is None:
 			self.biologImage = BiologPassiveImage()
 			self.biologImage.SetParent(self)
-		self.biologImage.SetMembers(sorted(bonuses.items()))
+			self.biologImage.summaryAnchor = ui.__mem_func__(self.__SummaryAnchor)
+		if byPoint:
+			self.biologImage.SetPointMembers(members)
+		else:
+			self.biologImage.SetApplyMembers(members)
 		self.biologImage.Show()
 		self.__ArrangeImageList()
 
@@ -1144,11 +1450,13 @@ class AffectShower(ui.Window):
 			return True
 
 	def ClearAffects(self):
-		self.living_affectImageDict={}
+		livingImages = {}
 		for key, image in self.affectImageDict.items():
-			if not image.IsSkillAffect():
-				self.living_affectImageDict[key] = image
-		self.affectImageDict = self.living_affectImageDict
+			if image.IsSkillAffect():
+				image.Hide()
+			else:
+				livingImages[key] = image
+		self.affectImageDict = livingImages
 		self.__ArrangeImageList()
 
 	def SetVipStatus(self, active, expires_at):
@@ -1190,12 +1498,18 @@ class AffectShower(ui.Window):
 			)
 			affectDict[affectNew] = affectData
 			maxDuration = affectData["duration"]
+			if type == BIOLOG_AFFECT:
+				self.RefreshBiologAffect()
+				return
 
 			if type < 304 and self.CheckRemoveAffect(type) == False and self.CheckBadAffect(type) == False:
 				return
 		else:
 			if type < 304:
 				return
+
+		if type < self.SKILL_AFFECT_TYPE_LIMIT:
+			return
 
 		if affect in self.affectImageDict:
 			dewIcon = dewcatalog.affect_icon(affect, value)
@@ -1280,12 +1594,21 @@ class AffectShower(ui.Window):
 			affectData, removed = RemoveAffectTooltipEntry(affectDict.get(affectNew, {}), pointIdx)
 			if affectData["entries"]:
 				affectDict[affectNew] = affectData
-				if affect in self.affectImageDict:
+				if type == BIOLOG_AFFECT:
+					self.RefreshBiologAffect()
+					return
+				if type >= self.SKILL_AFFECT_TYPE_LIMIT and affect in self.affectImageDict:
 					self.affectImageDict[affect].SetEndTime(affectData["duration"])
 					self.__ArrangeImageList()
 				return
 			else:
 				affectDict.pop(affectNew, None)
+				if type == BIOLOG_AFFECT:
+					self.RefreshBiologAffect()
+					return
+
+		if type < self.SKILL_AFFECT_TYPE_LIMIT:
+			return
 
 		self.__RemoveAffect(affect)
 		self.__ArrangeImageList()
@@ -1328,7 +1651,7 @@ class AffectShower(ui.Window):
 		if not self.afkImage:
 			image = AffectImage()
 			image.SetParent(self)
-			image.LoadImage("d:/ymir work/ui/game/dungeon_info/clock.png")
+			image.LoadImage("d:/ymir work/ui/game/affect/afk.png")
 			image.SetAffect(self.AFK_AFFECT_KEY)
 			image.SetEvent(clickEvent, "mouse_click")
 			self.afkImage = image
@@ -1400,6 +1723,9 @@ class AffectShower(ui.Window):
 		__blockedAffects = [chr.AFFECT_POISON, chr.AFFECT_BLEEDING, chr.AFFECT_SLOW, chr.AFFECT_STUN]
 		if not affect in __blockedAffects:
 			image.SetSkillAffectFlag(True)
+		if affect not in self.CRITICAL_AFFECTS:
+			image.skillIconSource = (filename, self.__SkillIconIndex(affect, skillIndex))
+			filename = CurrentSkillIcon(*image.skillIconSource)
 		try:
 			image.LoadImage(filename)
 		except:
@@ -1416,10 +1742,49 @@ class AffectShower(ui.Window):
 		image.Show()
 		self.affectImageDict[affect] = image
 
+	@staticmethod
+	def __SkillIconIndex(affect, skillIndex):
+		"""The skill behind a skill affect: the native mapping, else the table of the renewal shower."""
+		if skillIndex:
+			return skillIndex
+		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+			mapped = TypeToAffect(affect)
+			if mapped != affect:
+				return mapped
+		# The wolfman possessions have no native affect -> skill entry (SkillDesc 174 / 175).
+		for name, index in (("AFFECT_RED_POSSESSION", 174), ("AFFECT_BLUE_POSSESSION", 175)):
+			if affect == getattr(chr, name, None):
+				return index
+		return 0
+
+	def RefreshSkillIcons(self):
+		"""After a skill grade change (game.RefreshSkill): the skill affects follow the skill window's tile."""
+		images = list(self.affectImageDict.values()) + list(getattr(self, "pvmPersonalImages", {}).values())
+		for image in images:
+			source = getattr(image, "skillIconSource", None)
+			if not source:
+				continue
+			path = CurrentSkillIcon(*source)
+			if path == image.GetIconPath():
+				continue
+			try:
+				image.LoadImage(path)
+			except Exception:
+				continue
+			image.SetScale(0.7, 0.7)
+			if getattr(image, "pvmPersonalSkill", 0):
+				image.SetSize(22, 22)
+		if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+			uiaffecthover.Invalidate()
+			for groupImage in self.affectGroupImageDict.values():
+				if groupImage.summary and groupImage.summary.IsShow():
+					groupImage.summary.Refresh()
+
 	def __RemoveAffect(self, affect):
 		if affect not in self.affectImageDict:
 			return
-		del self.affectImageDict[affect]
+		image = self.affectImageDict.pop(affect)
+		image.Hide()
 		self.__ArrangeImageList()
 
 	def get_idx(self, j):
@@ -1450,6 +1815,7 @@ class AffectShower(ui.Window):
 		unusedRowIndex, iconPath = self.GROUP_DATA[groupKey]
 		groupImage = AffectGroupImage(groupKey, iconPath, ui.__mem_func__(self.__CloseAffectSummaries))
 		groupImage.SetParent(self)
+		groupImage.summaryAnchor = ui.__mem_func__(self.__SummaryAnchor)
 		groupImage.SetEvent(
 			ui.__mem_func__(self.__ToggleAffectGroup),
 			"mouse_click",
@@ -1457,6 +1823,10 @@ class AffectShower(ui.Window):
 		)
 		self.affectGroupImageDict[groupKey] = groupImage
 		return groupImage
+
+	def __SummaryAnchor(self):
+		"""Top and height of the whole bar: a group's summary panel opens under the bar."""
+		return self.GetGlobalPosition()[1], self.GetHeight()
 
 	def __CloseAffectSummaries(self, exceptGroup=None):
 		for groupKey, image in self.affectGroupImageDict.items():
@@ -1479,6 +1849,8 @@ class AffectShower(ui.Window):
 
 	def __ArrangeImageList(self):
 		sortDict = [[] for i in range(10)]
+		if getattr(self, "penetrationOverflowImage", None):
+			sortDict[0].append([-125, self.penetrationOverflowImage])
 		if getattr(self, "biologImage", None):
 			sortDict[0].append([-200, self.biologImage])
 		groupMembers = {}
@@ -1558,7 +1930,8 @@ class AffectShower(ui.Window):
 						sortDict[rowIndex - 1].append([xIdx, affectImage])
 
 		ySize, xSize, xSizeTotal = (0, 0, 0)
-		for imageList in SortAffectRowsByLength(sortDict):
+		for imageList in SortAffectRowsByLength(sortDict,
+				chr.AFFECT_ATT_SPEED_POTION in self.affectImageDict):
 			if len(imageList) > 1:
 				imageList = sorted(imageList, key= self.get_idx, reverse=False)
 
@@ -1614,14 +1987,22 @@ class AffectShower(ui.Window):
 			return True
 		return False
 
+	def Hide(self):
+		# The bar's OnUpdate stops with it: the controller lets the frame check close a surface (uiaffecthover.Out),
+		# so a hidden bar (Ctrl+Q, cutscene) closes its tooltip itself.
+		if getattr(self, "hover", None):
+			self.hover.Reset()
+		ui.Window.Hide(self)
+
 	def OnUpdate(self):
 		try:
+			if app.ENABLE_RENEWAL_AFFECT_SHOWER:
+				self.hover.Update()
 			if app.GetGlobalTimeStamp() > self.lastUpdateTime:
 				self.lastUpdateTime = app.GetGlobalTimeStamp()
 				if app.ENABLE_RENEWAL_AFFECT_SHOWER:
-					global overInImage
-					if overInImage:
-						overInImage.OnMouseOverIn()
+					# Only the remaining time of the shown tooltip; the content is rebuilt when its data changed.
+					self.hover.Tick()
 				else:
 					for image in self.affectImageDict.values():
 						if image.GetAffect() == chr.NEW_AFFECT_AUTO_HP_RECOVERY or image.GetAffect() == chr.NEW_AFFECT_AUTO_SP_RECOVERY:
@@ -1629,15 +2010,20 @@ class AffectShower(ui.Window):
 							continue
 						if not image.IsSkillAffect():
 							image.UpdateDescription()
-		except Exception as e:
+		except Exception:
+			# Once to syserr instead of silently every frame.
+			if not getattr(self, "hoverUpdateFailed", False):
+				self.hoverUpdateFailed = True
+				import dbg, traceback
+				dbg.TraceError("AffectShower.OnUpdate failed\n%s" % traceback.format_exc())
 			return
 
 	if app.ENABLE_RENEWAL_AFFECT_SHOWER:
 		def AffectToRealIndex(self, affect):
 			_dict = {
-				209:chr.AFFECT_POISON,
-				211:chr.AFFECT_SLOW,
-				210:chr.AFFECT_STUN,
+				209:("actor", chr.AFFECT_POISON),
+				211:("actor", chr.AFFECT_SLOW),
+				210:("actor", chr.AFFECT_STUN),
 				201:chr.AFFECT_ATT_SPEED_POTION,
 				200:chr.AFFECT_MOV_SPEED_POTION,
 				208:chr.AFFECT_FISH_MIND,

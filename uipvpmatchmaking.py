@@ -67,12 +67,35 @@ def _PersonalOutcome(outcome, ratingDelta):
 	return ("ZÁPAS UKONČEN", MUTED)
 
 
+def _FormatPlayedAt(stamp, now, localtime=None):
+	# HistoryRow.playedAt is UNIX_TIMESTAMP(completed_at): "dnes 21:14", "včera 22:07",
+	# "7. 10. 19:32" (another year "7. 10. 2025"), never the raw number.
+	if localtime is None:
+		import time
+		localtime = time.localtime
+	stamp = int(stamp)
+	if stamp <= 0:
+		return "-"
+	played = localtime(stamp)
+	clock = "%d:%02d" % (played.tm_hour, played.tm_min)
+	today = localtime(int(now))
+	yesterday = localtime(int(now) - 86400)
+	day = (played.tm_year, played.tm_yday)
+	if day == (today.tm_year, today.tm_yday):
+		return "dnes " + clock
+	if day == (yesterday.tm_year, yesterday.tm_yday):
+		return "včera " + clock
+	if played.tm_year == today.tm_year:
+		return "%d. %d. %s" % (played.tm_mday, played.tm_mon, clock)
+	return "%d. %d. %d" % (played.tm_mday, played.tm_mon, played.tm_year)
+
+
 def _QueueCooldownPresentation(cooldownSeconds):
 	remaining = max(0, int(cooldownSeconds))
 	if remaining > 0:
-		return ("TREST FRONTY — %d:%02d" % (
+		return ("Trest fronty %d:%02d" % (
 			remaining // 60, remaining % 60), RED, False)
-	return ("PŘIPRAVEN NA HLEDÁNÍ", GREEN, True)
+	return ("Připraven na hledání", GREEN, True)
 
 MODE_CARD_WIDTH = 210
 MODE_CARD_HEIGHT = 92
@@ -252,12 +275,12 @@ def _ModeTitle(mode):
 
 
 def _ErrorText(error):
-	return {1: "SYSTÉM JE VYPNUTÝ", 2: "SLUŽBA NENÍ DOSTUPNÁ",
-		3: "NEPLATNÝ POŽADAVEK", 4: "POSTAVA NESPLŇUJE PODMÍNKY",
-		5: "FRONTU MŮŽE SPUSTIT JEN VŮDCE SKUPINY",
-		6: "SKUPINA JE PRO TENTO REŽIM PŘÍLIŠ VELKÁ",
-		7: "UŽ JSI VE FRONTĚ", 8: "TREST FRONTY — %d s" % int(error[1]),
-		9: "POŽADAVEK UŽ NENÍ PLATNÝ", 10: "VNITŘNÍ CHYBA"}.get(
+	return {1: "Systém je vypnutý.", 2: "Aréna teď není dostupná.",
+		3: "Tohle teď nejde.", 4: "Postava nesplňuje podmínky.",
+		5: "Frontu může spustit jen vůdce skupiny.",
+		6: "Skupina je pro tento režim příliš velká.",
+		7: "Už jsi ve frontě.", 8: "Trest fronty %d s" % int(error[1]),
+		9: "Tato akce už neplatí.", 10: "Něco se nepovedlo. Zkus to znovu."}.get(
 			int(error[0]), "")
 
 
@@ -345,14 +368,14 @@ class PvPRulesDialog(ui.ScriptWindow):
 		self.board.SetTitleName("PRAVIDLA A TRESTY")
 		self.board.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.board.Show()
-		self.__Label(260, 46, "BO3  •  nejvýše 3 minuty na kolo", WHITE)
+		self.__Label(260, 46, "BO3  |  max. 3 minuty na kolo", WHITE)
 		self.__Label(260, 72,
-			"1v1 sólo  •  2v2 a 3v3 sólo nebo skupina", DIM)
+			"1v1 sólo  |  2v2 a 3v3 sólo nebo skupina", DIM)
 		self.__Label(260, 104,
-			"Odmítnutí nebo neodpovězení: 30 sekund, 2 minuty,", GOLD)
+			"Odmítnutí nebo neodpovězení: 30 vteřin, 2 minuty,", GOLD)
 		self.__Label(260, 126, "5 minut, 15 minut", GOLD)
 		self.__Label(260, 154,
-			"Po 24 hodinách bez dalšího prohřešku začíná trest znovu na 30 sekund.",
+			"Po 24 hodinách bez dalšího prohřešku začíná trest znovu na 30 vteřin.",
 			DIM)
 		self.closeButton = ui.Button()
 		self.closeButton.SetParent(self.board)
@@ -612,7 +635,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 		self._Header(PLAY_LEFT[0], PLAY_LEFT[1], PLAY_LEFT[2], "VYBER REŽIM")
 		self.rankHeader = self._Header(
 			PLAY_CENTER[0], PLAY_CENTER[1], PLAY_CENTER[2],
-			"TVŮJ RANK — %s" % _ModeName(self.mode))
+			"TVŮJ RANK | %s" % _ModeName(self.mode))
 		self.seasonHeader = self._Header(
 			PLAY_RIGHT[0], PLAY_RIGHT[1], PLAY_RIGHT[2], "SEZÓNA 0")
 		self.modeCards = []
@@ -622,9 +645,9 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			self.modeCards.append(card)
 			self.widgets.append(card)
 		self._Label(self.body, 120, 401,
-			"Maximální level  •  běžná výbava", MUTED, "center")
+			"Maximální úroveň  |  běžná výbava", MUTED, "center")
 		self._Label(self.body, 120, 421,
-			"BO3  •  3 minuty na kolo", DIM, "center")
+			"BO3  |  3 minuty na kolo", DIM, "center")
 		self.rulesLink = _TextLink(self.body, 35, 444, 170, 24,
 			"?  PRAVIDLA A TRESTY", ui.__mem_func__(self.__OpenRules))
 		self.widgets.append(self.rulesLink)
@@ -678,17 +701,17 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 		self._Label(self.body, 598, 292, "TVOJE HODNOCENÍ", GOLD)
 		self.playRatingRows = {
 			"position": self._StatRow(self.body, 598, 307, 200,
-				"Pořadí serveru", "—", GOLD, 30),
+				"Pořadí serveru", "-", GOLD, 30),
 			"played": self._StatRow(self.body, 598, 341, 200,
 				"Odehrané zápasy", "0", BLUE, 30),
 		}
 		self._Separator(598, 387, 200)
 		self._Label(self.body, 598, 405, "Poslední zápas", DIM)
-		self.lastDeltaLabel = self._Label(self.body, 798, 405, "—", MUTED, "right")
-		self.lastOutcomeLabel = self._Label(self.body, 598, 426, "—", WHITE)
+		self.lastDeltaLabel = self._Label(self.body, 798, 405, "-", MUTED, "right")
+		self.lastOutcomeLabel = self._Label(self.body, 598, 426, "-", WHITE)
 		self.lastWhenLabel = self._Label(self.body, 798, 426, "", MUTED, "right")
 		self.historyLink = _TextLink(self.body, 620, 449, 156, 24,
-			"Zobrazit historii  ›", ui.__mem_func__(self.__OpenHistory))
+			"Zobrazit historii  >", ui.__mem_func__(self.__OpenHistory))
 		self.widgets.append(self.historyLink)
 		self.playRenderState = None
 		self.__RefreshPlayData()
@@ -721,7 +744,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 
 		for card in self.modeCards:
 			card.Refresh(card.mode == self.mode)
-		self.rankHeader.SetText("TVŮJ RANK — %s" % _ModeName(self.mode))
+		self.rankHeader.SetText("TVŮJ RANK | %s" % _ModeName(self.mode))
 		self.seasonHeader.SetText("SEZÓNA %d" % seasonId)
 		rankAsset, rankName, nextRating = _Rank(rating)
 		rankPath = ASSET + "rank_%s_148.png" % rankAsset
@@ -748,14 +771,14 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			self.rankFill.SetSize(fillWidth, 6)
 			self.rankFillWidth = fillWidth
 
-		status = "PŘIPRAVEN NA HLEDÁNÍ"
+		status = "Připraven na hledání"
 		statusColor = GREEN
 		if not pvpmatchmaking.IsAvailable():
-			status = "ČEKÁM NA KOMPATIBILNÍ SERVER"
+			status = "Aréna teď není dostupná."
 			statusColor = RED
 		elif commandPending:
-			status = ("RUŠÍM HLEDÁNÍ…" if queueStatus == pvpmatchmaking.QUEUE_SEARCHING
-				else "PŘIPOJUJI DO FRONTY…")
+			status = ("Hledání se ruší..." if queueStatus == pvpmatchmaking.QUEUE_SEARCHING
+				else "Připojování do fronty...")
 			statusColor = AMBER
 		elif queueStatus == pvpmatchmaking.QUEUE_COOLDOWN and cooldownRemaining > 0:
 			status = cooldownStatus
@@ -769,7 +792,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			status = errorText
 			statusColor = RED
 		elif queueStatus == pvpmatchmaking.QUEUE_SEARCHING:
-			status = "HLEDÁM SOUPEŘE — %02d:%02d" % (
+			status = "Hledání soupeře %02d:%02d" % (
 				int(queue[2]) // 60, int(queue[2]) % 60)
 			statusColor = GREEN
 		elif queueStatus == pvpmatchmaking.QUEUE_COOLDOWN and cooldownRemaining <= 0:
@@ -779,8 +802,8 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 		buttonText = ("ZRUŠIT HLEDÁNÍ" if queueStatus == pvpmatchmaking.QUEUE_SEARCHING
 			else "VSTOUPIT DO FRONTY")
 		if commandPending:
-			buttonText = ("RUŠÍM…" if queueStatus == pvpmatchmaking.QUEUE_SEARCHING
-				else "PŘIPOJUJI…")
+			buttonText = ("RUŠENÍ..." if queueStatus == pvpmatchmaking.QUEUE_SEARCHING
+				else "PŘIPOJENÍ...")
 		buttonEnabled = (not commandPending and pvpmatchmaking.IsAvailable() and
 			queueStatus not in (2, 3) and
 			(queueStatus != pvpmatchmaking.QUEUE_COOLDOWN or cooldownAllowsQueue))
@@ -793,7 +816,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			self.seasonFill.SetSize(seasonWidth, 4)
 			self.seasonFillWidth = seasonWidth
 		self.__SetLabel(self.personalStatsLabel,
-			"OSOBNÍ STATISTIKY — %s" % _ModeName(self.mode), GOLD)
+			"OSOBNÍ STATISTIKY | %s" % _ModeName(self.mode), GOLD)
 		played = completedMatches
 		winrate = int(round(float(wins) * 100.0 / played)) if played else 0
 		self.playStatRows["record"].SetValue("%d / %d" % (wins, losses))
@@ -801,7 +824,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 		self.playStatRows["best"].SetValue(_Format(best))
 		self.playStatRows["streak"].SetValue("%d výher" % winStreak)
 		self.playRatingRows["position"].SetValue(
-			"#%d" % position if position else "—")
+			"#%d" % position if position else "-")
 		self.playRatingRows["played"].SetValue(str(played))
 
 		lastOutcome = int(result[1]) if int(result[7]) else 0
@@ -815,10 +838,10 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			lastDelta = int(last[7])
 		outcomeText, outcomeColor = _PersonalOutcome(lastOutcome, lastDelta)
 		if not lastOutcome:
-			outcomeText, outcomeColor = "—", MUTED
+			outcomeText, outcomeColor = "-", MUTED
 		if lastOutcome in (1, 2, 3):
 			outcomeText += "  %d : %d" % (lastScoreO, lastScoreX)
-		deltaText = "%+d ELO" % lastDelta if lastOutcome else "—"
+		deltaText = "%+d ELO" % lastDelta if lastOutcome else "-"
 		deltaColor = GREEN if lastDelta > 0 else (RED if lastDelta < 0 else MUTED)
 		self.__SetLabel(self.lastOutcomeLabel, outcomeText, outcomeColor)
 		self.__SetLabel(self.lastDeltaLabel, deltaText, deltaColor)
@@ -828,7 +851,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			return
 		mainVid = player.GetMainCharacterIndex()
 		if player.IsPartyMember(mainVid) and not player.IsPartyLeader(mainVid):
-			self.localError = "FRONTU MŮŽE SPUSTIT JEN VŮDCE SKUPINY"
+			self.localError = "Frontu může spustit jen vůdce skupiny."
 			self.playRenderState = None
 			self.__RefreshPlayData()
 			return
@@ -858,7 +881,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 		self._Label(self.body, 115, 204, rankName, GOLD, "center")
 		self._Label(self.body, 115, 227, "%s ELO" % _Format(stats[1]), WHITE, "center")
 		self._StatRow(self.body, 22, 248, 186, "Pořadí",
-			"#%d" % stats[8] if stats[8] else "—", GOLD, 28)
+			"#%d" % stats[8] if stats[8] else "-", GOLD, 28)
 		self._StatRow(self.body, 22, 280, 186, "Výhry / prohry",
 			"%d / %d" % (stats[3], stats[4]), GREEN, 28)
 		self._StatRow(self.body, 22, 312, 186, "Nejvyšší Elo",
@@ -878,7 +901,7 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			self.body, 238, 91, 567, 29, _SignedColor(0xff160b0c))
 		self.widgets.append(headerRow)
 		for x, label, align in zip(LEADERBOARD_COLUMNS,
-			("#", "RANK", "HRÁČ", "ELO", "V–P", "FORMA"),
+			("#", "RANK", "HRÁČ", "ELO", "V-P", "FORMA"),
 			("center", "center", "left", "left", "left", "center")):
 			self._Label(self.body, x, 100, label, GOLD, align)
 		board = tuple(pvpmatchmaking.GetLeaderboard())
@@ -906,20 +929,20 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			self._Label(self.body, 330, y + 13, row[5], WHITE)
 			self._Label(self.body, 650, y + 13, _Format(row[2]), GOLD)
 			self._Label(self.body, 720, y + 13,
-				"%d–%d" % (row[3], row[4]), WHITE)
+				"%d-%d" % (row[3], row[4]), WHITE)
 			form = int(row[3]) - int(row[4])
 			self._Label(self.body, 790, y + 13, "%+d" % form,
 				GREEN if form > 0 else (RED if form < 0 else MUTED), "center")
 		if rowCount == 0:
 			errorText = _ErrorText(tuple(pvpmatchmaking.GetError()))
-			message = errorText or ("V žebříčku zatím nikdo není." if boardValid else "Žebříček se načítá…")
+			message = errorText or ("V žebříčku zatím nikdo není." if boardValid else "Žebříček se načítá...")
 			self._Label(self.body, 522, 270, message,
 				RED if errorText else DIM, "center")
 
 	def __BuildHistory(self):
 		self._Panel(*HISTORY_TABLE)
 		self._Header(HISTORY_TABLE[0], HISTORY_TABLE[1], HISTORY_TABLE[2],
-			"HISTORIE ZÁPASŮ — %s" % _ModeName(self.mode))
+			"HISTORIE ZÁPASŮ | %s" % _ModeName(self.mode))
 		for mode, x in ((1, 28), (2, 93), (3, 158)):
 			button = self._Button(self.body, x, 92, _ModeName(mode),
 				lambda value=mode: self.SelectMode(value),
@@ -938,16 +961,17 @@ class PvPMatchmakingWindow(ui.ScriptWindow):
 			row = tuple(pvpmatchmaking.GetHistoryRow(index))
 			y = 164 + index * 29
 			outcome, outcomeColor = _PersonalOutcome(row[2], row[7])
-			self._Label(self.body, 34, y, str(row[1]), DIM)
+			self._Label(self.body, 34, y,
+				_FormatPlayedAt(row[1], app.GetGlobalTimeStamp()), DIM)
 			self._Label(self.body, 166, y, outcome, outcomeColor)
 			self._Label(self.body, 350, y, "%d : %d" % (row[3], row[4]), WHITE)
-			self._Label(self.body, 510, y, "%s → %s" % (_Format(row[5]), _Format(row[6])), WHITE)
+			self._Label(self.body, 510, y, "%s -> %s" % (_Format(row[5]), _Format(row[6])), WHITE)
 			self._Label(self.body, 798, y, "%+d" % int(row[7]),
 				GREEN if int(row[7]) > 0 else (RED if int(row[7]) < 0 else MUTED),
 				"right")
 		if rowCount == 0:
 			errorText = _ErrorText(tuple(pvpmatchmaking.GetError()))
-			message = errorText or ("Zatím tu nejsou žádné hodnocené zápasy." if historyValid else "Historie se načítá…")
+			message = errorText or ("Zatím tu nejsou žádné hodnocené zápasy." if historyValid else "Historie se načítá...")
 			self._Label(self.body, 430, 270, message, RED if errorText else DIM, "center")
 
 	def OnServerChanged(self):
@@ -1055,10 +1079,10 @@ class PvPReadyWindow(ui.ScriptWindow):
 		self.right = [self.__ParticipantRow(292, 231 + index * 26)
 			for index in range(3)]
 		self.__Label(240, 264, "VS", RED, "center")
-		self.decline = self.__Button(112, 318, "ODMÍTNOUT", self.__Decline,
-			None, 100, 21, "100x21")
-		self.accept = self.__Button(222, 311, "PŘIJMOUT", self.__Accept,
+		self.accept = self.__Button(112, 311, "PŘIJMOUT", self.__Accept,
 			ASSET + "ready/action_150x36", 150, 36)
+		self.decline = self.__Button(272, 318, "ODMÍTNOUT", self.__Decline,
+			None, 100, 21, "100x21")
 		self.buttonStates["accept"] = ("PŘIJMOUT", True)
 		self.buttonStates["decline"] = ("ODMÍTNOUT", True)
 		self.Hide()
@@ -1253,7 +1277,7 @@ class PvPReadyWindow(ui.ScriptWindow):
 				labelIndex = index if team == 1 else index + 3
 				if index < len(teamRows[team]):
 					row = teamRows[team][index]
-					status = "PŘIJATO" if int(row[2]) == 1 else "ČEKÁ SE…"
+					status = "PŘIJATO" if int(row[2]) == 1 else "ČEKÁ SE..."
 					self.__SetLabelState(labelIndex, label,
 						status,
 						GREEN if int(row[2]) == 1 else GOLD)
@@ -1264,11 +1288,11 @@ class PvPReadyWindow(ui.ScriptWindow):
 			self.summary.SetText(summaryText)
 			self.summaryText = summaryText
 		if self.accepted or self.pendingDecision == 1:
-			self.__SetButtonState("accept", self.accept, "PŘESOUVÁM…", False)
+			self.__SetButtonState("accept", self.accept, "PŘESUN...", False)
 			self.__SetButtonState("decline", self.decline, "ODMÍTNOUT", False)
 		elif self.declining or self.pendingDecision == 0:
 			self.__SetButtonState("accept", self.accept, "PŘIJMOUT", False)
-			self.__SetButtonState("decline", self.decline, "ODCHÁZÍM…", False)
+			self.__SetButtonState("decline", self.decline, "ODCHOD...", False)
 		else:
 			self.__SetButtonState("accept", self.accept, "PŘIJMOUT", True)
 			self.__SetButtonState("decline", self.decline, "ODMÍTNOUT", True)
@@ -1379,7 +1403,7 @@ class PvPMatchHud(ui.Window):
 		else:
 			self.countdownRing.Hide()
 			self.status.SetPosition(230, 29)
-			self.status.SetText("ČEKÁ SE NA HRÁČE")
+			self.status.SetText("Čeká se na hráče")
 			self.clock.SetText("")
 
 	def __ShowResult(self, result):
@@ -1431,3 +1455,25 @@ class PvPMatchHud(ui.Window):
 		if now - self.lastRefresh >= 0.2:
 			self.lastRefresh = now
 			self.Refresh()
+
+
+def CreateWindow():
+	# The rated arena window of the interface: the R1 look, variant C (owner
+	# 2026-10-09, root/uipvpmatchmakingr1.py), unless Settings -> "Starý vzhled"
+	# chose the original windows; a failure while building the R1 window is
+	# traced to syserr and the original window is used.
+	try:
+		import uir1
+		useR1 = uir1.UseR1()
+	except Exception:
+		useR1 = False
+	if useR1:
+		try:
+			import uipvpmatchmakingr1
+			return uipvpmatchmakingr1.ArenaWindow()
+		except Exception:
+			try:
+				uir1.TraceFailure("the rated arena window")
+			except Exception:
+				pass
+	return PvPMatchmakingWindow()

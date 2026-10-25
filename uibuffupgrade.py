@@ -1,347 +1,194 @@
-import ui 
-import wndMgr
-import player
-import constInfo
-import item
+# -*- coding: utf-8 -*-
+# Vylepšování buffy: the Buffi (support shaman) skill upgrade window opened by the "+" buttons of the Šamanská deska.
+#
+# The same window as "Okno vylepšení dovedností" (uiSkillUpgrade.SkillUpgradeWindow, uiscript skillupgrade.py): the
+# skill row, the book / soul stone with the two reading supports (Exorcism scroll 71001, Concentrated reading 71094)
+# and their check boxes, the item counts, the slider with "Do G", Potvrdit / Zrušit, its R1 look (the shared R1 frame,
+# root/uir1frame.py, item slot C) and "Starý vzhled". Only the Buffi bits differ:
+#
+# * the skill row shows the five Buffi skills (osfInfo.SUPPORT_SKILLS); every skill below P can be chosen and the
+#   choice picks its reading item: the book of that spell until G (level < 30), the server-selected Buffi soul stone until P;
+# * the book stage reads like the books of the character skills: the count up to 55 or "Do G" (the server reads
+#   until G), the soul stone stage up to 100 attempts;
+# * Potvrdit sends "/support_upgrade <skill 1-5> <count | all> <exorcism> <concentrated>" (the server command of the
+#   Buffi skills; the arguments as skillbookpolicy.UniversalReadArguments writes them for the character skills).
+#   Soul-stone reads also share the optional Zen Bean control and append its flag when checked.
 import chat
-import skill
-import uiToolTip
-import net
 import localeInfo
+import net
 import osfInfo
+import skillbookpolicy
+import servergamedata
+import uiSkillUpgrade
 
-MAX_COUNT = 20
+SKILL_COUNT = 5
+SKILL_VNUMS = {1: 196, 2: 194, 3: 195, 4: 197, 5: 198}         # the client skill vnums of the Buffi skills
+SKILL_BOOKS = {1: 50496, 2: 50494, 3: 50495, 4: 50510, 5: 50511}  # the book of each spell (M -> G)
+SOUL_STONE = servergamedata.BUFF_SOUL_STONE                       # G -> P, server authority
+BOOK_STAGE_END = 30          # REAL_LVL 30 = G1
+MAX_LEVEL = 40               # REAL_LVL 40 = P
 
-class SupportUpgrade(ui.ScriptWindow):
 
-	def __init__(self): 
-		self.isLoaded = 0
-		
-		self.board = None
-		self.slots = None
-		self.cancelBtn = None
-		self.confirmBtn = None
-		self.toolTipSkill = 0
-		self.curCount = 1
-		self.useExorcismBook = 1
-		self.useLuckBook = 1
-		self.skillID = 1
-		self.itemUpgraderImg = None
-		self.itemUpgraderVnum = 0
-		self.itemExorcismVnum = 0
-		self.itemReadingVnum = 0
-		self.itemExorcism = 0
-		self.itemReading = 0
+def HeaderTitle(titleFormat):
+	"""The window name of the locale title "Vylepšování buffy [%s]" (the part before the skill name): the full title
+	with a long skill name ("Uhánět rychlostí větru") does not fit beside the X of the R1 header."""
+	try:
+		head = titleFormat.split("%s")[0].rstrip(" [(:-")
+	except Exception:
+		head = ""
+	return head or titleFormat
+
+
+class SupportUpgrade(uiSkillUpgrade.SkillUpgradeWindow):
+
+	def __init__(self):
+		self.skillID = 0
 		self.toolTipItem = None
-		self.isItemToolTipHidden = True
-		
-		ui.ScriptWindow.__init__(self)
-		self.__LoadWindow()
+		uiSkillUpgrade.SkillUpgradeWindow.__init__(self)
+		self.board.SetTitleName(HeaderTitle(localeInfo.SUPPORT_UPGRADING_SKILL))
 
-	def __LoadWindow(self):
-		if self.isLoaded == 1:
-			return
-
-		self.isLoaded = 1
-
+	# ------------------------------------------------------------------ the Buffi skills
+	def RealLevel(self, skillID):
 		try:
-			pyScrLoader = ui.PythonScriptLoader()
-			pyScrLoader.LoadScriptFile(self, "UIScript/buffupgrade.py")
-		except:
-			import exception
-			exception.Abort("SupportUpgrade.__LoadWindow error")
-			
-		try:
-			self.board = self.GetChild("board")
-			self.slots = self.GetChild("SkillSlots")
-			
-			self.confirmBtn = self.GetChild("confirm")
-			self.cancelBtn = self.GetChild("cancel")
-			self.countText = self.GetChild("currentCount")
-			self.countControl = self.GetChild("CountController")
-			self.countControl.SetEvent(ui.__mem_func__(self.OnChangeCount))
-			
-			self.slots.SetSelectItemSlotEvent(ui.__mem_func__(self.SelectSkill))
-			self.slots.SetSelectEmptySlotEvent(ui.__mem_func__(self.SelectSkill))
-			self.slots.SetUnselectItemSlotEvent(ui.__mem_func__(self.SelectSkill))
-			self.slots.SetUseSlotEvent(ui.__mem_func__(self.SelectSkill))
-			self.slots.SetPressedSlotButtonEvent(ui.__mem_func__(self.SelectSkill))
-			self.slots.SetOverInItemEvent(ui.__mem_func__(self.OverInItem))
-			self.slots.SetOverOutItemEvent(ui.__mem_func__(self.OverOutItem))
-			
-			for xx in range(5):
-				self.slots.SetCoverButton(xx+1)
-			
-			self.board.SetCloseEvent(self.Hide)
-			self.cancelBtn.SetEvent(ui.__mem_func__(self.Hide))
-			self.confirmBtn.SetEvent(ui.__mem_func__(self.Confirm))
+			return int(osfInfo.SUPPORT_SKILLS[skillID]["REAL_LVL"])
+		except Exception:
+			return MAX_LEVEL
 
-			self.itemUpgraderImg = ui.ImageBox()
-			self.itemUpgraderImg.SetParent(self)
-			self.itemUpgraderImg.LoadImage("icon/item/50513.tga")
-			self.itemUpgraderImg.SetPosition(195, 127)
-			self.itemUpgraderImg.Show()
+	def IsBookStage(self):
+		return 0 < self.skillID and self.RealLevel(self.skillID) < BOOK_STAGE_END
 
-			self.SlotLuckItem = ui.ImageBox()
-			self.SlotLuckItem.SetParent(self)
-			self.SlotLuckItem.SetPosition(60, 127)
-			self.SlotLuckItem.LoadImage("d:/ymir work/ui/public/Slot_Base.sub")
-			self.SlotLuckItem.Show()
+	def SoulStoneSkill(self):
+		"""The skill of the Buffi soul stone (OpenSupportUpgrade 0): the first one between G and P, else the first one
+		below P, else the first one."""
+		order = sorted(SKILL_VNUMS)
+		for slot in order:
+			if BOOK_STAGE_END <= self.RealLevel(slot) < MAX_LEVEL:
+				return slot
+		for slot in order:
+			if self.RealLevel(slot) < MAX_LEVEL:
+				return slot
+		return order[0]
 
-			self.itemExorcism = ui.ImageBox()
-			self.itemExorcism.SetParent(self.SlotLuckItem)
-			self.itemExorcism.LoadImage("icon/item/71001.tga")
-			self.itemExorcism.SetPosition(0, 0)
-			self.itemExorcism.Show()
-
-			self.checkBoxLuck = ui.CheckBox()
-			self.checkBoxLuck.SetParent(self)
-			self.checkBoxLuck.SetPosition(35, 138)
-			self.checkBoxLuck.SetEvent(ui.__mem_func__(self.SetUseLuckBook), "ON_CHECK", 1)
-			self.checkBoxLuck.SetEvent(ui.__mem_func__(self.SetUseLuckBook), "ON_UNCKECK", 0)
-			self.checkBoxLuck.SetCheckStatus(1)
-			self.checkBoxLuck.Show()
-
-			self.SlotTimeItem = ui.ImageBox()
-			self.SlotTimeItem.SetParent(self)
-			self.SlotTimeItem.SetPosition(136, 127)
-			self.SlotTimeItem.LoadImage("d:/ymir work/ui/public/Slot_Base.sub")
-			self.SlotTimeItem.Show()
-
-			self.itemReading = ui.ImageBox()
-			self.itemReading.SetParent(self.SlotTimeItem)
-			self.itemReading.LoadImage("icon/item/71094.tga")
-			self.itemReading.SetPosition(0, 0)
-			self.itemReading.Show()
-
-			self.checkBoxTime = ui.CheckBox()
-			self.checkBoxTime.SetParent(self)
-			self.checkBoxTime.SetPosition(111, 138)
-			self.checkBoxTime.SetEvent(ui.__mem_func__(self.SetUseExorcismBook), "ON_CHECK", 1)
-			self.checkBoxTime.SetEvent(ui.__mem_func__(self.SetUseExorcismBook), "ON_UNCKECK", 0)
-			self.checkBoxTime.SetCheckStatus(1)
-			self.checkBoxTime.Show()
-			
-		except:
-			import exception
-			exception.Abort("SupportUpgrade.LoadWindow.BindObject")
-			
-		self.SetCenterPosition()
-		
-	def OnUpdate(self):
-		if self.toolTipItem:
-			if self.itemUpgraderImg != None:
-				if self.itemUpgraderImg.IsIn():
-					self.OverInUpgraderItem()
-				elif self.itemExorcism.IsIn():
-					self.OverInExorcismItem()
-				elif self.itemReading.IsIn():
-					self.OverInReadingItem()
-				elif not self.isItemToolTipHidden:
-					self.OverOutUpgraderItem()
-		
 	def SetSkill(self, skillID):
+		"""Opens the window for one Buffi skill (1 - 5): its reading item and the title; 0: the soul stone skill."""
+		if 0 == skillID:
+			skillID = self.SoulStoneSkill()
+		if skillID not in SKILL_VNUMS:
+			return
 		self.skillID = skillID
-		self.SetSlotSkill(skillID)
-		# 1 = Dragon's Aid 196 (96+100)
-		# 2 = Blessing 194 (94+100)
-		# 3 = Reflect 195 (95+100)
-		# 4 = Swiftness 197 (97+100)
-		# 5 = Attack Up 198 (98+100)
-		
+		self.SetUpgradeItem(SKILL_BOOKS[skillID] if self.IsBookStage() else SOUL_STONE)
+		self.board.SetTitleName(HeaderTitle(localeInfo.SUPPORT_UPGRADING_SKILL))
+		if self.IsShow():
+			self.Show()
+
 	def SetSlotSkill(self, skillID):
-		skillVnum = {
-			1 : 196,
-			2 : 194,
-			3 : 195,
-			4 : 197,
-			5 : 198,
-		}
-		
-		skillName = skill.GetSkillName(skillVnum[skillID], osfInfo.SUPPORT_SKILLS[skillID]["GRADE"])
-		self.board.SetTitleName(localeInfo.SUPPORT_UPGRADING_SKILL % skillName)
-		
-		for i in range(5):
-			self.slots.SetSkillSlotNew(i+1, skillVnum[i+1], osfInfo.SUPPORT_SKILLS[i+1]["GRADE"], osfInfo.SUPPORT_SKILLS[i+1]["LVL"])
-			self.slots.SetSlotCountNew(i+1, osfInfo.SUPPORT_SKILLS[i+1]["GRADE"], osfInfo.SUPPORT_SKILLS[i+1]["LVL"])
-			
-		self.slots.ActivateSlot(skillID)
-		self.DeactivateSlotEffects(skillID)
-		
-		skillToBookVnum = {
-			1 : 50496,
-			2 : 50494,
-			3 : 50495,
-			4 : 50510,
-			5 : 50511,
-		}
-		
-		selectedSkillLevel = osfInfo.SUPPORT_SKILLS[skillID]["REAL_LVL"]
-		itemUpgrader = 0
-		if selectedSkillLevel < 30:
-			itemUpgrader = skillToBookVnum[skillID]
-			self.itemExorcismVnum = 71001
-			self.itemReadingVnum = 71094
-		elif selectedSkillLevel < 40:
-			itemUpgrader = 50513
-			self.itemExorcismVnum = 71001
-			self.itemReadingVnum = 71094
+		self.SetSkill(skillID)
 
-		self.itemUpgraderVnum = itemUpgrader
-		
-		item.SelectItem(itemUpgrader)
-		self.itemUpgraderImg.LoadImage(item.GetIconImageFileName())
-		
-		item.SelectItem(self.itemExorcismVnum)
-		self.itemExorcism.LoadImage(item.GetIconImageFileName())
-		
-		item.SelectItem(self.itemReadingVnum)
-		self.itemReading.LoadImage(item.GetIconImageFileName())
-
-	def SetUseExorcismBook(self, checkType, bUse):
-		self.useExorcismBook = bUse
-		
-	def SetUseLuckBook(self, checkType, bUse):
-		self.useLuckBook = bUse
-		
-	def OnChangeCount(self):
-		openTemp = int(self.countControl.GetSliderPos() * MAX_COUNT)
-		if openTemp == 0:
-			self.SetCount(1)
-		else:
-			self.SetCount(openTemp)
-			
-	def SetCount(self, amount):
-		self.curCount = amount
-		self.countText.SetText(str(amount) + "x")
-		# self.checkBoxLuck.SetTextInfo(localeInfo.SOUL_STONE_USE + " " + str(self.curCount) + "x " + localeInfo.SOUL_STONE_ITEM_1)
-		# self.checkBoxTime.SetTextInfo(localeInfo.SOUL_STONE_USE + " " + str(self.curCount) + "x " + localeInfo.SOUL_STONE_ITEM_2)
-		
-	def SelectSkill(self, index):
-		if osfInfo.SUPPORT_SKILLS[index]["REAL_LVL"] >= 40:
-			return
-			
-		self.SetSkill(index)
-		
-		self.DeactivateSlotEffects(index)
-				
-	def DeactivateSlotEffects(self, skillID):
-		startSlotIndex = self.slots.GetStartIndex()
+	def RefreshSkillPage(self):
+		skillPage = self.slots
+		startSlotIndex = uiSkillUpgrade.SKILL_SLOT_START
+		self.isSlotSelectable = [False for x in range(startSlotIndex + 6)]
 		for i in range(6):
-			slotIndex = i + startSlotIndex
-			if slotIndex != skillID:
-				self.slots.DeactivateSlot(slotIndex)
-		
-	def OverInItem(self, slotNumber):
-		if 0 == self.toolTipSkill:
-			return
-		
-		skillVnum = {
-			1 : 196,
-			2 : 194,
-			3 : 195,
-			4 : 197,
-			5 : 198,
-		}
-		
-		skillIndex = skillVnum[slotNumber]
-		skillLevel = osfInfo.SUPPORT_SKILLS[slotNumber]["LVL"]
-		skillGrade = osfInfo.SUPPORT_SKILLS[slotNumber]["GRADE"]
-		skillRealLvl = osfInfo.SUPPORT_SKILLS[slotNumber]["REAL_LVL"]
-		
-		self.toolTipSkill.SetSupportSkill(skillIndex, skillLevel, skillGrade, skillRealLvl)
-		
-	def OverOutItem(self):
-		if 0 != self.toolTipSkill:
-			self.toolTipSkill.HideToolTip()
-		
-	def SetSkillToolTip(self, toolTipSkill):
-		self.toolTipSkill = toolTipSkill
-		
-	def Confirm(self):
-		strArg = str(self.skillID) + " " + str(self.curCount) + " " + str(self.useExorcismBook) + " " + str(self.useLuckBook)
-		net.SendChatPacket("/support_upgrade " + str(strArg))
-		self.Close()
+			slotIndex = startSlotIndex + i
+			skillPage.ClearSlot(slotIndex)
+			skillPage.DeactivateSlot(slotIndex)
+			if slotIndex not in SKILL_VNUMS:
+				continue
+			info = osfInfo.SUPPORT_SKILLS[slotIndex]
+			skillPage.SetSkillSlotNew(slotIndex, SKILL_VNUMS[slotIndex], info["GRADE"], info["LVL"])
+			skillPage.SetSlotCountNew(slotIndex, info["GRADE"], info["LVL"])
+			skillPage.SetCoverButton(slotIndex)
+			if self.RealLevel(slotIndex) < MAX_LEVEL:
+				self.isSlotSelectable[slotIndex] = True
+			else:
+				skillPage.DisableCoverButton(slotIndex)
+		if 0 < self.selectedSlot < len(self.isSlotSelectable) and self.isSlotSelectable[self.selectedSlot]:
+			skillPage.ActivateSlot(self.selectedSlot)
+		else:
+			self.selectedSlot = 0
+		skillPage.RefreshSlot()
 
-	def OnPressEscapeKey(self):
-		self.Hide()
-		return True
-		
-	def Show(self):
-		self.checkBoxTime.SetCheckStatus(self.useExorcismBook)
-		self.checkBoxLuck.SetCheckStatus(self.useLuckBook)
-		self.countControl.SetSliderPos(0.0)
-		self.SetCount(1)		
-		ui.ScriptWindow.Show(self)
-		
-	def Close(self):
-		self.Hide()
-		
-	def Hide(self):
-		if 0 != self.toolTipSkill:
-			self.toolTipSkill.Hide()
-			
-		if self.toolTipItem:
-			self.toolTipItem.HideToolTip()
-			
-		ui.ScriptWindow.Hide(self)
-		
+	def SelectBookSkill(self):
+		if self.skillID and self.isSlotSelectable[self.skillID]:
+			uiSkillUpgrade.SkillUpgradeWindow.ClickSkillSlot(self, self.skillID)
+
+	def SelectSkill(self, index):
+		self.__Choose(index)
+
+	def ClickSkillSlot(self, index):
+		self.__Choose(index)
+
+	def __Choose(self, index):
+		"""Another skill: its own reading item (book or soul stone), the count from the start."""
+		if not 0 <= index < len(self.isSlotSelectable) or not self.isSlotSelectable[index]:
+			return
+		if index != self.skillID:
+			self.SetSkill(index)
+		uiSkillUpgrade.SkillUpgradeWindow.ClickSkillSlot(self, index)
+
+	# ------------------------------------------------------------------ the reading rules
+	def IsUniversalBook(self):
+		"""The book stage reads like the character skill books: up to 55 or "Do G"."""
+		return self.IsBookStage()
+
+	def UsesSoulStone(self):
+		return self.itemUpgraderVnum == SOUL_STONE
+
+	def MaxCount(self):
+		return skillbookpolicy.MAX_SELECTED_BOOKS if self.IsBookStage() else uiSkillUpgrade.SOUL_STONE_MAX_COUNT
+
+	def Confirm(self):
+		self.RefreshSkillPage()
+		self.SetCount(self.curCount)
+		if self.selectedSlot not in SKILL_VNUMS:
+			chat.AppendChat(chat.CHAT_TYPE_INFO, localeInfo.SOUL_STONE_GUI)
+			return
+		count = self.curCount if self.curCount > 0 else 0
+		arguments = skillbookpolicy.UniversalReadArguments(
+			self.selectedSlot, count, self.useExorcismBook, self.useLuckBook)
+		if self.UsesSoulStone() and self.useZenBean:
+			arguments += " %d" % self.useZenBean
+		net.SendChatPacket("/support_upgrade " + arguments)
+		# the window stays open (see uiskillupgrade.SkillUpgradeWindow.Confirm)
+		self.Refresh()
+
+	def ItemForSkill(self, slot):
+		self.skillID = slot
+		return SKILL_BOOKS[slot] if self.IsBookStage() else SOUL_STONE
+
+	def FollowsSkillGrade(self):
+		return False
+
+	# ------------------------------------------------------------------ tooltips
+	def OverInItem(self, slotNumber):
+		if 0 == self.toolTipSkill or slotNumber not in SKILL_VNUMS:
+			return
+		info = osfInfo.SUPPORT_SKILLS[slotNumber]
+		self.toolTipSkill.SetSupportSkill(SKILL_VNUMS[slotNumber], info["LVL"], info["GRADE"], info["REAL_LVL"])
+		# rebuilt from the new level when the Buffi levels arrive (uibuff.SetSkillLvl)
+		remember = getattr(self.toolTipSkill, "RememberRefresh", None)
+		if remember:
+			remember(self.OverInItem, slotNumber)
+
 	def SetItemToolTip(self, itemTooltip):
 		self.toolTipItem = itemTooltip
-		
-	def __ShowToolTip(self, itemVnum):
-		if self.toolTipItem:
-			self.toolTipItem.SetItemOnlyVnum(itemVnum)
-			
-	def OverInItem2(self, index):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			if interface.tooltipItem:
-				interface.tooltipItem.SetItemToolTip(index)
-				interface.tooltipItem.ShowToolTip()
 
-	def OverOutItem2(self):
-		interface = osfInfo.GetInterfaceInstance()
-		if interface:
-			if interface.tooltipItem:
-				interface.tooltipItem.HideToolTip()
+	def OverInItem2(self, itemType):
+		"""The tooltip of the book / soul stone and of the two reading supports, as the original Buffi window showed it:
+		ItemToolTip.SetItemOnlyVnum (the item name, its description and the GM Vnum / ItemType / ItemSubType lines).
+		The inherited SetItemToolTip(vnum) would take the character skill book branch of ItemToolTip.AddItemData
+		(ITEM_TYPE_SKILLBOOK 50401 - 50511) and show the skill of the book ("Zrcadlit Kniha schopností" with the three
+		grade icons) instead of the book of the spell."""
+		vnum = {"upgrader": self.itemUpgraderVnum, "luck": self.itemLuckVnum, "time": self.itemTimeVnum,
+			"zen": self.itemZenVnum}.get(itemType)
+		tooltip = self.toolTipItem
+		if tooltip is None:
+			interface = osfInfo.GetInterfaceInstance()
+			tooltip = interface.tooltipItem if interface else None
+		if not vnum or tooltip is None:
+			return uiSkillUpgrade.SkillUpgradeWindow.OverInItem2(self, itemType)
+		tooltip.SetItemOnlyVnum(vnum)
 
-	def OverInUpgraderItem(self):
-		self.__ShowToolTip(self.itemUpgraderVnum)
-		self.isItemToolTipHidden = False
-		
-	def OverInExorcismItem(self):
-		self.__ShowToolTip(self.itemExorcismVnum)
-		self.isItemToolTipHidden = False
-		
-	def OverInReadingItem(self):
-		self.__ShowToolTip(self.itemReadingVnum)
-		self.isItemToolTipHidden = False
-
-	def OverOutUpgraderItem(self):
-		if self.toolTipItem:
-			self.toolTipItem.HideToolTip()
-			
-		self.isItemToolTipHidden = True
-		
 	def Destroy(self):
-		self.ClearDictionary()
-		self.board = None
-		self.slots = None
-		self.cancelBtn = None
-		self.confirmBtn = None
-		self.toolTipSkill = 0
-		self.curCount = 1
-		self.useExorcismBook = 1
-		self.useLuckBook = 1
-		self.itemUpgraderImg = None
-		self.itemUpgraderVnum = 0
-		self.itemExorcismVnum = 0
-		self.itemReadingVnum = 0
-		self.itemExorcism = 0
-		self.itemReading = 0
 		self.toolTipItem = None
-		self.isItemToolTipHidden = True
-
-	def __del__(self): 
-		ui.ScriptWindow.__del__(self) 
+		uiSkillUpgrade.SkillUpgradeWindow.Destroy(self)

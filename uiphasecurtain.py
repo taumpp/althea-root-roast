@@ -7,13 +7,23 @@ class PhaseCurtain(ui.Bar):
 	def __init__(self):
 		#print "NEW CURTAIN -----------------------------------------------------------------------------"
 		ui.Bar.__init__(self, "CURTAIN")
+		if getattr(wndMgr, "IME_RETURN_PRIORITY", 0) == 1:
+			self.AddFlag("ime_return_priority")
 		self.speed = 0.1
 		self.curAlpha = 0.0
 		self.event = 0
 		self.args = -1
 		self.FadeInFlag = False
+		# A positive duration makes FadeIn wall-clock based instead of
+		# frame based, so a slow or background frame rate cannot stretch it.
+		self.fadeInDuration = 0.0
+		self.fadeInStartTime = 0.0
+		self.fadeInStartAlpha = 0.0
 		self.SetWindowName("PhaseCurtain")
 		self.AddFlag("float")
+
+	def OnIMEReturn(self):
+		return True
 
 	def __del__(self):
 		#print "---------------------------------------------------------------------------- DELETE CURTAIN"
@@ -23,6 +33,7 @@ class PhaseCurtain(ui.Bar):
 		self.FadeOut(ui.__mem_func__(event), args)
 
 	def FadeOut(self, event, args = -1):
+		self.fadeInDuration = 0.0
 		self.curAlpha = 0.0
 		self.SetAlpha(self.curAlpha)
 		#self.SetTop()
@@ -30,14 +41,19 @@ class PhaseCurtain(ui.Bar):
 		self.event = event
 		self.args = args
 
-	def FadeIn(self):
+	def FadeIn(self, duration = 0.0):
 		self.event = 0
 		self.FadeInFlag = True
+		self.fadeInDuration = max(0.0, float(duration))
+		if self.fadeInDuration > 0.0:
+			self.fadeInStartTime = app.GetTime()
+			self.fadeInStartAlpha = self.curAlpha
 
 	def CoverInstantly(self):
 		self.event = 0
 		self.args = -1
 		self.FadeInFlag = False
+		self.fadeInDuration = 0.0
 		self.curAlpha = 1.0
 		self.SetAlpha(self.curAlpha)
 		self.Show()
@@ -46,6 +62,7 @@ class PhaseCurtain(ui.Bar):
 		self.event = 0
 		self.args = -1
 		self.FadeInFlag = False
+		self.fadeInDuration = 0.0
 		self.curAlpha = 0.0
 		self.SetAlpha(self.curAlpha)
 		self.Hide()
@@ -74,11 +91,17 @@ class PhaseCurtain(ui.Bar):
 					event()
 
 		elif True == self.FadeInFlag:
-			self.curAlpha -= self.speed
+			if self.fadeInDuration > 0.0:
+				elapsed = max(0.0, app.GetTime() - self.fadeInStartTime)
+				progress = min(1.0, elapsed / self.fadeInDuration)
+				self.curAlpha = self.fadeInStartAlpha * (1.0 - progress)
+			else:
+				self.curAlpha -= self.speed
 			if self.curAlpha <= 0.0:
 				self.curAlpha = 0.0
 				self.eventFadeIn = 0
 				self.FadeInFlag = False
+				self.fadeInDuration = 0.0
 				self.Hide()
 
 		self.SetAlpha(self.curAlpha)

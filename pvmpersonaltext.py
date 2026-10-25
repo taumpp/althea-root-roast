@@ -15,7 +15,7 @@ MUTED_COLOR = 0xffAAA398 - 0x100000000
 
 _CZ = {
     'TITLE': 'Pasivky', 'ON': 'ZAPNI', 'OFF': 'VYP.', 'UNLEARNED': 'Nenaučeno',
-    'PASSIVE': 'Pasivní schopnost:', 'SCOPE_SHARED': 'PvP i PvM', 'SCOPE_MONSTERS': 'Pouze běžné příšery',
+    'PASSIVE': 'Pasivní schopnost:', 'SCOPE_SHARED': 'PvP i PvM', 'SCOPE_MONSTERS': 'Jen běžné příšery',
     'PANEL_TOGGLE': 'Zapíná se samostatně v panelu.',
     'DESCRIPTION_ATTACK': 'Hodnota útoku',
     'DESCRIPTION_DEFENSE': 'Obrana',
@@ -96,7 +96,7 @@ def title(source, name, now):
     if not row or not row['learned']:
         return name
     level = row['activated'] if model.remaining(source, now) else row['learned']
-    return '%s · %s' % (name, pvmpersonal.grade(level))
+    return '%s | %s' % (name, pvmpersonal.grade(level))
 
 
 def cast_description(row):

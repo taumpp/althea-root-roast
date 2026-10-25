@@ -7,6 +7,8 @@ import wndMgr
 class SplitItemDialog(ui.ScriptWindow):
 	def __init__(self):
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'acceptButton')
 		self.maxValue = 0
 		self.eventAccept = None
 		self.itemGlobalSlotIndex = -1

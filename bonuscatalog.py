@@ -14,6 +14,8 @@ offered and no switchbot slot can start. That is the safe state; never fall
 back to built-in values.
 """
 
+import time
+
 SCHEMA = 1
 COMMAND = 'BonusCatalogV1'
 
@@ -60,6 +62,8 @@ class Catalog(object):
 		self.fits = []             # [(kind, item type, subtypes or None, first, last)]
 		self.rarityMaximumGrade = 0
 		self.rarity = {}           # apply -> values per grade
+		self.rarityTargets = []    # fit tuples of the families the rarity scrolls take
+		self.rarityExceptions = [] # fit tuples of prototypes refused inside those families
 
 	@classmethod
 	def Parse(cls, rows):
@@ -127,22 +131,62 @@ class Catalog(object):
 			self.rarityMaximumGrade = int(args[0])
 		elif kind == 'rarityapply':
 			self.rarity[int(args[0])] = _Ints(args[1])
+		elif kind in ('raritytarget', 'rarityexcept'):
+			subtypes = _Ints(args[1])
+			rows = self.rarityTargets if kind == 'raritytarget' else self.rarityExceptions
+			rows.append((RARITY_KIND, int(args[0]), None if subtypes == (-1,) else frozenset(subtypes),
+				int(args[2]), int(args[3])))
 		# Unknown row kinds are ignored so the server may append rows within schema 1.
 
 	# --- item families -------------------------------------------------
 
+	def _Holds(self, fit, vnum, itemType, subtype):
+		kind, fitType, subtypes, first, last = fit
+		if fitType >= 0 and fitType != itemType:
+			return False
+		if subtypes is not None and subtype not in subtypes:
+			return False
+		if (first or last) and not first <= vnum <= last:
+			return False
+		return True
+
 	def KindFor(self, vnum, itemType, subtype):
 		"""Scroll kind whose item family holds this prototype (first fit wins)."""
 		vnum = int(vnum or 0)
-		for kind, fitType, subtypes, first, last in self.fits:
-			if fitType >= 0 and fitType != itemType:
-				continue
-			if subtypes is not None and subtype not in subtypes:
-				continue
-			if (first or last) and not first <= vnum <= last:
-				continue
-			return kind
+		for fit in self.fits:
+			if self._Holds(fit, vnum, itemType, subtype):
+				return fit[0]
 		return None
+
+	def Accepts(self, kind, vnum, itemType, subtype):
+		"""Whether any family of this kind holds the prototype.
+
+		The rarity families repeat the equipment and glove families, so the
+		first fit never names them; ask for the kind instead.
+		"""
+		vnum = int(vnum or 0)
+		for fit in self.fits:
+			if fit[0] == kind and self._Holds(fit, vnum, itemType, subtype):
+				return True
+		return False
+
+	def AcceptsRarity(self, vnum, itemType, subtype):
+		"""Whether the rarity scrolls take this prototype in the inventory.
+
+		The server names its own targets and the prototypes it refuses among
+		them. A server that sends no target rows leaves the switchbot
+		families of the rarity kind, which is all an older catalog knows.
+		"""
+		vnum = int(vnum or 0)
+		for row in self.rarityExceptions:
+			if self._Holds(row, vnum, itemType, subtype):
+				return False
+		if not self.rarityTargets:
+			return self.Accepts(RARITY_KIND, vnum, itemType, subtype)
+		for row in self.rarityTargets:
+			if self._Holds(row, vnum, itemType, subtype):
+				return True
+		return False
 
 	def SetFor(self, itemType, subtype):
 		return self.setMap.get((itemType, subtype))
@@ -175,12 +219,48 @@ class Catalog(object):
 class Receiver(object):
 	"""Command handler and holder of the installed catalog."""
 
+	# The server accepts a stream at most once per character every five seconds.
+	RETRY_SECONDS = 6.0
+	ATTEMPT_LIMIT = 4
+	MAX_ROWS = 4096
+
 	def __init__(self, send=None):
 		self.send = send
 		self.catalog = None
 		self.hash = None
 		self.pending = None
 		self.listeners = []
+		self.clock = time.monotonic
+		self.offeredHash = None
+		self.attempts = 0
+		self.nextAttempt = 0
+		self.state = 'waiting'
+
+	def _Request(self):
+		self.pending = {'hash': self.offeredHash, 'rows': None, 'payloads': []}
+		self.attempts += 1
+		self.nextAttempt = self.clock() + self.RETRY_SECONDS
+		self.state = 'loading'
+		self._Send('/bonus_catalog %s' % self.offeredHash)
+
+	def Tick(self):
+		# One bounded stream attempt per deadline, independent of window visibility.
+		if self.catalog or not self.offeredHash or self.state == 'error' or self.clock() < self.nextAttempt:
+			return
+		self.pending = None
+		if self.attempts >= self.ATTEMPT_LIMIT:
+			self.state = 'error'
+		else:
+			self._Request()
+
+	def Retry(self):
+		# A player can reopen/click after exhaustion; repeated clicks cannot flood.
+		if self.catalog or not self.offeredHash or self.pending or self.clock() < self.nextAttempt:
+			return False
+		if self.state == 'error':
+			self.attempts = 0
+		self._Request()
+		return True
 
 	def _Send(self, line):
 		if self.send:
@@ -199,31 +279,47 @@ class Receiver(object):
 
 	def Receive(self, action, hashText, payload):
 		if action == 'offer':
-			if payload != str(SCHEMA) or len(hashText) != 8:
+			if payload != str(SCHEMA) or len(hashText) != 8 or any(c not in '0123456789abcdef' for c in hashText):
 				return
 			if hashText == self.hash or (self.pending and self.pending['hash'] == hashText):
 				return
-			self.pending = {'hash': hashText, 'rows': None, 'payloads': []}
-			self._Send('/bonus_catalog %s' % hashText)
+			if hashText != self.offeredHash:
+				self.offeredHash = hashText
+				self.catalog, self.hash = None, None
+				self.attempts = 0
+			if self.attempts < self.ATTEMPT_LIMIT:
+				self._Request()
 			return
 		pending = self.pending
 		if not pending or pending['hash'] != hashText:
 			return
 		if action == 'begin':
-			pending['rows'] = int(payload)
+			try:
+				count = int(payload)
+			except (ValueError, TypeError):
+				self.pending = None
+				return
+			if not 0 <= count <= self.MAX_ROWS:
+				self.pending = None
+				return
+			pending['rows'] = count
 			pending['payloads'] = []
 		elif action == 'row' and pending['rows'] is not None:
+			if len(pending['payloads']) >= pending['rows']:
+				self.pending = None
+				return
 			pending['payloads'].append(payload)
 		elif action == 'end':
 			self.pending = None
 			rows = pending['payloads']
-			if pending['rows'] != len(rows) or int(payload) != len(rows) or Hash(rows) != hashText:
-				return
 			try:
+				if pending['rows'] != len(rows) or int(payload) != len(rows) or Hash(rows) != hashText:
+					return
 				catalog = Catalog.Parse(rows)
-			except (ValueError, IndexError):
+			except (ValueError, TypeError, IndexError):
 				return
 			self.catalog, self.hash = catalog, hashText
+			self.state = 'ready'
 			for callback in list(self.listeners):
 				callback()
 
@@ -231,6 +327,19 @@ class Receiver(object):
 		self.catalog = None
 		self.hash = None
 		self.pending = None
+		self.offeredHash = None
+		self.attempts = 0
+		self.nextAttempt = 0
+		self.state = 'waiting'
+
+	def ClearPending(self):
+		# A warp can cut a stream; the destination re-offers the same hash,
+		# which Receive would otherwise ignore while it is still pending.
+		self.pending = None
+		self.offeredHash = None
+		self.attempts = 0
+		self.nextAttempt = 0
+		self.state = 'ready' if self.catalog else 'waiting'
 
 
 receiver = Receiver()
@@ -327,6 +436,56 @@ def RecommendedScroll(vnum, count=None):
 		if kind is None or ScrollKind(scroll) == kind:
 			return scroll
 	return menu[0]
+
+
+# --- use on an inventory item --------------------------------------------
+
+# How the server uses a bonus changer: one the catalog does not list takes
+# the generic equipment path, a worn target is refused except for the mount
+# speed and mount core rerolls, and the generic reroll (equipment, gloves)
+# needs an existing bonus to change.
+UNLISTED_CHANGER_KIND = 'equipment'
+WORN_TARGET_KINDS = ('mount_speed', 'mount_core')
+ROLLED_TARGET_KINDS = ('equipment', 'glove')
+RARITY_KIND = 'rarity'
+
+
+def TargetKind(vnum):
+	"""Scroll kind of the item family holding this prototype, or None."""
+	catalog = receiver.catalog
+	vnum = int(vnum or 0)
+	if not catalog or not vnum:
+		return None
+	import item
+	item.SelectItem(vnum)
+	return catalog.KindFor(vnum, item.GetItemType(), item.GetItemSubType())
+
+
+def CanUseChanger(scrollVnum, targetVnum, worn, hasBonus):
+	"""Whether the server uses this bonus changer on the target item.
+
+	False while no catalog is installed: nothing is highlighted then.
+	"""
+	target = TargetKind(targetVnum)
+	if target is None:
+		return False
+	kind = ScrollKind(scrollVnum) or UNLISTED_CHANGER_KIND
+	if kind != target:
+		return False
+	if worn and kind not in WORN_TARGET_KINDS:
+		return False
+	return bool(hasBonus) or kind not in ROLLED_TARGET_KINDS
+
+
+def AcceptsRarity(targetVnum):
+	"""Whether the server takes this prototype as a rarity scroll target."""
+	catalog = receiver.catalog
+	targetVnum = int(targetVnum or 0)
+	if not catalog or not targetVnum:
+		return False
+	import item
+	item.SelectItem(targetVnum)
+	return catalog.AcceptsRarity(targetVnum, item.GetItemType(), item.GetItemSubType())
 
 
 # --- elements ------------------------------------------------------------

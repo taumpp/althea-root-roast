@@ -18,6 +18,20 @@ PATH_ICONS = "d:/ymir work/ui/game/battle_pass_reworked/slice/quest/icons/"
 IMG_DIR = "d:/ymir work/ui/game/gameoption/"
 OPEN_SHOP_ID = 12
 
+# The R1 dressing (root/ui_bpassr1.BattlePassSkin) while the window shows the R1 look; None = the original look.
+_R1 = None
+
+
+def _Title():
+	return getattr(localeInfo, "BATTLE_PASS_TITLE", "Bojov\u00e1 propustka")
+
+
+def _File(path):
+	if _R1 is not None:
+		import ui_bpassr1
+		return ui_bpassr1.ButtonPath(path) or path
+	return path
+
 ITEM_VNUM_SKIP_MISSION = 31091
 
 TITLE_TYPES = {
@@ -42,6 +56,21 @@ TITLE_TYPES = {
 	18 : localeInfo.BP_LEVEL_UP,
 	19 : localeInfo.BP_FRY_FISH,
 }
+
+YANG_MISSIONS = (11, 17)		# BP_REWARD_YANG, BP_SPEND_MONEY: the remaining amount is yang
+
+
+def MissionTitle(title, type, remaining):
+	"""A mission row title with what remains: "(5000000)"; the yang missions in the R1 look as the one R1 yang
+	price of the client, "(5.000.000 Yang)" (root/uir1price.py)."""
+	if type in YANG_MISSIONS:
+		try:
+			import uir1price
+			return title + " (%s)" % uir1price.Text(remaining, "%d" % remaining)
+		except Exception:
+			pass
+	return title + " (%d)" % remaining
+
 
 def MakeTextLineRightAlign(parent):
 	textLine = ui.TextLine()
@@ -125,7 +154,7 @@ class ListBox(ui.Window):
 			self.wndTextLine = ui.TextLine()
 			self.wndTextLine.SetParent(self.bg)
 			self.wndTextLine.SetPosition(55, 5)
-			self.wndTextLine.SetText(title + " (%d)" % (self.maxCount - self.count))
+			self.wndTextLine.SetText(MissionTitle(title, self.type, self.maxCount - self.count))
 			self.wndTextLine.SetPackedFontColor(0xFFC6B38D)
 			self.wndTextLine.Show()
 	
@@ -167,11 +196,14 @@ class ListBox(ui.Window):
 			self.wndSkipMission = ui.ExpandedImageBoxButton()
 			self.wndSkipMission.SetParent(self)
 			self.wndSkipMission.SetPosition(350, 7)
-			self.wndSkipMission.SetUpVisual(PATH_ROOT+"slice/quest/btn_0.png")
-			self.wndSkipMission.SetOverVisual(PATH_ROOT+"slice/quest/btn_1.png")
-			self.wndSkipMission.SetDownVisual(PATH_ROOT+"slice/quest/btn_2.png")
+			self.wndSkipMission.SetUpVisual(_File(PATH_ROOT+"slice/quest/btn_0.png"))
+			self.wndSkipMission.SetOverVisual(_File(PATH_ROOT+"slice/quest/btn_1.png"))
+			self.wndSkipMission.SetDownVisual(_File(PATH_ROOT+"slice/quest/btn_2.png"))
 			self.wndSkipMission.SetEvent(ui.__mem_func__(self.OnSkipMission), "MOUSE_CLICK")
 			self.wndSkipMission.SetText(localeInfo.BATTLE_PASS_SKIP)
+			if _R1 is not None:
+				import ui_bpassr1
+				ui_bpassr1.StyleButtonText(_R1.kit, self.wndSkipMission)
 			self.wndSkipMission.Show()
 
 			self.wndTextLine5 = ui.TextLine()
@@ -190,8 +222,13 @@ class ListBox(ui.Window):
 			item.SelectItem(ITEM_VNUM_SKIP_MISSION)
 				
 			import uiCommon
-			QuestionDialog = uiCommon.QuestionDialog()
-			QuestionDialog.SetText(localeInfo.BATTLE_PASS_SKIP_QUESTION % item.GetItemName())
+			import ownedcount
+			# the question and, under it, the price item with how many the player has: "Name  0 / 1" green / red
+			# (root/ownedcount.py)
+			QuestionDialog = uiCommon.QuestionDialog2()
+			QuestionDialog.SetText1(localeInfo.BATTLE_PASS_SKIP_QUESTION % item.GetItemName())
+			QuestionDialog.SetText2("%s  %s" % (item.GetItemName(),
+				ownedcount.Tagged(ownedcount.Owned(ITEM_VNUM_SKIP_MISSION), 1)))
 			QuestionDialog.SetAcceptEvent(lambda arg=True: self.AnswerQuestionSkipMission(arg))
 			QuestionDialog.SetCancelEvent(lambda arg=False: self.AnswerQuestionSkipMission(arg))
 			QuestionDialog.Open()
@@ -288,7 +325,7 @@ class ListBox(ui.Window):
 			self.percentActual = actual
 			self.percentTotal = total
 			
-			self.wndTextLine.SetText(self.title + " (%d)" % (self.maxCount - self.count))
+			self.wndTextLine.SetText(MissionTitle(self.title, self.type, self.maxCount - self.count))
 		
 			if self.percentActual == self.percentTotal:
 				self.bgGaugeFull.LoadImage(PATH_ROOT+"slice/quest/" + "gauge_red.png")
@@ -870,6 +907,8 @@ class BattlePassWindow(ui.ScriptWindow):
 		self.__premiumUnlocked = False
 		self.seasonEndTime = 0
 		self.__lastSeasonRemainUpdate = 0
+		self.r1Skin = None
+		self.r1Failed = False
 		
 		ui.ScriptWindow.__init__(self)
 		self.LoadWindow()
@@ -879,7 +918,10 @@ class BattlePassWindow(ui.ScriptWindow):
 		ui.ScriptWindow.__del__(self)
 
 	def Destroy(self):
+		global _R1
 		self.ClearDictionary()
+		self.r1Skin = None
+		_R1 = None
 		
 		self.categories = []
 		
@@ -900,6 +942,7 @@ class BattlePassWindow(ui.ScriptWindow):
 
 	def Show(self):
 		self.LoadWindow()
+		self.SyncLook()
 		self.SetTop()
 		ui.ScriptWindow.Show(self)
 		
@@ -916,6 +959,31 @@ class BattlePassWindow(ui.ScriptWindow):
 			self.premium_board.Show()
 		
 		net.SendChatPacket("/battle_pass request")
+
+	def SyncLook(self):
+		"""The R1 dressing (root/ui_bpassr1.py) unless Settings -> "Starý vzhled" chose the original windows; it is
+		put on or taken off when the window is shown. A dressing that raises is traced and not tried again."""
+		global _R1
+		wanted = False
+		if not self.r1Failed:
+			try:
+				import uir1
+				wanted = uir1.UseR1()
+			except Exception:
+				wanted = False
+		if wanted and self.r1Skin is None:
+			try:
+				import ui_bpassr1
+				self.r1Skin = ui_bpassr1.BattlePassSkin(self)
+			except Exception:
+				import uir1
+				uir1.TraceFailure("the Battle Pass")
+				self.r1Failed = True
+				self.r1Skin = None
+		elif not wanted and self.r1Skin is not None:
+			self.r1Skin.Restore()
+			self.r1Skin = None
+		_R1 = self.r1Skin
 
 	def LoadWindow(self):
 		if self.bLoaded == True:
@@ -935,7 +1003,7 @@ class BattlePassWindow(ui.ScriptWindow):
 		self.Board = ui.BoardWithTitleBar()
 		self.Board.SetParent(self)
 		self.Board.SetSize(499, 285 + 35 + 25)
-		self.Board.SetTitleName("Battle Pass")
+		self.Board.SetTitleName(_Title())
 		self.Board.SetCloseEvent(ui.__mem_func__(self.Close))
 		self.Board.Show()
 		
@@ -1131,7 +1199,9 @@ class BattlePassWindow(ui.ScriptWindow):
 			
 			for btnCat in self.categories:
 				btnCat.Show()
-			
+
+		if self.r1Skin is not None:
+			self.r1Skin.Resize()
 		self.RefreshCategory()
 
 	def Close(self):

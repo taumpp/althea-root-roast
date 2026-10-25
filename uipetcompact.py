@@ -7,9 +7,11 @@ import player
 import ui
 import uiScriptLocale
 import WikiRenderTarget
+import growthpetpresentation
 import uimountk1 as K1
 import uipetalbum
 import uipetalbumcapturebadge
+import uir1
 
 ART = uipetalbum.ASSET_ROOT
 
@@ -21,8 +23,6 @@ class PetCompactPresentation(object):
 		self.race = None
 		self.album = None
 		self.orbs = []
-		self.growthPet = 0
-		self.growth = None
 		self.actionState = None
 		self.view = ui.WikiRenderTargetUi()
 		parent = owner.GetChild("PetPreviewViewport")
@@ -45,7 +45,32 @@ class PetCompactPresentation(object):
 		owner.GetChild("DetermineButton").Hide()
 		for name in ("Hp", "Def", "Sp"):
 			owner.GetChild(name + "Jump").Hide()
+		self.r1 = None
+		self.r1Failed = False
+		self.LoadR1()
 		self.Refresh(0, 0)
+
+	def LoadR1(self):
+		"""The R1 look (root/uipetr1.py) drawn into the pet window unless Settings -> "Starý vzhled" chose the original
+		look; a failure traces to syserr and keeps the original look (not retried on every opening)."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uipetr1
+			self.r1 = uipetr1.PetSkin(self, self.owner)
+		except Exception:
+			uir1.TraceFailure("the pet window")
+			self.r1Failed = True
+			self.r1 = None
+
+	def SyncLook(self):
+		"""Settings -> "Starý vzhled" / the R1 look take effect on the next opening of the window."""
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 
 	def OpenAlbum(self):
 		if self.album is None:
@@ -57,10 +82,13 @@ class PetCompactPresentation(object):
 		total = max(0, battleMax) + max(0, foodMax)
 		value = min(max(0,battle),max(0,battleMax)) + min(max(0,food),max(0,foodMax))
 		ratio = float(value) / total if total else 0.0
+		self.experience = (value, total)
 		for index, orb in enumerate(self.orbs):
 			orb.SetValue(max(0.0,min(1.0,ratio*4-index)))
 		self.owner.tooltipEXP.SetText("%s: %d / %d" % (uiScriptLocale.PET_INFORMATION_EXP,value,total))
 		self.owner.tooltipEXP.SetPosition(28, 284)
+		if self.r1:
+			self.r1.SetExperience(value, total)
 
 	def Refresh(self, petID, evolution, itemVnum=0, isActive=False,
 			isExpired=False, petType=0, statValues=(0.0, 0.0, 0.0)):
@@ -68,16 +96,19 @@ class PetCompactPresentation(object):
 		thirdLabel = (getattr(localeInfo, "PET_ALBUM_HUMANS", u"Silný proti pololidem")
 			if petType % 2 else getattr(localeInfo, "PET_ALBUM_MONSTERS", u"Silný proti příšerám"))
 		owner.GetChild("SpTitle").SetText(thirdLabel if petID else "-")
-		defaultLow = min(max(int(petType), 1), 5)
 		for index, name in enumerate(("Hp", "Def", "Sp")):
-			low, high = defaultLow, 6
-			if petID and self.growthPet == petID and self.growth:
-				low, high = self.growth[index * 2:index * 2 + 2]
+			low, high = growthpetpresentation.GrowthBounds(index, petID)
 			if petID:
-				current = ("%.1f" % float(statValues[index])).replace(".", ",")
-				growth = ("%.1f-%.1f" % (low / 10.0, high / 10.0)).replace(".", ",")
-				pattern = getattr(localeInfo, "PET_ALBUM_STAT_VALUE", u"+%s %% (%s %%)")
-				owner.GetChild(name + "Value").SetText(pattern % (current, growth))
+				owner.GetChild(name + "Value").SetText(
+					growthpetpresentation.StatValueText(statValues[index], low, high))
+				if self.r1:
+					current = ("%.1f" % float(statValues[index])).replace(".", ",")
+					growth = ""
+					if low is not None and high is not None:
+						growth = ("(%.1f-%.1f %%)" % (low / 10.0, high / 10.0)).replace(".", ",")
+					self.r1.SetBonus(index, u"+%s %%" % current, growth)
+			elif self.r1:
+				self.r1.SetBonus(index, "-", "")
 			owner.GetChild(name + "Jump").SetText("")
 		actionState = (bool(isActive and not isExpired), bool(isExpired and not isActive))
 		if self.actionState != actionState:
@@ -95,10 +126,14 @@ class PetCompactPresentation(object):
 				continue
 			locked, vnum, level, cooldown = player.GetPetSkillSlotState(petID,index)
 			label.SetText(uiScriptLocale.PET_ALBUM_FREE if not locked and not vnum else "")
+		if self.r1:
+			self.r1.Sync()
 		if not petID:
 			owner.GetChild("PetName").SetText(uiScriptLocale.PET_ALBUM_EMPTY)
 			for key in ("LevelValue","AgeValue","LifeTextValue","HpValue","DefValue","SpValue"):
 				owner.GetChild(key).SetText("-")
+			if self.r1:
+				self.r1.Sync()
 			self.RemoveTarget()
 			return
 		if not owner.IsShow() or owner.state != player.PET_WINDOW_INFO:
@@ -132,20 +167,13 @@ class PetCompactPresentation(object):
 		owner.SetSize(width,height)
 		owner.GetChild("board").SetSize(width,height)
 		owner.GetChild("TitleBar").SetWidth(width+8)
+		if self.r1:
+			self.r1.Resize(width, height)
 		if state != player.PET_WINDOW_INFO:
 			self.RemoveTarget()
 
 	def SetGrowthPreview(self, petID, *values):
-		try:
-			petID = int(petID)
-			values = tuple(int(value) for value in values)
-		except (ValueError, TypeError):
-			return
-		if petID <= 0 or len(values) != 6 or any(value < 0 or value > 100000 for value in values):
-			return
-		if any(values[index] > values[index + 1] for index in (0, 2, 4)):
-			return
-		self.growthPet, self.growth = petID, values
+		growthpetpresentation.SetGrowthPreview(petID, *values)
 
 	def RemoveTarget(self):
 		index = self.renderIndex
@@ -161,10 +189,24 @@ class PetCompactPresentation(object):
 
 	def Hide(self):
 		self.RemoveTarget()
+
+	def AlbumWindows(self):
+		if not self.album:
+			return ()
+		if self.album.occurrenceWindow:
+			return (self.album, self.album.occurrenceWindow)
+		return (self.album,)
+
+	def CloseAlbumWindows(self):
 		if self.album:
 			self.album.Close()
+			if self.album.occurrenceWindow:
+				self.album.occurrenceWindow.Close()
 
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.Hide()
 		if self.captureBadge:
 			self.captureBadge.Destroy()
@@ -177,4 +219,3 @@ class PetCompactPresentation(object):
 		self.orbs = []
 		self.view = None
 		self.owner = None
-		self.growthPet, self.growth = 0, None

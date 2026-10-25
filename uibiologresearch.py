@@ -2,12 +2,14 @@
 """Compact B research trays, driven by server snapshots (legacy compatible)."""
 import bonuscolor
 import app
+import chat
 import item
 import net
 import player
 import osfInfo
 import ui
 import uicrimsoncontrols
+import ownedcount
 import biologresearchmodel as model
 import uiBiolog as legacy
 from uicrimsonember import SettingsScrollBar
@@ -48,6 +50,30 @@ def Line(parent, x, y, value="", font="Tahoma:12", color=WHITE, center=False):
     line.AddFlag("not_pick")
     line.Show()
     return line
+
+
+def CheckPath(selected, enabled):
+    return CHECKBOX_ROOT + "checkbox_" + ("selected" if selected else "unselected") + ".tga"
+
+
+def R1Skin(window, title):
+    """The R1 look of the window (root/uibiologr1.py), or None: Settings -> "Starý vzhled", an older client without
+    the R1 kit, or a failure while building it (the original window is used)."""
+    try:
+        import uibiologr1
+        if not uibiologr1.UseR1():
+            return None
+    except Exception:
+        return None
+    try:
+        return uibiologr1.Skin(window, title, dict(
+            tab0=Text("BIO_RESEARCH_TAB", u"Výzkumy"), tab1=Text("BIO_COMPLETED_TAB", u"Dokončené"),
+            submit=Text("BIO_SUBMIT_ITEM", u"Odevzdat"), reward=Text("BIO_GIFT", u"Odměna")),
+            dict(gold=GOLD, white=WHITE, muted=MUTED, green=GREEN, blue=BLUE),
+            (ROW_Y, ROW_STEP, VISIBLE_ROWS))
+    except Exception:
+        uibiologr1.Fail()
+        return None
 
 
 def Image(parent, x, y, name):
@@ -96,17 +122,19 @@ class Booster(ui.Window):
         self.check.SetPosition(0, 7)
         self.check.AddFlag("not_pick")
         self.check.Show()
-        self.count = Line(self, 20, 5, "1 ks", color=GOLD)
-        self.count.SetLimitWidth(36)
+        self.count = Line(self, 20, 6, "0 / 1", "Tahoma:11", color=GOLD)
+        self.count.SetLimitWidth(42)
         self.enabled = False
+        self.checkPath = CheckPath
         self.Show()
 
     def Refresh(self, selected, cost, owned, enabled):
         self.enabled = enabled
-        state = "selected" if selected else "unselected"
-        self.check.LoadImage(CHECKBOX_ROOT + "checkbox_" + state + ".tga")
-        self.count.SetText("%d ks" % cost)
-        Tint(self.count, (GOLD if owned >= cost else RED) if enabled else MUTED)
+        self.check.LoadImage(self.checkPath(selected, enabled))
+        # "owned / need", green / red like every item price (root/ownedcount.py)
+        self.count.SetText(ownedcount.Text(owned, cost))
+        Tint(self.count, (ownedcount.GREEN if ownedcount.IsEnough(owned, cost) else ownedcount.SHORT) if enabled
+             else MUTED)
 
     def OnMouseLeftButtonUp(self):
         if self.enabled:
@@ -125,9 +153,14 @@ class ResearchRow(ui.Window):
         ui.Window.__init__(self)
         self.owner = owner
         self.index = 0
+        self.alarmEnabled = None
+        self.submitEnabled = None
+        self.alarmVisual = None
         self.SetParent(owner)
         self.SetPosition(ROW_X, ROW_Y + offset * ROW_STEP)
         self.SetSize(670, 78)
+        # The R1 layer (panels, slot, track, buttons) comes first: it lies under the row's own content.
+        self.r1 = owner.r1.Row(self) if owner.r1 else None
         self.plate = Image(self, 0, 4, "level_badge_B")
         self.surface = Image(self, 52, 0, "tray_normal")
         self.level = Line(self, 20, 28, font="Tahoma:18b", color=GOLD, center=True)
@@ -195,6 +228,8 @@ class ResearchRow(ui.Window):
         available = self.owner.Available(self.index)
         remaining = max(0, data["due"] - app.GetGlobalTimeStamp())
         selected = self.owner.boosters.setdefault(self.index, [False, False])
+        if state != "mission":
+            selected[:] = [False, False]
         self.elixir.Refresh(selected[0], data["elixir_cost"], self.owner.Owned(data["elixir"]), available and state == "mission")
         self.clock.Refresh(selected[1], data["clock_cost"], self.owner.Owned(data["clock"]), available and state == "mission")
         self.progress.SetText("%d / %d" % (min(data["count"], data["total"]), data["total"]))
@@ -207,6 +242,12 @@ class ResearchRow(ui.Window):
             caption, color = Text("BIO_SOUL_STONE_SHORT", u"Kámen duše"), AMBER
         elif state == "gift":
             caption, color = Text("BIO_CHOOSE_SHORT", u"Vyber odměnu"), GOLD
+        elif self.index in self.owner.pending:
+            caption, color = Text("BIO_REQUEST_PENDING", u"Odesílání..."), AMBER
+        elif selected[0] and self.owner.Owned(data["elixir"]) < data["elixir_cost"]:
+            caption, color = Text("BIO_MISSING_ELIXIR", u"Chybí elixír"), RED
+        elif selected[1] and self.owner.Owned(data["clock"]) < data["clock_cost"]:
+            caption, color = Text("BIO_MISSING_CLOCK", u"Chybí urychlovač"), RED
         elif remaining:
             caption, color = model.duration(remaining), AMBER
         elif self.owner.Owned(data["vnum"]) < 1:
@@ -217,17 +258,21 @@ class ResearchRow(ui.Window):
         Tint(self.status, color)
         Tint(self.name, WHITE if available or data["done"] else MUTED)
         self.surface.LoadImage(ASSET_ROOT + ("tray_waiting.png" if remaining and state == "mission" else "tray_normal.png"))
-        self.alarm.SetUpVisual(ASSET_ROOT + ("icon_button_selected.png" if data["alarm"] else "icon_button_normal.png"))
-        if available and not data["done"]:
-            self.alarm.Enable()
-        else:
-            self.alarm.Disable()
+        if self.alarmVisual != data["alarm"]:
+            self.alarmVisual = data["alarm"]
+            self.alarm.SetUpVisual(ASSET_ROOT + ("icon_button_selected.png" if data["alarm"] else "icon_button_normal.png"))
+        alarmEnabled = available and not data["done"] and self.index not in self.owner.pending
+        if alarmEnabled != self.alarmEnabled:
+            self.alarmEnabled = alarmEnabled
+            self.alarm.Enable() if alarmEnabled else self.alarm.Disable()
         enabled = self.owner.CanSubmit(self.index)
-        if enabled:
-            self.submit.Enable()
-        else:
-            self.submit.Disable()
-        if player.GetStatus(player.LEVEL) < data["level"]:
+        # Native Enable calls SetUp(), which cancels a mouse-down. Only invoke
+        # it on an eligibility transition, never on every timer refresh.
+        if enabled != self.submitEnabled:
+            self.submitEnabled = enabled
+            self.submit.Enable() if enabled else self.submit.Disable()
+        locked = player.GetStatus(player.LEVEL) < data["level"]
+        if locked:
             self.lockVeil.Show()
             self.lockShade.Show()
             self.lockGlyph.Show()
@@ -235,6 +280,9 @@ class ResearchRow(ui.Window):
             self.lockVeil.Hide()
             self.lockShade.Hide()
             self.lockGlyph.Hide()
+        if self.r1:
+            self.r1.Refresh(float(data["count"]) / data["total"], data["alarm"],
+                            available and not data["done"], enabled, locked)
 
     def Toggle(self, kind):
         selected = self.owner.boosters.setdefault(self.index, [False, False])
@@ -257,10 +305,10 @@ class ResearchRow(ui.Window):
     def BoosterTip(self, kind):
         data = self.Data()
         key = "clock" if kind else "elixir"
-        title = Text("BIO_CLOCK_NAME", u"Biologist's Accelerator") if kind else legacy._ItemName(data[key])
+        title = Text("BIO_CLOCK_NAME", u"Biologův urychlovač") if kind else legacy._ItemName(data[key])
         self.owner.Tooltip(title, [
-            Text("BIO_HELPER_COST", u"Potřeba: %d ks") % data[key + "_cost"],
-            Text("BIO_HELPER_OWNED", u"V batohu: %d ks") % self.owner.Owned(data[key]),
+            Text("BIO_HELPER_OWNED_NEED", u"Máš / potřeba: %s") % ownedcount.Tagged(
+                self.owner.Owned(data[key]), data[key + "_cost"]),
             Text("BIO_CLOCK_HINT", u"Přeskočí zbývající čas výzkumu.") if kind else
             Text("BIO_ELIXIR_HINT", u"Pomůže s přijetím odevzdaného předmětu."),
         ])
@@ -288,6 +336,12 @@ class BiologWindow(ui.Window):
         self.researches = {}
         self.boosters = {}
         self.pending = {}
+        self.pendingRevisions = {}
+        self.revealAlarm = None
+        self.revisions = {}
+        self.requestV1 = False
+        self.snapshotRevisions = {}
+        self.snapshotRequestV1 = False
         self.snapshot = model.Snapshot()
         self.modern = False
         self.dataKnown = False
@@ -300,6 +354,9 @@ class BiologWindow(ui.Window):
         self.choiceWindow = None
         self.tooltip = ToolTip(320)
         self.tooltip.HideToolTip()
+        title = Text("BIO_RESEARCH_TITLE", u"Biologický výzkum")
+        # The R1 chrome is made first, under the window's content; Apply() below finishes it.
+        self.r1 = R1Skin(self, title)
         self.body = Image(self, 0, 0, "D8_shell_720")
         self.portrait = Image(self, 618, 25, "chaegirab_header")
         self.titleBar = ui.TitleBar()
@@ -309,8 +366,7 @@ class BiologWindow(ui.Window):
         self.titleBar.SetPosition(0, 0)
         self.titleBar.SetCloseEvent(ui.__mem_func__(self.Close))
         self.titleBar.Show()
-        self.children.append(Line(self.titleBar, WIDTH // 2, 4,
-            Text("BIO_RESEARCH_TITLE", u"Biologický výzkum"), "Tahoma:14", WHITE, True))
+        self.children.append(Line(self.titleBar, WIDTH // 2, 4, title, "Tahoma:14", WHITE, True))
         self.tabs = []
         for index, label in enumerate((Text("BIO_RESEARCH_TAB", u"Výzkumy"), Text("BIO_COMPLETED_TAB", u"Dokončené"))):
             button = ui.RadioButton()
@@ -322,11 +378,14 @@ class BiologWindow(ui.Window):
             button.Show()
             self.tabs.append(button)
         self.tabs[0].Down()
+        self.captions = []
         for center, caption in ((ROW_X + 20, Text("BIO_LEVEL_HEADER", u"Úroveň")),
                                 (ROW_X + ELIXIR_X + 8, Text("BIO_ELIXIR_HEADER", u"Elixír")),
-                                (ROW_X + CLOCK_X + 8, Text("BIO_CLOCK_HEADER", u"Urychlovac"))):
-            self.children.append(Line(self, center, 72, caption, "Tahoma:12b", GOLD, True))
-        for column, vnum, asset in ((ELIXIR_X, 71035, "helper_elixir24"),
+                                (ROW_X + CLOCK_X + 8, Text("BIO_CLOCK_HEADER", u"Urychlovač"))):
+            self.captions.append(Line(self, center, 72, caption, "Tahoma:12b", GOLD, True))
+            self.children.append(self.captions[-1])
+        self.boosterIcons = []
+        for column, vnum, asset in ((ELIXIR_X, 39023, "helper_elixir24"),
                                     (CLOCK_X, ACCELERATOR_VNUM, "icon/item/72357.tga")):
             icon = ui.ImageBox()
             icon.SetParent(self)
@@ -337,6 +396,7 @@ class BiologWindow(ui.Window):
             icon.SAFE_SetStringEvent("MOUSE_OVER_OUT", self.HideTooltip)
             icon.Show()
             self.children.append(icon)
+            self.boosterIcons.append(icon)
         self.rows = [ResearchRow(self, index) for index in range(VISIBLE_ROWS)]
         for row in self.rows:
             row.Hide()
@@ -348,13 +408,15 @@ class BiologWindow(ui.Window):
         self.scroll.Hide()
         self.empty = Line(self, WIDTH // 2, ROW_Y + (VISIBLE_ROWS * ROW_STEP - 6) // 2,
                           "", color=MUTED, center=True)
+        if self.r1 and not self.r1.Apply():
+            self.r1 = None
 
     @staticmethod
     def Owned(vnum):
+        # the server's count (root/ownedcount.py): inventory + special inventories, not the storage
         if vnum in (ACCELERATOR_VNUM, LEGACY_CLOCK_VNUM):
-            return (max(0, player.GetItemCountByVnum(ACCELERATOR_VNUM)) +
-                    max(0, player.GetItemCountByVnum(LEGACY_CLOCK_VNUM)))
-        return max(0, player.GetItemCountByVnum(vnum))
+            return ownedcount.Owned(ACCELERATOR_VNUM) + ownedcount.Owned(LEGACY_CLOCK_VNUM)
+        return ownedcount.Owned(vnum)
 
     def Available(self, index):
         return (self.dataKnown and player.GetStatus(player.LEVEL) >= self.researches[index]["level"]
@@ -371,6 +433,8 @@ class BiologWindow(ui.Window):
             net.SendChatPacket("/bio state2")
 
     def BeginSnapshot(self, count):
+        self.snapshotRevisions = {}
+        self.snapshotRequestV1 = False
         try:
             self.snapshot.begin(count)
         except (ValueError, TypeError):
@@ -379,18 +443,81 @@ class BiologWindow(ui.Window):
     def SnapshotRow(self, *values):
         self.snapshot.append(values)
 
+    def RequestCapability(self, version):
+        self.snapshotRequestV1 = str(version) == "1"
+
+    def SnapshotRevision(self, index, revision):
+        try:
+            index, revision = int(index), int(revision)
+            if not (1 <= index <= model.MAX_RESEARCHES and 0 <= revision <= 2147483647):
+                raise ValueError("invalid revision")
+            if index in self.snapshotRevisions:
+                raise ValueError("duplicate revision")
+            self.snapshotRevisions[index] = revision
+        except (ValueError, TypeError):
+            self.snapshot.invalid = True
+
+    def RequestResult(self, index, revision, status):
+        try:
+            index, revision, status = int(index), int(revision), int(status)
+        except (ValueError, TypeError):
+            return
+        if status not in range(8) or self.pendingRevisions.get(index) != revision:
+            return
+        self.pending.pop(index, None)
+        self.pendingRevisions.pop(index, None)
+        messages = {
+            1: Text("BIO_REQUEST_PHASE", u"Tento výzkum teď nelze odevzdat."),
+            2: Text("BIO_REQUEST_STALE", u"Výzkum se změnil. Zkus to znovu."),
+            3: Text("BIO_REQUEST_LOADING", u"Výzkum ještě není načtený. Zkus to za chvíli."),
+            4: Text("BIO_REQUEST_BLOCKED", u"Probíhá jiná akce s předměty. Zavři ostatní herní okna a zkus to znovu."),
+            5: Text("BIO_REQUEST_COOLDOWN", u"Výzkum ještě není připravený. Počkej nebo vyber urychlovač."),
+            6: Text("BIO_REQUEST_SHORTAGE", u"Chybí požadovaný předmět nebo vybraná podpora výzkumu."),
+            7: Text("BIO_REQUEST_STONE_HELPERS", u"Při odevzdání kamene vypni podpory výzkumu."),
+        }
+        if status:
+            chat.AppendChat(chat.CHAT_TYPE_INFO, messages[status])
+        self.RefreshRows()
+
+    def SendAction(self, index, action, values, legacyCommand):
+        self.pending[index] = app.GetTime()
+        if self.requestV1:
+            revision = self.revisions[index]
+            self.pendingRevisions[index] = revision
+            command = "/bio %s3 %d %s %d" % (action, index, values, revision)
+        elif self.modern:
+            command = "/bio %s2 %d %s" % (action, index, values)
+        else:
+            command = legacyCommand
+        net.SendChatPacket(command)
+        self.RefreshRows()
+
     def EndSnapshot(self):
         rows = self.snapshot.finish()
         if rows is None:
             return
+        if self.snapshotRequestV1 and set(self.snapshotRevisions) != set(rows):
+            return
         self.modern = True
         self.researches = rows
         self.dataKnown = True
-        self.pending.clear()
+        self.requestV1 = self.snapshotRequestV1
+        self.revisions = self.snapshotRevisions if self.requestV1 else {}
+        if not self.requestV1:
+            self.pending.clear()
+            self.pendingRevisions.clear()
+        else:
+            # A passive snapshot cannot acknowledge an in-flight action. A
+            # changed revision after timeout proves its old token is spent.
+            for index, started in list(self.pending.items()):
+                if (app.GetTime() - started > 5.0 and
+                        self.revisions[index] != self.pendingRevisions.get(index)):
+                    self.pending.pop(index, None)
+                    self.pendingRevisions.pop(index, None)
         self.RefreshRows()
         self.UpdateReminders()
         self.EnsureLoop()
-        self.RefreshHUD()
+        self.RefreshHUD(self._AlarmConfirmed(rows))
         interface = osfInfo.GetInterfaceInstance()
         if interface and getattr(interface, "uiAffectshower", None):
             interface.uiAffectshower.SetBiologBonuses(model.passive_totals(rows))
@@ -429,6 +556,8 @@ class BiologWindow(ui.Window):
         self.scroll.SetPos(0.0)
         for offset, button in enumerate(self.tabs):
             button.Down() if offset == index else button.SetUp()
+        if self.r1:
+            self.r1.SetTab(index)
         self.RefreshRows()
 
     def Indexes(self):
@@ -472,14 +601,18 @@ class BiologWindow(ui.Window):
             self.ChooseReward(index)
             return
         elixir, clock = self.boosters.get(index, [False, False])
-        self.pending[index] = app.GetTime()
-        command = "/bio give2 %d %d %d" % (index, elixir, clock) if self.modern else "/bio mission %d %d" % (elixir, clock)
-        net.SendChatPacket(command)
-        self.RefreshRows()
+        if model.phase(self.researches[index]) != "mission":
+            elixir, clock = False, False
+        self.SendAction(index, "give", "%d %d" % (elixir, clock),
+                        "/bio mission %d %d" % (elixir, clock))
 
     def SetAlarm(self, index, enabled):
+        if index in self.pending or not self.Available(index) or self.researches[index]["done"]:
+            return
         if self.modern:
-            net.SendChatPacket("/bio alarm2 %d %d" % (index, enabled))
+            # the server confirms the alarm in its next snapshot; that one opens Odpočty (EndSnapshot)
+            self.revealAlarm = index if enabled else None
+            self.SendAction(index, "alarm", str(int(enabled)), "")
         else:
             net.SendChatPacket("/bio_notification %d" % enabled)
             self.researches[index]["alarm"] = enabled
@@ -512,7 +645,13 @@ class BiologWindow(ui.Window):
         self.choiceWindow.AddFlag("float")
         self.choiceWindow.SetCenterPosition()
         self.choiceButtons = []
-        for choice, label in enumerate(self.RewardLines(index)):
+        title = Text("BIO_CHOOSE_REWARD", u"Vyber jednu odměnu")
+        labels = self.RewardLines(index)
+        skin = self.r1.Choice(self.choiceWindow, title, labels, self.AcceptReward, self.CloseChoice) if self.r1 else None
+        if skin is not None:
+            self.choiceButtons = skin.buttons
+            self.choiceSkin = skin
+        for choice, label in enumerate(labels if skin is None else ()):
             button = ui.Button()
             button.SetParent(self.choiceWindow)
             button.SetPosition(37, 43 + choice * 33)
@@ -528,8 +667,7 @@ class BiologWindow(ui.Window):
         index = self.choiceIndex
         if not index or index in self.pending:
             return
-        self.pending[index] = app.GetTime()
-        net.SendChatPacket("/bio gift2 %d %d" % (index, choice) if self.modern else "/bio gift %d" % choice)
+        self.SendAction(index, "gift", str(choice), "/bio gift %d" % choice)
         self.CloseChoice()
 
     def CloseChoice(self):
@@ -537,6 +675,7 @@ class BiologWindow(ui.Window):
             self.choiceWindow.Hide()
         self.choiceWindow = None
         self.choiceButtons = []
+        self.choiceSkin = None
         self.choiceIndex = 0
 
     def Tooltip(self, title, lines, bonus_rows=()):
@@ -554,7 +693,7 @@ class BiologWindow(ui.Window):
         self.tooltip.ShowToolTip()
 
     def HeaderBoosterTooltip(self, vnum):
-        title = Text("BIO_CLOCK_NAME", u"Biologist's Accelerator") if vnum in (ACCELERATOR_VNUM, LEGACY_CLOCK_VNUM) else legacy._ItemName(vnum)
+        title = Text("BIO_CLOCK_NAME", u"Biologův urychlovač") if vnum in (ACCELERATOR_VNUM, LEGACY_CLOCK_VNUM) else legacy._ItemName(vnum)
         self.Tooltip(title, [Text("BIO_HELPER_OWNED", u"V batohu: %d ks") % self.Owned(vnum)])
 
     def ItemTooltip(self, vnum):
@@ -592,12 +731,28 @@ class BiologWindow(ui.Window):
                 continue
             if interface and interface.PushBiologReadyNotification(
                     Text("BIO_READY_NOTIFICATION_TITLE", u"Biologický výzkum"),
-                    legacy._ItemName(row["vnum"]) + u" — " + Text("BIO_READY_SHORT", u"Připraveno"),
+                    legacy._ItemName(row["vnum"]) + u" - " + Text("BIO_READY_SHORT", u"Připraveno"),
                     row["vnum"], (character, index, row["due"])):
                 previous[2] = True
 
     def GetTrackedResearches(self):
         return [row for row in self.researches.values() if self.dataKnown and row["alarm"] and not row["done"]]
+
+    def _AlarmConfirmed(self, rows):
+        """True once the snapshot carries the alarm the player switched on (SetAlarm): Odpočty then opens with the
+        Biolog row, like the alarm clock of the dungeon list (uidungeontrack -> RefreshCountdownHUDSelection(True));
+        Previously, the confirmed alarm only refreshed an Odpočty that was already open. A refused action
+        (no longer pending, alarm still off) drops the request."""
+        index = self.revealAlarm
+        if index is None:
+            return False
+        row = rows.get(index)
+        if row and row["alarm"] and not row["done"]:
+            self.revealAlarm = None
+            return True
+        if index not in self.pending:
+            self.revealAlarm = None
+        return False
 
     def RefreshHUD(self, reveal=False):
         interface = osfInfo.GetInterfaceInstance()
@@ -655,4 +810,7 @@ class BiologWindow(ui.Window):
             game.RemoveLoopEvent("bio")
         self.rows = []
         self.children = []
+        if self.r1:
+            self.r1.Destroy()
+            self.r1 = None
         ui.Window.Destroy(self)

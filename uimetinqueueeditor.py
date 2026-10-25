@@ -70,7 +70,7 @@ class EditorController(appearance.MetinQueueAppearanceController):
 		self.page.GetChild("BodyFillLabel").SetText(u"Šířka proudů" if mesh else u"Výplň")
 		serpent = self.draft[11] == 6
 		self.page.GetChild("BodyDensityLabel").SetText(u"Hustota jisker obalu" if serpent else u"Hustota obalu")
-		self.bodyStyleButton.SetToolTipText(u"Dvě hadí spirály; hustota mění jiskry obalu."
+		self.bodyStyleButton.SetToolTipText(u"Dvě hadí spirály. Hustota mění jiskry obalu."
 			if serpent else self._StyleText(self._BodyStyleLabels(), self.draft[11]))
 		self._SyncEnabledStates()
 
@@ -124,13 +124,18 @@ class EditorController(appearance.MetinQueueAppearanceController):
 	def _CreatePreview(self):
 		appearance.MetinQueueAppearanceController._CreatePreview(self)
 		if self.page and self.previewIndex is None:
-			self.page.SetStatus(u"Náhled nelze načíst. Zkontrolujte shodu klienta a balíčků.")
+			self.page.SetStatus(u"Náhled nejde načíst. Aktualizuj hru.")
 
 
 class MetinQueueEditor(ui.BoardWithTitleBar):
 	"""The same native controls and render target in game and in the offline host."""
 	def __new__(cls, backend=None, onClose=None):
 		if appearance.HasDesignV3():
+			# New settings look: the v5 kit editor (local/settings-v5-meteor); "Starý vzhled": the old one.
+			import uimeteoreditor
+			editor = uimeteoreditor.CreateEditor(backend, onClose)
+			if editor is not None:
+				return editor
 			from uimetinqueuedesigneditor import MetinQueueDesignEditor
 			return MetinQueueDesignEditor(backend, onClose)
 		return object.__new__(cls)
@@ -304,7 +309,7 @@ class MetinQueueEditor(ui.BoardWithTitleBar):
 		vnum = self.controller.previewVnum
 		name = nonplayer.GetMonsterName(vnum) or (u"Meteor %d" % vnum)
 		self.GetChild("ModelButton").SetText(name)
-		self.GetChild("ModelButton").SetToolTipText(u"%s (%d) — přepnout model" % (name, vnum))
+		self.GetChild("ModelButton").SetToolTipText(u"%s (%d) - přepnout model" % (name, vnum))
 		if self.controller.previewIndex is None:
 			return
 		changed = draft != self.controller.original or self.controller.draftNearbyFill != self.controller.originalNearbyFill

@@ -72,6 +72,9 @@ class AffectSummary(ui.ThinBoard):
             linePrefix=ui.TOOLTIP_LINE_PREFIX,
             baseColor=ui.TOOLTIP_BASE_COLOR,
         )
+        # The R1 tooltip frame of the item tooltips instead of the thin board (None: Starý vzhled or a failure). Made
+        # before the content, so it lies under it.
+        self.r1Frame = self._DressR1()
         self.AddFlag("float")
         self.owner = proxy(owner)
         self.signature = None
@@ -102,6 +105,28 @@ class AffectSummary(ui.ThinBoard):
         self.scroll.OnMouseWheel = self.OnMouseWheel
         self.scroll.Hide()
 
+    def _DressR1(self):
+        try:
+            import uitooltipskin
+            return uitooltipskin.Dress(self)
+        except Exception:
+            return None
+
+    def _FollowLook(self):
+        """Settings switched the look since the board was made: the frame of the look in use now (uitooltipskin.Sync),
+        the content above it."""
+        try:
+            import uitooltipskin
+            uitooltipskin.Sync(self, (self.title, self.hint, self.viewport, self.scroll))
+        except Exception:
+            pass
+
+    def SetSize(self, width, height):
+        ui.ThinBoard.SetSize(self, width, height)
+        frame = getattr(self, "r1Frame", None)
+        if frame is not None:
+            frame.Resize(self.GetWidth(), self.GetHeight())
+
     @staticmethod
     def Text(parent, x, y, text, color, bold=False):
         line = ui.TextLine()
@@ -129,6 +154,7 @@ class AffectSummary(ui.ThinBoard):
         return y
 
     def Open(self):
+        self._FollowLook()
         self.Refresh()
         if not self.owner.members:
             return
@@ -141,6 +167,9 @@ class AffectSummary(ui.ThinBoard):
 
     def Destroy(self):
         self.Close()
+        if getattr(self, "r1Frame", None) is not None:
+            self.r1Frame.Destroy()
+            self.r1Frame = None
         self.scroll.Destroy()
         self.scroll.OnMouseWheel = None
         self.viewport.OnMouseWheel = None
@@ -161,7 +190,16 @@ class AffectSummary(ui.ThinBoard):
             self.signature = signature
         self.UpdateTimers()
         x, y = self.owner.GetGlobalPosition()
-        self.SetPosition(*PlaceSummary((x, y, self.owner.GetHeight()),
+        height = self.owner.GetHeight()
+        # under the whole effect bar, never over an icon of the row below
+        # (the bar gives its top and height); only the position changes.
+        anchor = getattr(self.owner, "summaryAnchor", None)
+        if anchor is not None:
+            try:
+                y, height = anchor()
+            except Exception:
+                pass
+        self.SetPosition(*PlaceSummary((x, y, height),
                                       (self.GetWidth(), self.GetHeight()), screen))
 
     def Rebuild(self, data, screen):

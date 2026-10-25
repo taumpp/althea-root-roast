@@ -41,7 +41,7 @@ ALLOWED_APPLY_TYPES = (
 )
 _DEFAULT_LOCALE_MODULE = object()
 _LOCALIZATION_ERROR = {
-	"cz": u"Texty stromu dovedností se nepodařilo načíst. Vylepšování je dočasně vypnuté.",
+	"cz": u"Texty stromu schopností se nepodařilo načíst. Vylepšování je teď vypnuté.",
 	"en": u"Skill tree texts could not be loaded. Upgrades are temporarily disabled.",
 }
 
@@ -253,7 +253,7 @@ class SkillTreeModel(object):
 
 	def GetRankText(self, nodeId):
 		if not self.IsReady() or nodeId not in self.ranksById:
-			return u"\u2014"
+			return u"-"
 		return str(self.__DisplayRank(nodeId))
 
 	def GetNodePresenters(self):

@@ -7,6 +7,7 @@ import ui
 import wndMgr
 
 import noticestyle as style
+import noticeplacement
 
 
 class NoticeSink:
@@ -59,6 +60,7 @@ class NoticeBoard(ui.Window):
         self.active = None
         self.mission = ''
         self.minimumY = 0
+        self.protectedRects = lambda: []
         self.started = 0.0
         self.pausedAt = None
         self.suspended = False
@@ -150,7 +152,10 @@ class NoticeBoard(ui.Window):
         return self.measureLine.GetTextSize()
 
     def _LoadArt(self, importance, role, width):
-        path = style.ASSET_ROOT + '%02d_%s_%d.png' % (importance, role, width)
+        if importance == style.METEOR_STYLE:
+            path = style.METEOR_ASSET_ROOT + 'meteor-special-%d.png' % width
+        else:
+            path = style.ASSET_ROOT + '%02d_%s_%d.png' % (importance, role, width)
         if path == self.loadedAsset:
             return
         self.loadedAsset = path
@@ -174,7 +179,7 @@ class NoticeBoard(ui.Window):
             for image in self.images:
                 image.Hide()
             self.images = []
-            height = round((39 if role == 'notice' else (82 if importance == 1 else 122)) * width/520.0)
+            height = round((222 if role == 'meteor' else (39 if role == 'notice' else (82 if importance == 1 else 122))) * width/520.0)
             self.SetSize(width, height)
             self.fallback.SetSize(width, height)
             self.fallback.Show()
@@ -195,7 +200,10 @@ class NoticeBoard(ui.Window):
         for line in self.lines:
             line.Hide()
         self.lines = []
-        center = round(width * (266.0/520 if self.visualKey[1] == 1 else 0.5))
+        if self.visualKey[1] == style.METEOR_STYLE:
+            center = round(width * 295.0/520)
+        else:
+            center = round(width * (266.0/520 if self.visualKey[1] == 1 else 0.5))
         for row in self.pages[self.pageIndex]:
             line = ui.TextLine()
             line.SetParent(self)
@@ -209,13 +217,25 @@ class NoticeBoard(ui.Window):
             line.Show()
             self.lines.append(line)
 
-    def _Draw(self, entry, width, screen_width, screen_height, values):
+    def _Position(self, entry, width, screen_width, screen_height):
         scale = width/520.0
         y = max(self.minimumY, round(88*scale))
         if screen_width < 1000:
             y = max(y, 210)
+        if entry[0] == style.METEOR_STYLE:
+            # The tall raster includes its title inset; keep the notice above
+            # the player instead of centering the full carrier in the viewport.
+            y = round(16*scale)
         y = min(y, max(0, screen_height-self.GetHeight()-90))
-        self.SetPosition((screen_width-width)//2, y+round(values['offset']*scale))
+        motion = round(12*scale) if entry[0] == 1 else 0
+        position = noticeplacement.place(
+            (width, self.GetHeight()+motion), ((screen_width-width)//2, y-motion),
+            (screen_width, screen_height), self.protectedRects())
+        return None if position is None else (position[0], position[1]+motion)
+
+    def _Draw(self, entry, width, screen_width, screen_height, values, position):
+        scale = width/520.0
+        self.SetPosition(position[0], position[1]+round(values['offset']*scale))
         bands = style.reveal_bands(width, values['reveal'])
         for i, image in enumerate(self.images):
             if i >= len(bands):
@@ -261,10 +281,16 @@ class NoticeBoard(ui.Window):
             self.Hide()
             return
         screen_width, screen_height = wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()
-        width = style.profile(screen_width, screen_height)
+        width = (style.meteor_profile(screen_width, screen_height)
+                 if entry[0] == style.METEOR_STYLE else style.profile(screen_width, screen_height))
         key = (persistent, entry[0], entry[1], width)
         if key != self.visualKey:
             self._Prepare(entry, width, now, persistent)
+        position = self._Position(entry, width, screen_width, screen_height)
+        if position is None:
+            self.pausedAt = now
+            self.Hide()
+            return
         elapsed = max(0.0, now-self.started)
         if persistent:
             if len(self.pages) > 1 and elapsed >= 4.5:
@@ -289,4 +315,4 @@ class NoticeBoard(ui.Window):
                 self.visualKey = None
                 self.Hide()
                 return
-        self._Draw(entry, width, screen_width, screen_height, values)
+        self._Draw(entry, width, screen_width, screen_height, values, position)

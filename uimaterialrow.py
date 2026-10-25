@@ -13,21 +13,33 @@ class MaterialRow(ui.Window):
 		self.tooltip = tooltip
 		self.searchEvent = searchEvent
 		self.itemVnum = 0
+		self.description = None
 		ui.Window.__init__(self)
 
 	def SetItem(self, vnum):
 		self.OnMouseOverOut()
 		self.itemVnum = int(vnum)
+		self.description = None
+
+	def SetDescription(self, title, lines):
+		self.description = (title, tuple(lines))
 
 	def OnMouseOverIn(self):
 		if not self.IsShow() or self.itemVnum <= 0 or not self.tooltip:
 			return
 		self.tooltip.ClearToolTip()
-		self.tooltip.AddItemData(
-			self.itemVnum,
-			[0] * player.METIN_SOCKET_MAX_NUM,
-			[(0, 0)] * player.ATTRIBUTE_SLOT_MAX_NUM,
-		)
+		if self.description:
+			title, lines = self.description
+			self.tooltip.AutoAppendNewTextLineResize(title, self.tooltip.TITLE_COLOR)
+			self.tooltip.AppendSpace(5)
+			for line in lines:
+				self.tooltip.AutoAppendNewTextLineResize(line, self.tooltip.NORMAL_COLOR)
+		else:
+			self.tooltip.AddItemData(
+				self.itemVnum,
+				[0] * player.METIN_SOCKET_MAX_NUM,
+				[(0, 0)] * player.ATTRIBUTE_SLOT_MAX_NUM,
+			)
 		if getattr(app, "ENABLE_VIRTUAL_MARKET", False) and self.searchEvent:
 			self.tooltip.AppendSpace(5)
 			self.tooltip.AutoAppendNewTextLineResize(

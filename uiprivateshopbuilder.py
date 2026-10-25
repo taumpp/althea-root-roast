@@ -12,6 +12,8 @@ import item
 import systemSetting #김준호
 import player #김준호
 import app
+import uir1
+import uiScriptLocale
 
 if app.ENABLE_EXTENDED_BLEND_AFFECT:
 	import osfInfo
@@ -91,6 +93,13 @@ class PrivateShopAdvertisementBoard(ui.ThinBoard):
 		self.textLine.SetText(text)
 		self.textLine.UpdateRect()
 		self.SetSize(len(text)*6 + 10*2, 20)
+		if uir1.UseR1() and getattr(self, "r1", None) is None:
+			try:
+				import uishopr1
+				self.r1 = uishopr1.SkinSign(self)
+			except Exception:
+				uir1.TraceFailure("the shop sign")
+				self.r1 = None
 		self.Show()
 
 		g_privateShopAdvertisementBoardDict[vid] = self
@@ -126,6 +135,9 @@ class PrivateShopBuilder(ui.ScriptWindow):
 		self.priceInputBoard = None
 		self.title = ""
 		self.interface = None
+		self.r1 = None
+		self.r1Failed = False
+		self.__LoadR1()
 
 		if app.WJ_ENABLE_TRADABLE_ICON:
 			self.inven = None
@@ -180,7 +192,32 @@ class PrivateShopBuilder(ui.ScriptWindow):
 			self.btnOk.SetPosition(21, 380 - 40)
 			self.btnClose.SetPosition(104, 380 - 40)
 
+	def __LoadR1(self):
+		"""The R1 look (root/uishopr1.py) unless Settings -> "Starý vzhled" chose the original one; a failure traces to
+		syserr and keeps the original look."""
+		if self.r1 or self.r1Failed or not uir1.UseR1():
+			return
+		try:
+			import uishopr1
+			self.r1 = uishopr1.BuilderSkin(self, self.GetChild("board"), uiScriptLocale.PRIVATE_SHOP_TITLE,
+				self.GetChild("NameSlot"), self.nameLine, self.btnOk, self.btnClose)
+		except Exception:
+			uir1.TraceFailure("the private shop builder")
+			self.r1Failed = True
+			self.r1 = None
+
+	def __SyncLook(self):
+		wanted = uir1.UseR1() and not self.r1Failed
+		if wanted and not self.r1:
+			self.__LoadR1()
+		elif not wanted and self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
+
 	def Destroy(self):
+		if self.r1:
+			r1, self.r1 = self.r1, None
+			r1.Restore()
 		self.ClearDictionary()
 
 		self.nameLine = None
@@ -196,6 +233,7 @@ class PrivateShopBuilder(ui.ScriptWindow):
 		if len(title) > 25:
 			title = title[:22] + "..."
 
+		self.__SyncLook()
 		self.itemStock = {}
 		shop.ClearPrivateShopStock()
 		self.nameLine.SetText(title)

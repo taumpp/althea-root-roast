@@ -34,6 +34,7 @@ class RenderTargetWindow(ui.ScriptWindow):
 
 	def __init__(self): 
 		self.isLoaded = 0
+		self.r1Skin = None
 		
 		self.board = None
 		self.renderBoard = None
@@ -59,8 +60,17 @@ class RenderTargetWindow(ui.ScriptWindow):
 		self.isLoaded = 1
 
 		try:
-			pyScrLoader = ui.PythonScriptLoader()
-			pyScrLoader.LoadScriptFile(self, "UIScript/rendertargetPreview.py")
+			import uir1
+			if uir1.UseR1():
+				import uirendertargetr1
+				self.r1Skin = uirendertargetr1.Skin(self)
+		except Exception:
+			uir1.TraceFailure("RenderTargetWindow")
+
+		try:
+			if self.r1Skin is None:
+				pyScrLoader = ui.PythonScriptLoader()
+				pyScrLoader.LoadScriptFile(self, "UIScript/rendertargetPreview.py")
 		except:
 			import exception
 			exception.Abort("RenderTargetWindow.__LoadWindow error")
@@ -91,7 +101,8 @@ class RenderTargetWindow(ui.ScriptWindow):
 			self.buttonSura.Disable()
 			self.buttonShaman.Disable()
 			
-			self.board.SetCloseEvent(self.Close)
+			if self.r1Skin is None:
+				self.board.SetCloseEvent(self.Close)
 			
 		except:
 			import exception
@@ -169,6 +180,12 @@ class RenderTargetWindow(ui.ScriptWindow):
 			
 		
 	def CheckItem(self, bSetRace = True):
+		if self.currentType >= TYPE_ITEM_MAX:
+			for button in (self.buttonMale, self.buttonFemale, self.buttonWarrior,
+					self.buttonNinja, self.buttonSura, self.buttonShaman):
+				button.Disable()
+			return
+
 		if self.currentVnum > 0:
 
 			item.SelectItem(self.currentVnum)
@@ -274,13 +291,6 @@ class RenderTargetWindow(ui.ScriptWindow):
 			if bSetRace and self.currentType < TYPE_ITEM_MAX:
 				self.PreferPlayerRace()
 
-			if self.currentType >= TYPE_ITEM_MAX:
-				self.buttonMale.Disable()
-				self.buttonFemale.Disable()
-				self.buttonWarrior.Disable()
-				self.buttonNinja.Disable()
-				self.buttonSura.Disable()
-				self.buttonShaman.Disable()
 				
 		
 	#RENDER_TARGET_ITEM_TYPE
@@ -317,6 +327,10 @@ class RenderTargetWindow(ui.ScriptWindow):
 	def SetUpModel(self):
 		if self.currentType >= TYPE_ITEM_MAX: #Pet/Mount
 			renderTarget.SelectModel(RENDER_TARGET_INDEX, self.currentVnum)
+			import vipelfvisual
+			armor = vipelfvisual.PreviewArmor(self.currentVnum)
+			if armor:
+				renderTarget.ChangeArmor(RENDER_TARGET_INDEX, armor)
 		else:
 			race = self.currentRace
 			if self.currentSex == 1:
@@ -478,6 +492,7 @@ class RenderTargetWindow(ui.ScriptWindow):
 		self.savedItem = [0 for x in range(TYPE_ITEM_MAX)]
 		
 	def Close(self):
+		self.isLeftClicked = False
 		self.ClearSavedItems()
 		
 		if self.renderBoard:
@@ -486,6 +501,10 @@ class RenderTargetWindow(ui.ScriptWindow):
 		self.Hide()
 		
 	def Destroy(self):
+		self.Close()
+		if self.r1Skin:
+			self.r1Skin.Destroy()
+			self.r1Skin = None
 		self.ClearDictionary()
 		self.board = None
 		self.renderBoard = None

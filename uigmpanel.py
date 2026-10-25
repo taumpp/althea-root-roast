@@ -1,6 +1,7 @@
 import app
 import chat
 import gmmapcatalog
+import gmpanelcatalog
 import item
 import localeinfo
 import net
@@ -10,170 +11,6 @@ import uiCommon
 
 
 PUBLIC_PATH = "d:/ymir work/ui/public/"
-
-
-ACTION_ORDER = (
-	net.GM_PANEL_ACTION_ONLINE_COUNT,
-	net.GM_PANEL_ACTION_GOTO_PLAYER,
-	net.GM_PANEL_ACTION_SUMMON_PLAYER,
-	net.GM_PANEL_ACTION_DISCONNECT_PLAYER,
-	net.GM_PANEL_ACTION_MUTE_PLAYER,
-	net.GM_PANEL_ACTION_UNMUTE_PLAYER,
-	net.GM_PANEL_ACTION_TOGGLE_INVISIBILITY,
-	net.GM_PANEL_ACTION_NOTICE_MAP,
-	net.GM_PANEL_ACTION_NOTICE_GLOBAL,
-	net.GM_PANEL_ACTION_NOTICE_BIG,
-	net.GM_PANEL_ACTION_EVENT_FLAG_GET,
-	net.GM_PANEL_ACTION_EVENT_FLAG_SET,
-	net.GM_PANEL_ACTION_PURGE,
-	net.GM_PANEL_ACTION_SPAWN_MOB,
-	net.GM_PANEL_ACTION_SPAWN_GROUP,
-	net.GM_PANEL_ACTION_CREATE_ITEM,
-	net.GM_PANEL_ACTION_PLAYER_LOOKUP,
-	net.GM_PANEL_ACTION_VIEW_EQUIPMENT,
-	net.GM_PANEL_ACTION_WARP_COORDINATES,
-	net.GM_PANEL_ACTION_HEAL_PLAYER,
-	net.GM_PANEL_ACTION_KILL_PLAYER,
-	net.GM_PANEL_ACTION_SET_PLAYER_LEVEL,
-	net.GM_PANEL_ACTION_RESPAWN_AREA,
-	net.GM_PANEL_ACTION_WARP_MAP,
-)
-
-
-CATEGORY_ORDER = ("support", "players", "moderation", "announcements", "world")
-CATEGORY_LABELS = {
-	"support": "Podpora",
-	"players": "Hraci",
-	"moderation": "Moderace",
-	"announcements": "Oznameni",
-	"world": "Svet",
-}
-
-
-ROLE_LABELS = {
-	0: "Hrac",
-	1: "Low Wizard",
-	2: "Wizard",
-	3: "High Wizard",
-	4: "God",
-	5: "Implementor",
-}
-
-
-SERVER_MESSAGE_TRANSLATIONS = {
-	"GM panel capabilities loaded.": "Opravneni byla nactena ze serveru.",
-	"Action accepted; detailed output is shown in chat.": "Akce byla prijata. Podrobny vysledek je v chatu.",
-	"Your server authority does not allow this action.": "Tvoje serverova role tuto akci nepovoluje.",
-	"Please wait before sending another action.": "Pred dalsi akci chvili pockej.",
-	"Duplicate or stale request.": "Pozadavek uz byl zpracovan nebo je zastaraly.",
-	"Invalid character name.": "Jmeno postavy neni platne.",
-	"This action cannot target your own character.": "Tuto akci nelze pouzit na vlastni postavu.",
-	"You cannot target a GM with the same or higher authority.": "Nelze zasahnout GM se stejnou nebo vyssi pravomoci.",
-	"Coordinates must be between 0 and 100000 meters.": "Souradnice musi byt mezi 0 a 100000 metry.",
-	"Map index must identify a public runtime map.": "Index musi oznacovat verejnou runtime mapu.",
-	"Equipment viewer is unavailable in this server build.": "Prohlizeni vybavy neni v tomto serverovem buildu dostupne.",
-}
-
-
-ACTION_INFO = {
-	net.GM_PANEL_ACTION_ONLINE_COUNT: {
-		"label": "Online hraci", "category": "support", "description": "Vypise aktualni pocet online hracu.",
-	},
-	net.GM_PANEL_ACTION_GOTO_PLAYER: {
-		"label": "Jit k hraci", "category": "support", "fields": ("target",),
-		"description": "Teleportuje tvoji postavu k vybranemu hraci.",
-	},
-	net.GM_PANEL_ACTION_SUMMON_PLAYER: {
-		"label": "Privolat", "category": "support", "fields": ("target", "reason"), "reason": True, "confirm": True,
-		"description": "Privola hrace na tvoji aktualni pozici.",
-	},
-	net.GM_PANEL_ACTION_DISCONNECT_PLAYER: {
-		"label": "Odpojit", "category": "moderation", "fields": ("target", "reason"), "reason": True, "confirm": True,
-		"description": "Odpoji vybraneho hrace ze hry.",
-	},
-	net.GM_PANEL_ACTION_MUTE_PLAYER: {
-		"label": "Umlcet", "category": "moderation", "fields": ("target", "value", "reason"), "reason": True,
-		"valueLabel": "Delka v sekundach", "description": "Zakaze hraci chat na 60 sekund az 7 dni.",
-	},
-	net.GM_PANEL_ACTION_UNMUTE_PLAYER: {
-		"label": "Zrusit umlceni", "category": "moderation", "fields": ("target", "reason"), "reason": True,
-		"description": "Okamzite zrusi blokaci chatu.",
-	},
-	net.GM_PANEL_ACTION_TOGGLE_INVISIBILITY: {
-		"label": "Neviditelnost", "category": "world", "description": "Zapne nebo vypne GM neviditelnost.",
-	},
-	net.GM_PANEL_ACTION_NOTICE_MAP: {
-		"label": "Zprava mapy", "category": "announcements", "fields": ("argument",), "argumentLabel": "Text zpravy",
-		"description": "Posle oznameni hracum na aktualni mape.",
-	},
-	net.GM_PANEL_ACTION_NOTICE_GLOBAL: {
-		"label": "Globalni zprava", "category": "announcements", "fields": ("argument", "reason"), "reason": True,
-		"argumentLabel": "Text zpravy", "description": "Posle globalni oznameni.",
-	},
-	net.GM_PANEL_ACTION_NOTICE_BIG: {
-		"label": "Velka zprava", "category": "announcements", "fields": ("argument", "reason"), "reason": True,
-		"argumentLabel": "Text zpravy", "description": "Posle velke globalni oznameni.",
-	},
-	net.GM_PANEL_ACTION_EVENT_FLAG_GET: {
-		"label": "Event flagy", "category": "world", "description": "Vypise aktualni event flagy do chatu.",
-	},
-	net.GM_PANEL_ACTION_EVENT_FLAG_SET: {
-		"label": "Nastavit flag", "category": "world", "fields": ("argument", "value", "reason"), "reason": True,
-		"argumentLabel": "Nazev event flagu", "valueLabel": "Hodnota", "confirm": True,
-		"description": "Nastavi serverovy event flag.",
-	},
-	net.GM_PANEL_ACTION_PURGE: {
-		"label": "Purge okoli", "category": "world", "fields": ("reason",), "reason": True, "confirm": True,
-		"description": "Odstrani moby a NPC v okoli; nikdy nepouziva variantu purge all.",
-	},
-	net.GM_PANEL_ACTION_SPAWN_MOB: {
-		"label": "Spawn mob", "category": "world", "fields": ("value", "secondary", "reason"), "reason": True, "confirm": True,
-		"valueLabel": "Monstrum / VNUM", "secondaryLabel": "Pocet (1-20)", "picker": "mob",
-		"description": "Vytvori moby u tvoji postavy.",
-	},
-	net.GM_PANEL_ACTION_SPAWN_GROUP: {
-		"label": "Spawn skupiny", "category": "world", "fields": ("value", "reason"), "reason": True, "confirm": True,
-		"valueLabel": "VNUM skupiny", "description": "Vytvori skupinu mobu u tvoji postavy.",
-	},
-	net.GM_PANEL_ACTION_CREATE_ITEM: {
-		"label": "Vytvorit item", "category": "world", "fields": ("value", "secondary", "reason"), "reason": True, "confirm": True,
-		"valueLabel": "Predmet / VNUM", "secondaryLabel": "Pocet (1-200)", "picker": "item",
-		"description": "Vytvori item do inventare GM postavy.",
-	},
-	net.GM_PANEL_ACTION_PLAYER_LOOKUP: {
-		"label": "Detail hrace", "category": "players", "fields": ("target",),
-		"description": "Zjisti online stav, kanal, mapu, pozici a lokalni stav postavy.",
-	},
-	net.GM_PANEL_ACTION_VIEW_EQUIPMENT: {
-		"label": "Prohlednout vybavu", "category": "players", "fields": ("target",),
-		"description": "Otevre existujici prohlizec vybavy postavy na stejnem kanalu.",
-	},
-	net.GM_PANEL_ACTION_WARP_COORDINATES: {
-		"label": "Jit na souradnice", "category": "world", "fields": ("value", "secondary"),
-		"valueLabel": "X v metrech", "secondaryLabel": "Y v metrech",
-		"description": "Premisti GM na lokalni souradnice aktualni mapy.",
-	},
-	net.GM_PANEL_ACTION_HEAL_PLAYER: {
-		"label": "Vylecit hrace", "category": "players", "fields": ("target", "reason"), "reason": True, "confirm": True,
-		"description": "Doplni zive postave na stejnem kanalu HP a SP.",
-	},
-	net.GM_PANEL_ACTION_KILL_PLAYER: {
-		"label": "Zabit hrace", "category": "moderation", "fields": ("target", "reason"), "reason": True, "confirm": True,
-		"description": "Zabije postavu na stejnem kanalu; stejne nebo vyssi GM je chraneno.",
-	},
-	net.GM_PANEL_ACTION_SET_PLAYER_LEVEL: {
-		"label": "Nastavit level", "category": "players", "fields": ("target", "value", "reason"), "reason": True, "confirm": True,
-		"valueLabel": "Novy level", "description": "Nastavi level, prepocita staty a vynuluje aktualni EXP.",
-	},
-	net.GM_PANEL_ACTION_RESPAWN_AREA: {
-		"label": "Obnovit okoli", "category": "world", "fields": ("reason",), "reason": True, "confirm": True,
-		"description": "Znovu nacte regen mobu a NPC pouze v okoli GM.",
-	},
-	net.GM_PANEL_ACTION_WARP_MAP: {
-		"label": "Teleport na mapu", "category": "world", "fields": ("map",),
-		"description": "Vybere runtime mapu a premisti GM na jeji bezpecny serverovy start.",
-	},
-}
 
 
 def _GetMapDisplayName(mapIndex, internalName):
@@ -780,6 +617,10 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 		self.actionButtons = {}
 		self.categoryButtons = {}
 		self.fieldRows = {}
+		# What the server described of this session's actions; empty until a
+		# complete set of rows arrived.
+		self.catalogCollector = gmpanelcatalog.Collector()
+		self.catalog = self.catalogCollector.catalog
 
 		self._Build()
 		self.Hide()
@@ -889,22 +730,9 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 
 		actionPanel = self._MakePanel(12, 96, self.ACTION_PANEL_WIDTH, self.CONTENT_HEIGHT)
 		formPanel = self._MakePanel(338, 96, self.FORM_PANEL_WIDTH, self.CONTENT_HEIGHT)
+		self.actionPanel = actionPanel
 		self._MakeText(actionPanel, "Kategorie", 14, 10)
-		for index, category in enumerate(CATEGORY_ORDER):
-			x, y = self._CategoryPosition(index)
-			button = self._MakeTabButton(actionPanel, x, y,
-				CATEGORY_LABELS[category], lambda category=category: self.SelectCategory(category))
-			button.Hide()
-			self.categoryButtons[category] = button
-
 		self.categorySummary = self._MakeText(actionPanel, "", 14, 88)
-
-		for action in ACTION_ORDER:
-			info = ACTION_INFO[action]
-			button = self._MakeButton(actionPanel, 10, 112, info["label"],
-				lambda action=action: self.SelectAction(action))
-			button.Hide()
-			self.actionButtons[action] = button
 
 		self.actionTitle = self._MakeText(formPanel, "Vyber akci", 16, 12)
 		self.actionMeta = self._MakeText(formPanel, "", 16, 34)
@@ -940,15 +768,69 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 	def _CategoryPosition(self, index):
 		return 7 + (index % 3) * 101, 34 + (index // 3) * 25
 
+	def _ActionPosition(self, index, plain):
+		# Actions the catalogue does not describe are listed by number on
+		# small buttons, so every one a mask can hold stays reachable.
+		if plain:
+			return 7 + (index % 5) * 61, 112 + (index // 5) * 25
+		return 10 + (index % 2) * 151, 112 + (index // 2) * 38
+
 	def _CountAvailableActions(self, category=None):
-		return sum(1 for action in ACTION_ORDER
-			if self._CanUse(action) and (category is None or ACTION_INFO[action]["category"] == category))
+		return sum(1 for action in self.catalog.Actions(self.actionMask)
+			if category is None or self.catalog.Info(action)["category"] == category)
 
 	def _RoleName(self):
-		return ROLE_LABELS.get(self.gmLevel, "Role %d" % self.gmLevel)
+		return self.catalog.RoleName(self.gmLevel)
 
-	def _TranslateServerMessage(self, message):
-		return SERVER_MESSAGE_TRANSLATIONS.get(message, message)
+	def _DropButtons(self):
+		for button in list(self.categoryButtons.values()) + list(self.actionButtons.values()):
+			button.Hide()
+			self.children.remove(button)
+		self.categoryButtons = {}
+		self.actionButtons = {}
+
+	def _CategoryButton(self, category):
+		button = self.categoryButtons.get(category)
+		if button is None:
+			button = self._MakeTabButton(self.actionPanel, 0, 0,
+				self.catalog.CategoryLabel(category), lambda category=category: self.SelectCategory(category))
+			self.categoryButtons[category] = button
+		return button
+
+	def _ActionButton(self, action):
+		button = self.actionButtons.get(action)
+		if button is None:
+			info = self.catalog.Info(action)
+			make = self._MakeTabButton if info["plain"] else self._MakeButton
+			button = make(self.actionPanel, 0, 0, info["label"],
+				lambda action=action: self.SelectAction(action))
+			self.actionButtons[action] = button
+		return button
+
+	def SetCatalogCollector(self, collector):
+		"""Rows that arrived before the panel was built."""
+		self.catalogCollector = collector
+		self._ApplyCatalog()
+
+	def OnCatalogRow(self, row):
+		if self.catalogCollector.Row(row):
+			self._ApplyCatalog()
+
+	def _ApplyCatalog(self):
+		self.catalog = self.catalogCollector.catalog
+		self.CloseQuestion()
+		self.CloseEntityDialog()
+		self._DropButtons()
+		self.selectedAction = None
+		self.selectedCategory = None
+		if self.capabilitiesLoaded:
+			self._RefreshSummary()
+			self._RefreshActions()
+
+	def _RefreshSummary(self):
+		self.roleText.SetText("Opravneni: %s (%d)" % (self._RoleName(), self.gmLevel))
+		self.actionCountText.SetText("Dostupne akce: %d / %d" % (
+			self._CountAvailableActions(), self.catalog.Total(self.actionMask)))
 
 	def _NextRequestID(self):
 		self.requestID += 1
@@ -993,17 +875,16 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 		return self.Close()
 
 	def _RefreshActions(self):
-		availableCategories = []
-		for category in CATEGORY_ORDER:
-			if any(self._CanUse(action) and ACTION_INFO[action]["category"] == category for action in ACTION_ORDER):
-				availableCategories.append(category)
+		actions = self.catalog.Actions(self.actionMask)
+		availableCategories = self.catalog.Categories(self.actionMask)
 
 		for category, button in self.categoryButtons.items():
-			if category in availableCategories:
-				button.SetPosition(*self._CategoryPosition(availableCategories.index(category)))
-				button.Show()
-			else:
+			if category not in availableCategories:
 				button.Hide()
+		for index, category in enumerate(availableCategories):
+			button = self._CategoryButton(category)
+			button.SetPosition(*self._CategoryPosition(index))
+			button.Show()
 
 		if self.selectedCategory not in availableCategories:
 			self.selectedCategory = availableCategories[0] if availableCategories else None
@@ -1013,29 +894,32 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 			else:
 				button.SetUp()
 
-		if self.selectedCategory:
+		if self.selectedCategory is not None:
 			self.categorySummary.SetText("%s | %d dostupnych" % (
-				CATEGORY_LABELS[self.selectedCategory], self._CountAvailableActions(self.selectedCategory)))
+				self.catalog.CategoryLabel(self.selectedCategory),
+				self._CountAvailableActions(self.selectedCategory)))
 		else:
 			self.categorySummary.SetText("Zadna dostupna akce")
 
 		firstAction = None
 		visibleIndex = 0
-		for action in ACTION_ORDER:
-			button = self.actionButtons[action]
-			if self._CanUse(action) and ACTION_INFO[action]["category"] == self.selectedCategory:
-				x = 10 + (visibleIndex % 2) * 151
-				y = 112 + (visibleIndex // 2) * 38
-				button.SetPosition(x, y)
+		for action, button in self.actionButtons.items():
+			if action not in actions:
+				button.Hide()
+		for action in actions:
+			info = self.catalog.Info(action)
+			if info["category"] == self.selectedCategory:
+				button = self._ActionButton(action)
+				button.SetPosition(*self._ActionPosition(visibleIndex, info["plain"]))
 				button.Show()
 				visibleIndex += 1
 				if firstAction is None:
 					firstAction = action
-			else:
-				button.Hide()
+			elif action in self.actionButtons:
+				self.actionButtons[action].Hide()
 
 		if (self.selectedAction is None or not self._CanUse(self.selectedAction) or
-			ACTION_INFO[self.selectedAction]["category"] != self.selectedCategory):
+			self.catalog.Info(self.selectedAction)["category"] != self.selectedCategory):
 			self.SelectAction(firstAction)
 
 	def SelectCategory(self, category):
@@ -1057,30 +941,25 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 		self.selectedAction = action
 		self.actionButtons[action].Down()
 
-		info = ACTION_INFO[action]
+		info = self.catalog.Info(action)
 		self.actionTitle.SetText(info["label"])
 		self.actionMeta.SetText("Kategorie: %s | Potvrzeni: %s" % (
-			CATEGORY_LABELS[info["category"]], "ano" if info.get("confirm", False) else "ne"))
-		self.actionDescription.SetText(info.get("description", ""))
+			self.catalog.CategoryLabel(info["category"]), "ano" if info["confirm"] else "ne"))
+		self.actionDescription.SetText(info["description"])
 		self._HideAllFields()
-		if info.get("picker"):
+		if info["picker"]:
 			self.fieldRows["value"][2].SetSize(190, 17)
 			self.entitySelectButton.Show()
 			if previousAction != action:
 				self.fieldRows["value"][2].SetText("")
 				self.fieldRows["secondary"][2].SetText("1")
 
-		labels = {
-			"target": "Jmeno hrace",
-			"argument": info.get("argumentLabel", "Argument"),
-			"value": info.get("valueLabel", "Hodnota"),
-			"secondary": info.get("secondaryLabel", "Druha hodnota"),
-			"reason": "Duvod (zapisuje se do auditu)",
-		}
-		fieldY = 104
-		for fieldName in info.get("fields", ()):
+		labels = info["labels"]
+		# Without a description every input is offered, packed closer.
+		fieldY, fieldStep = (56, 46) if info["plain"] else (104, 56)
+		for fieldName in info["fields"]:
 			if fieldName == "map":
-				self.mapFieldLabel.SetText("Cilova mapa")
+				self.mapFieldLabel.SetText(labels[fieldName])
 				self.mapFieldLabel.SetPosition(16, fieldY)
 				self.mapFieldBoard.SetPosition(14, fieldY + 17)
 				self.mapFieldLabel.Show()
@@ -1093,7 +972,7 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 			board.SetPosition(14, fieldY + 17)
 			label.Show()
 			board.Show()
-			fieldY += 56
+			fieldY += fieldStep
 		self.executeButton.SetPosition(122, min(fieldY + 8, 294))
 		self.executeButton.Enable()
 
@@ -1107,38 +986,40 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 		if self.selectedAction is None or not self._CanUse(self.selectedAction):
 			return
 
-		info = ACTION_INFO[self.selectedAction]
+		info = self.catalog.Info(self.selectedAction)
+		fields = info["fields"]
 		try:
-			value = self._ReadInteger("value") if "value" in info.get("fields", ()) else 0
-			secondary = self._ReadInteger("secondary") if "secondary" in info.get("fields", ()) else 0
+			value = self._ReadInteger("value") if "value" in fields else 0
+			secondary = self._ReadInteger("secondary") if "secondary" in fields else 0
 		except ValueError:
 			self._SetStatus("Ciselna pole musi obsahovat platne cele cislo.")
 			return
 
-		target = self.fieldRows["target"][2].GetText().strip() if "target" in info.get("fields", ()) else ""
-		argument = self.fieldRows["argument"][2].GetText().strip() if "argument" in info.get("fields", ()) else ""
-		reason = self.fieldRows["reason"][2].GetText().strip() if "reason" in info.get("fields", ()) else ""
+		target = self.fieldRows["target"][2].GetText().strip() if "target" in fields else ""
+		argument = self.fieldRows["argument"][2].GetText().strip() if "argument" in fields else ""
+		reason = self.fieldRows["reason"][2].GetText().strip() if "reason" in fields else ""
 
-		if "map" in info.get("fields", ()):
+		if "map" in fields:
 			if self.selectedMapIndex <= 0:
 				self._SetStatus("Nejprve vyber cilovou mapu.")
 				return
 			value = self.selectedMapIndex
 
-		if "target" in info.get("fields", ()) and not target:
+		# Which inputs an undescribed action needs is for the server to say.
+		if "target" in fields and not target and not info["plain"]:
 			self._SetStatus("Vypln jmeno hrace.")
 			return
-		if "argument" in info.get("fields", ()) and not argument:
+		if "argument" in fields and not argument and not info["plain"]:
 			self._SetStatus("Vypln argument akce.")
 			return
-		if info.get("reason", False) and len(reason) < 3:
+		if info["reason"] and len(reason) < 3:
 			self._SetStatus("Vypln duvod alespon o trech znacich.")
 			return
 
 		payload = (value, secondary, target, argument, reason)
-		if info.get("confirm", False):
+		if info["confirm"]:
 			confirmation = "Opravdu chces provest akci '%s'?" % info["label"]
-			if info.get("picker") and value > 0:
+			if info["picker"] and value > 0:
 				entry = self.selectedEntities.get(info["picker"])
 				name = entry["name"] if entry and entry["vnum"] == value else "VNUM %d" % value
 				confirmation = "Opravdu chces pouzit %s x%d?" % (
@@ -1181,7 +1062,7 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 	def OpenEntityDialog(self):
 		if self.selectedAction is None:
 			return
-		mode = ACTION_INFO[self.selectedAction].get("picker")
+		mode = self.catalog.Info(self.selectedAction)["picker"]
 		if not mode:
 			return
 		try:
@@ -1200,7 +1081,7 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 
 	def _SelectEntity(self, mode, entry):
 		if self.selectedAction is None or \
-			ACTION_INFO[self.selectedAction].get("picker") != mode:
+			self.catalog.Info(self.selectedAction)["picker"] != mode:
 			return
 		self.selectedEntities[mode] = entry
 		self.fieldRows["value"][2].SetText(str(entry["vnum"]))
@@ -1220,7 +1101,7 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 
 	def _SendSelected(self, action, payload, confirmed=False):
 		value, secondary, target, argument, reason = payload
-		if action == net.GM_PANEL_ACTION_PURGE and confirmed:
+		if confirmed and self.catalog.Info(action)["mark"]:
 			secondary = 1
 
 		if net.SendGMPanelAction(self._NextRequestID(), action, value,
@@ -1232,9 +1113,7 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 	def OnServerResult(self, requestID, action, status, gmLevel, maskLow, maskHigh, message):
 		self.gmLevel = gmLevel
 		self.actionMask = (maskLow & 0xffffffff) | ((maskHigh & 0xffffffff) << 32)
-		self.roleText.SetText("Opravneni: %s (%d)" % (self._RoleName(), gmLevel))
-		self.actionCountText.SetText("Dostupne akce: %d / %d" % (
-			self._CountAvailableActions(), len(ACTION_ORDER)))
+		self._RefreshSummary()
 
 		if status == net.GM_PANEL_RESULT_CAPABILITIES:
 			self.capabilitiesLoaded = True
@@ -1247,10 +1126,31 @@ class GMPanelWindow(ui.BoardWithTitleBar):
 			self.actionMask = 0
 			self.openAfterQuery = False
 
-		message = self._TranslateServerMessage(message)
 		self._SetStatus(message)
 		if message:
 			chat.AppendChat(chat.CHAT_TYPE_INFO, "[GM panel] %s" % message)
 
 	def _SetStatus(self, message):
 		self.statusText.SetText(message or "")
+
+
+def NewWindow():
+	"""The panel the interface builds once the server grants an action: the R1 panel (uigmpanelr1, design B2)
+	unless Settings -> "Stary vzhled" chose the original look or R1 failed in this session; a failure while
+	building R1 is traced and this original panel is built instead."""
+	r1 = None
+	try:
+		import uigmpanelr1
+		r1 = uigmpanelr1
+		if r1.UseR1():
+			return r1.GMPanelR1Window()
+	except Exception:
+		if r1 is not None:
+			r1.Failed()
+		else:
+			try:
+				import dbg
+				dbg.TraceError("R1 look of GM panel could not be loaded, the original look is used.")
+			except Exception:
+				pass
+	return GMPanelWindow()

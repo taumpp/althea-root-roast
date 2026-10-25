@@ -2,6 +2,7 @@ import app
 import ui
 import localeInfo
 import uiScriptLocale
+import uiwheel
 from uicrimsonember import SettingsScrollBar
 
 FILE_NAME_LEN = 20
@@ -40,6 +41,8 @@ class PopupDialog(ui.ScriptWindow):
 	def __init__(self, parent):
 		#print "NEW POPUP WINDOW ------------------------------------------------------------------------------"
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'accept', child=True)
 
 		self.__Load()
 		self.__Bind()
@@ -65,9 +68,20 @@ class PopupDialog(ui.ScriptWindow):
 			exception.Abort("PopupDialog.__Bind")
 
 		self.okButton.SAFE_SetEvent(self.__OnOK)
+		# R1 dialog look (root/uir1dialog.py); "Starý vzhled" or a failure keeps the original
+		try:
+			import uir1dialog
+			uir1dialog.DressPopup(self)
+		except Exception:
+			pass
 
 	def Open(self, msg):
 		self.textLine.SetText(msg)
+		try:
+			import uir1dialog
+			uir1dialog.Layout(self)
+		except Exception:
+			pass
 		self.SetCenterPosition()
 		self.Show()
 		self.SetTop()
@@ -79,6 +93,8 @@ class FileListDialog(ui.ScriptWindow):
 	def __init__(self):
 		#print "NEW LIST DIALOG ------------------------------------------------------------------------------"
 		ui.ScriptWindow.__init__(self)
+		import uiconfirm
+		uiconfirm.Bind(self, 'okButton')
 
 		self.isLoaded=0
 		self.selectEvent=None
@@ -117,13 +133,7 @@ class FileListDialog(ui.ScriptWindow):
 	def OnMouseWheel(self, delta):
 		if not self.scrollBar:
 			return False
-		if delta > 0:
-			self.scrollBar.OnUp()
-			return True
-		if delta < 0:
-			self.scrollBar.OnDown()
-			return True
-		return False
+		return uiwheel.Scroll(self.scrollBar, delta)	# one file per notch (the list's row step)
 
 	def SAFE_SetSelectEvent(self, event):
 		self.selectEvent=ui.__mem_func__(event)

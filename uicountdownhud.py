@@ -14,20 +14,53 @@ import countdownmodel as model
 
 
 ASSET_ROOT = "d:/ymir work/ui/game/crimson_ember/countdown_hud/"
-PORTRAIT_ROOT = ASSET_ROOT + "portrait/"
+# Boban 11. 10. 2026: no black square behind the icons. The rows use the boss portraits cut out of their painted
+# backdrop (ci/build_countdown_hud_portrait_cutouts.py); the opaque "portrait/" set stays for the notifications.
+PORTRAIT_ROOT = ASSET_ROOT + "portrait_alpha/"
+ICON_COLUMN = 41                # the icon column of a row: as wide as a boss portrait
 NAME_X = 46
 TEXT_TOP = 9
 INK = (234 / 255.0, 226 / 255.0, 211 / 255.0)
 BIO = (148 / 255.0, 194 / 255.0, 172 / 255.0)
 COPPER = (214 / 255.0, 171 / 255.0, 124 / 255.0)
-READY = (234 / 255.0, 211 / 255.0, 151 / 255.0)
+# "Připraveno" is one colour in every section: the Biolog green (testers 9. 10.: the Dungeony rows were gold /
+# ivory next to the green Biolog row).
+READY = BIO
 DIM = (170 / 255.0, 160 / 255.0, 147 / 255.0)
+# The "Připraveno" mark is near-white to remain legible on the dark board.
+READY_MARK = 0xfff0ece4
 _reminderCharacter = ""
 _pendingReminders = {}
 
 
 def Text(key):
     return getattr(localeInfo, "COUNTDOWN_" + key)
+
+
+def R1ShowHint(window, text, widget):
+    """The R1 look of a HUD panel (window.r1, uihudpanelr1): the one R1 hover hint (uir1.ShowHint) at the hovered
+    control - the name, a further line under the vein - like "Nastavení lišty"; True when shown. The original look
+    keeps the panel's item tooltip board."""
+    if getattr(window, "r1", None) is None or widget is None or not text:
+        return False
+    try:
+        import uir1
+        uir1.ShowHint(None, widget, text)
+    except Exception:
+        return False
+    window.hintOwner = widget
+    return True
+
+
+def R1HideHint(window):
+    owner = getattr(window, "hintOwner", None)
+    window.hintOwner = None
+    if owner is not None:
+        try:
+            import uir1
+            uir1.HideHint(owner)
+        except Exception:
+            pass
 
 
 def ResetReminderState():
@@ -106,8 +139,12 @@ def _Bar(parent, color):
     bar = ui.Bar()
     bar.SetParent(parent)
     bar.AddFlag("not_pick")
-    # Native bar uses unsigned color, unlike the signed packed-font bridge.
-    bar.SetColor(color)
+    # wndMgr.SetColor takes a signed 32-bit ARGB int (like grp.GenerateColor returns). An unsigned 0xff......
+    # literal overflows it, the bridge silently drops the call and the bar stays its native default black, so
+    # the "ready" mark, progress fill and scrollbar were black in game. Same conversion as
+    # uicraftingcontrols.packed_color.
+    bits = int(color) & 0xffffffff
+    bar.SetColor(bits - 0x100000000 if bits & 0x80000000 else bits)
     bar.Show()
     return bar
 
@@ -146,7 +183,7 @@ class _HitArea(ui.Window):
         if self.action == "resize":
             self.owner.UpdateResizeVisual()
         if self.tooltipText:
-            self.owner.ShowHint(self.tooltipText)
+            self.owner.ShowHint(self.tooltipText, self)
 
     def OnMouseOverOut(self):
         self.hovered = False
@@ -169,7 +206,7 @@ class _Row(_HitArea):
         self.separator = _Bar(self, 0xff29231e)
         self.progressBack = _Bar(self, 0xff29231e)
         self.progress = _Bar(self, 0xffd6ab7c)
-        self.readyMark = _Bar(self, 0xffead397)
+        self.readyMark = _Bar(self, READY_MARK)
         self.children = [self.picture, self.name, self.time, self.separator,
                          self.progressBack, self.progress, self.readyMark]
         self.iconPath = None
@@ -202,7 +239,7 @@ class _Row(_HitArea):
         elif state == "locked":
             value, color = Text("LEVEL") % data["minLevel"], DIM
         else:
-            value, color = "—", DIM
+            value, color = "-", DIM
         _SetRowText(self.name, self.time, data["name"], value, width, color)
         if state == "locked":
             self.name.SetFontColor(*DIM)
@@ -223,6 +260,60 @@ class _Row(_HitArea):
             detail = Text("READY_HINT")
         self.tooltipText = "%s\n%s" % (data["name"], detail)
         self.Show()
+
+
+class _BioRow(_HitArea):
+    """One Biolog row: one per tracked research, built like a dungeon row (): the item icon centred in the
+    icon column (as wide as a dungeon portrait, 41 px), the name and the state on the same line, the divider under
+    the row and the ready mark; "Připraveno" in the ready green, a running timer in the timer ink. The 32 px item
+    icon stays 1:1 (no runtime resampling) and lies transparent on the row: no black frame under it (Boban 11. 10.
+    2026, the frame read as a black square around the icon)."""
+
+    ICON = 32
+
+    def __init__(self, owner):
+        _HitArea.__init__(self, owner, "biolog", Text("OPEN_BIO"))
+        self.picture = ui.ImageBox()
+        self.picture.SetParent(self)
+        self.picture.AddFlag("not_pick")
+        self.picture.Hide()
+        self.name = _Line(self, NAME_X, TEXT_TOP)
+        self.time = _Line(self, 0, TEXT_TOP, fontconfig.ROLE_CONTROL, BIO, True)
+        self.separator = _Bar(self, 0xff29231e)
+        self.readyMark = _Bar(self, READY_MARK)
+        self.children = [self.picture, self.name, self.time,
+                         self.separator, self.readyMark]
+        self.iconVnum = None
+        self.signature = None
+
+    def SetEntry(self, name, value, vnum, tooltip, width, state="ready"):
+        signature = (vnum, name, state, value, width)
+        self.tooltipText = tooltip
+        if signature == self.signature:
+            return              # unchanged: the R1 skin keeps its inks (it repaints on a new signature only)
+        # the R1 skin (uihudpanelr1.CountdownSkin) repaints a row when its signature changes, like a dungeon row
+        self.signature = signature
+        self.SetSize(width, model.ROW_HEIGHT)
+        color = READY if state == "ready" else COPPER if state == "cooldown" else DIM
+        _SetRowText(self.name, self.time, name, value, width, color)
+        if state == "locked":
+            self.name.SetFontColor(*DIM)
+        self.separator.SetPosition(0, model.ROW_HEIGHT - 1)
+        self.separator.SetSize(width, 1)
+        self.readyMark.SetPosition(-4, TEXT_TOP)
+        self.readyMark.SetSize(2, 15)
+        self.readyMark.Show() if state == "ready" else self.readyMark.Hide()
+        if vnum != self.iconVnum:
+            self.iconVnum = vnum
+            self.picture.Hide()
+            if vnum:
+                try:
+                    item.SelectItem(vnum)
+                    self.picture.LoadImage(item.GetIconImageFileName())
+                    self.picture.SetPosition((ICON_COLUMN - self.ICON) // 2, 2)
+                    self.picture.Show()
+                except (RuntimeError, OSError):
+                    pass
 
 
 class CountdownWindow(ui.Window):
@@ -246,10 +337,30 @@ class CountdownWindow(ui.Window):
         self.suspended = True
         self.destroyed = False
         self.bioIconVnum = None
+        self.bioRows = []
+        self.bioShown = 0
         self.tooltip = uiToolTip.ToolTip()
+        self.r1 = None
+        self.resizeState = None
         self._Build()
         self._RestoreGeometry()
+        self._ApplyR1Look()
         self.Hide()
+
+    def _ApplyR1Look(self):
+        """R1 look (root/uihudpanelr1.py, shared with Sledovaná mise) unless Settings -> "Starý vzhled" chose the
+        original one; a build failure keeps the original look (traced, not tried again in this session)."""
+        self.r1 = None
+        try:
+            import uihudpanelr1
+            self.r1 = uihudpanelr1.Build(self, uihudpanelr1.CountdownSkin, Text("TITLE"),
+                                         lambda me=weakref.proxy(self): me.settings)
+        except Exception:
+            self.r1 = None
+
+    def _SyncR1(self):
+        if self.r1:
+            self.r1.SyncSafe()
 
     def _Own(self, child):
         self.children.append(child)
@@ -270,7 +381,7 @@ class CountdownWindow(ui.Window):
         self.title.SetHorizontalAlignCenter()
         self.titleGrip = self._Own(_HitArea(self, "move", Text("MOVE"), True))
         self.titleGrip.SetPosition(0, 0)
-        self._Own(_Image(self.titleGrip, ASSET_ROOT + "grip_normal.png", 10, 5))
+        self.gripImage = self._Own(_Image(self.titleGrip, ASSET_ROOT + "grip_normal.png", 10, 5))
         self.lockButton = self._Own(ui.Button())
         self.lockButton.SetParent(self.titleBar)
         self.lockButton.SetEvent(ui.__mem_func__(self.ToggleLock))
@@ -285,13 +396,9 @@ class CountdownWindow(ui.Window):
         self._Own(_Image(self.bioBand, ASSET_ROOT + "bio_normal.png", 3, 2))
         self.bioLabel = self._Own(_Line(self.bioBand, 23, 2, fontconfig.ROLE_SECTION, color=BIO))
         _SetText(self.bioLabel, Text("BIOLOG"), BIO)
-        self.bioHit = self._Own(_HitArea(self, "biolog", Text("OPEN_BIO")))
-        self.bioHit.SetPosition(14, 49)
-        self.bioPicture = self._Own(ui.ImageBox())
-        self.bioPicture.SetParent(self.bioHit)
-        self.bioPicture.AddFlag("not_pick")
-        self.bioName = self._Own(_Line(self.bioHit, NAME_X, TEXT_TOP))
-        self.bioTime = self._Own(_Line(self.bioHit, 0, TEXT_TOP, fontconfig.ROLE_CONTROL, BIO, True))
+        # The first Biolog row; _BioRowAt adds one more per further tracked research, like the dungeon rows.
+        self.bioHit = self._BioRowAt(0)
+        self.bioPicture, self.bioName, self.bioTime = self.bioHit.picture, self.bioHit.name, self.bioHit.time
         self.dungeonBand = self._Own(_HitArea(self, "dungeons", Text("OPEN_DUNGEONS")))
         self.dungeonBand.SetPosition(13, 79)
         self.dungeonSurface = self._Own(_Image(self.dungeonBand, ASSET_ROOT + "band_dungeon.png"))
@@ -309,6 +416,13 @@ class CountdownWindow(ui.Window):
             from uisystemnotifications import SettingsLink
             self.notificationSettings = self._Own(SettingsLink(
                 self, ui.__mem_func__(self.interface.OpenSystemNotificationSettings), False))
+
+    def _BioRowAt(self, index):
+        while len(self.bioRows) <= index:
+            row = self._Own(_BioRow(self))
+            row.SetPosition(14, model.BIO_TOP + len(self.bioRows) * model.ROW_HEIGHT)
+            self.bioRows.append(row)
+        return self.bioRows[index]
 
     def _Screen(self):
         width, height = wndMgr.GetScreenWidth(), wndMgr.GetScreenHeight()
@@ -351,7 +465,8 @@ class CountdownWindow(ui.Window):
         self.dungeonBand.SetSize(w - 26, 19)
         for surface in (self.bioSurface, self.dungeonSurface):
             surface.SetScale(float(w - 26) / 196.0, 1.0)
-        self.bioHit.SetSize(w - 31, model.ROW_HEIGHT)
+        for row in self.bioRows:
+            row.SetSize(w - 31, model.ROW_HEIGHT)
         self.growLeft = s["x"] + w // 2 >= self._Screen()[0] // 2
         if self.dragState is not None and self.dragState[0] == "resize":
             self.growLeft = self.dragState[4]
@@ -371,8 +486,10 @@ class CountdownWindow(ui.Window):
             state = "pressed"
         else:
             state = "hover" if self.resizeGrip.hovered else "normal"
-        self.resizeImage.LoadImage(ASSET_ROOT + "resize_" +
-                                  ("left" if self.growLeft else "right") + "_" + state + ".png")
+        self.resizeState = ("left" if self.growLeft else "right", state)
+        self.resizeImage.LoadImage(ASSET_ROOT + "resize_" + self.resizeState[0] + "_" + state + ".png")
+        if self.r1:
+            self.r1.SyncResizeSafe()
 
     def _Catalog(self):
         if not getattr(app, "ENABLE_DUNGEON_INFO", False):
@@ -396,11 +513,16 @@ class CountdownWindow(ui.Window):
             self.HideHint()
             self.selectionSignature = selection
         expanded = not s["collapsed"]
-        for child in (self.bioBand, self.bioHit):
-            child.Show() if self.bioTracked and expanded else child.Hide()
+        # Biolog grows like Dungeony: one row per tracked research (), the Dungeony band moves below them.
+        self.bioShown = model.biolog_row_count(h, self._BiologEntryCount() if self.bioTracked else 0,
+                                               len(self.tracked))
+        self.bioBand.Show() if self.bioTracked and expanded else self.bioBand.Hide()
+        for index in range(max(self.bioShown, len(self.bioRows))):
+            row = self._BioRowAt(index)
+            row.Show() if index < self.bioShown and expanded else row.Hide()
         self.dungeonBand.Show() if self.tracked and expanded else self.dungeonBand.Hide()
-        self.dungeonBand.SetPosition(13, 87 if self.bioTracked else 28)
-        self.listTop = model.LIST_TOP if self.bioTracked else 49
+        self.dungeonBand.SetPosition(13, model.dungeon_band_top(self.bioShown))
+        self.listTop = model.dungeon_list_top(self.bioShown)
         _SetText(self.title, Text("TITLE"))
         _Fit(self.title, self.title.GetText(), max(20, w - 146))
         self.visibleRows = model.visible_count(h, len(self.tracked), self.listTop)
@@ -431,6 +553,7 @@ class CountdownWindow(ui.Window):
             self.scroll.Hide()
         if self.bioTracked:
             self._RefreshBiolog(now)
+        self._SyncR1()
 
     def _HUDEnabled(self, category):
         callback = getattr(self.interface, "IsCountdownCategoryEnabled", None)
@@ -445,6 +568,12 @@ class CountdownWindow(ui.Window):
         checkbox = getattr(bio, "checkBoxCall", None)
         return bool(checkbox and checkbox.IsDown() and
                     getattr(bio, "dataKnown", False) and bio.bioLevel > 0)
+
+    def _BiologEntryCount(self):
+        bio = getattr(self.interface, "wndBio", None)
+        if bio and hasattr(bio, "GetTrackedResearches"):
+            return max(1, len(bio.GetTrackedResearches()))
+        return 1
 
     def RefreshSelection(self, reveal=False):
         self._Refresh()
@@ -462,53 +591,49 @@ class CountdownWindow(ui.Window):
 
     def _RefreshBiolog(self, now):
         bio = getattr(self.interface, "wndBio", None)
-        name, value, vnum = Text("NO_BIO"), "—", 0
+        width = self.settings["width"] - 31
         tracked = bio.GetTrackedResearches() if bio and hasattr(bio, "GetTrackedResearches") else []
-        detailLines = []
+        entries = []
         if tracked:
             import biologresearchmodel as researchModel
             tracked.sort(key=lambda row: (max(0, row["due"] - now), row["index"]))
             for row in tracked:
                 state = researchModel.phase(row)
                 remaining = max(0, row["due"] - now)
-                rowValue = Text("STONE") if state == "stone" else Text("REWARD") if state == "gift" else model.format_time(remaining) if remaining else Text("READY")
-                detailLines.append("%s: %s" % (item.GetItemNameByVnum(row["vnum"]), rowValue))
-            row = tracked[0]
-            vnum = row["stone"] if researchModel.phase(row) == "stone" else row["vnum"]
-            name = item.GetItemNameByVnum(row["vnum"])
-            if len(tracked) > 1:
-                name += " (+%d)" % (len(tracked) - 1)
-            value = detailLines[0].split(": ", 1)[1]
-        elif bio and not hasattr(bio, "GetTrackedResearches") and getattr(bio, "dataKnown", False) and 0 < bio.bioLevel:
-            import uiBiolog
-            data = uiBiolog.bio_data[bio.bioLevel]
-            vnum = data[1]
-            if bio.mode in ("stone", "gift"):
-                vnum = data[5] or vnum
-            name = item.GetItemNameByVnum(vnum)
-            if player.GetStatus(player.LEVEL) < data[0]:
-                value = Text("LEVEL") % data[0]
-            elif bio.mode == "stone":
-                value = Text("STONE")
-            elif bio.mode == "gift":
-                value = Text("REWARD")
-            elif bio.mode == "mission":
-                remaining = max(0, bio.bioTime - now)
-                value = model.format_time(remaining) if remaining else Text("READY")
-        _SetRowText(self.bioName, self.bioTime, name, value,
-                    self.settings["width"] - 31, BIO)
-        self.bioHit.tooltipText = "\n".join(detailLines) if detailLines else "%s\n%s" % (name, value)
-        if vnum != self.bioIconVnum:
-            self.bioIconVnum = vnum
-            self.bioPicture.Hide()
-            if vnum:
-                try:
-                    item.SelectItem(vnum)
-                    self.bioPicture.LoadImage(item.GetIconImageFileName())
-                    self.bioPicture.SetPosition(4, 2)
-                    self.bioPicture.Show()
-                except (RuntimeError, OSError):
-                    pass
+                value = Text("STONE") if state == "stone" else Text("REWARD") if state == "gift" else model.format_time(remaining) if remaining else Text("READY")
+                name = item.GetItemNameByVnum(row["vnum"])
+                vnum = row["stone"] if state == "stone" else row["vnum"]
+                entries.append((name, value, vnum, "cooldown" if state not in ("stone", "gift") and remaining else "ready"))
+        else:
+            name, value, vnum, rowState = Text("NO_BIO"), "-", 0, "unknown"
+            if bio and not hasattr(bio, "GetTrackedResearches") and getattr(bio, "dataKnown", False) and 0 < bio.bioLevel:
+                import uiBiolog
+                data = uiBiolog.bio_data[bio.bioLevel]
+                vnum = data[1]
+                if bio.mode in ("stone", "gift"):
+                    vnum = data[5] or vnum
+                name = item.GetItemNameByVnum(vnum)
+                if player.GetStatus(player.LEVEL) < data[0]:
+                    value, rowState = Text("LEVEL") % data[0], "locked"
+                elif bio.mode == "stone":
+                    value, rowState = Text("STONE"), "ready"
+                elif bio.mode == "gift":
+                    value, rowState = Text("REWARD"), "ready"
+                elif bio.mode == "mission":
+                    remaining = max(0, bio.bioTime - now)
+                    value = model.format_time(remaining) if remaining else Text("READY")
+                    rowState = "cooldown" if remaining else "ready"
+            entries.append((name, value, vnum, rowState))
+        shown = max(1, self.bioShown)
+        hidden = entries[shown:]
+        for index, (name, value, vnum, state) in enumerate(entries[:shown]):
+            tooltip = "%s\n%s" % (name, value)
+            if hidden and index == shown - 1:
+                # Only when the panel is too low for every row: the last row names how many more are tracked.
+                name += " (+%d)" % len(hidden)
+                tooltip = "\n".join("%s: %s" % (n, v) for n, v, unused, unusedState in entries[index:])
+            self._BioRowAt(index).SetEntry(name, value, vnum, tooltip, width, state)
+        self.bioIconVnum = self.bioHit.iconVnum
 
     def Tick(self):
         if self.destroyed or self.suspended:
@@ -662,8 +787,10 @@ class CountdownWindow(ui.Window):
                 if page:
                     page.OpenTrackedDungeon(action[1])
 
-    def ShowHint(self, text):
+    def ShowHint(self, text, widget=None):
         if self.dragState is not None:
+            return
+        if R1ShowHint(self, text, widget):
             return
         self.tooltip.ClearToolTip()
         self.tooltip.SetThinBoardSize(uiToolTip.ToolTip.TOOL_TIP_WIDTH)
@@ -673,6 +800,7 @@ class CountdownWindow(ui.Window):
         self.tooltip.ShowToolTip()
 
     def HideHint(self):
+        R1HideHint(self)
         if self.tooltip:
             self.tooltip.HideToolTip()
 
@@ -683,6 +811,9 @@ class CountdownWindow(ui.Window):
         self.Suspend()
         self.Save()
         self.destroyed = True
+        if self.r1:
+            self.r1.Destroy()
+            self.r1 = None
         for row in self.rows:
             row.Hide()
             row.children = []
